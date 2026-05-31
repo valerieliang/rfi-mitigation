@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfi_gen"
+version = "0.1.0"
+description = "Synthetic RFI generators for slow-time eigenvalue knee detection in SAR"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+]
+
+[project.optional-dependencies]
+canvas = ["h5py"]
+dev = ["matplotlib"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["rfi_gen*"]
