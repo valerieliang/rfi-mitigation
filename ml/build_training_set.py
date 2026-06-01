@@ -96,6 +96,84 @@ def draw_style_params(style, rng):
 
 
 # ----------------------------------------------------------------------
+# Targeted knee placement (for balanced generation)
+# ----------------------------------------------------------------------
+# Empirically calibrated parameter -> knee mappings (M = 32, K = 128):
+#   multitone : knee == n_tones, exact, over 1..~28
+#   wideband  : knee ~= n_modes, over 3..6
+#   pulsed    : knee ~= round(duty * M), over ~6..26 at low coherence
+#   chirp     : knee grows with sweep, ~14 (sweep 0.4) to 32 (sweep 1.0)
+#   cw_tone   : knee 1 always
+#   subtle    : knee == n_tones (1 or 2), faint by construction
+#
+# style_for_knee picks, for a desired knee index, one of the styles able
+# to produce it (with params set to hit it) so that every knee value has
+# real style variety rather than a single generator. The actual knee is
+# still measured after generation; this only biases the draw.
+
+def _chirp_sweep_for_knee(target, M):
+    """Invert the chirp sweep -> knee trend (roughly linear in [14, M])."""
+    lo_knee, hi_knee = 14, M
+    lo_sw, hi_sw = 0.4, 1.0
+    t = (np.clip(target, lo_knee, hi_knee) - lo_knee) / max(hi_knee - lo_knee, 1)
+    return float(lo_sw + t * (hi_sw - lo_sw))
+
+
+def style_for_knee(target, M, rng, allowed=None):
+    """
+    Return (style, params) likely to yield a knee at `target`.
+
+    Several styles are offered per knee band so the balanced set keeps
+    the RFI-type variety. If `allowed` is given, only those styles are
+    considered (falling back to multitone, which can hit any index).
+    """
+    target = int(np.clip(target, 1, M))
+    candidates = []
+
+    if target == 1:
+        candidates += [("cw_tone", {"doppler": float(rng.uniform(-0.3, 0.3))}),
+                       ("subtle", {"n_tones": 1}),
+                       ("multitone", {"n_tones": 1,
+                                      "doppler_spread": 0.6})]
+    elif target == 2:
+        candidates += [("multitone", {"n_tones": 2, "doppler_spread": 0.7}),
+                       ("subtle", {"n_tones": 2})]
+    elif 3 <= target <= 6:
+        candidates += [("multitone", {"n_tones": target,
+                                      "doppler_spread": 0.8}),
+                       ("wideband", {"n_modes": target, "decay_db": 2.0,
+                                     "doppler_spread": 0.9})]
+    elif 7 <= target <= 12:
+        candidates += [("multitone", {"n_tones": target,
+                                      "doppler_spread": 0.9}),
+                       ("pulsed", {"duty": target / float(M),
+                                   "coherence": float(rng.uniform(0.1, 0.3)),
+                                   "doppler": float(rng.uniform(-0.3, 0.3))})]
+    elif 13 <= target <= 20:
+        candidates += [("pulsed", {"duty": target / float(M),
+                                   "coherence": float(rng.uniform(0.1, 0.3)),
+                                   "doppler": float(rng.uniform(-0.3, 0.3))}),
+                       ("multitone", {"n_tones": target,
+                                      "doppler_spread": 0.95})]
+    else:  # 21 .. M
+        candidates += [("chirp", {"sweep": _chirp_sweep_for_knee(target, M),
+                                  "f0": float(rng.uniform(-0.1, 0.1))}),
+                       ("pulsed", {"duty": target / float(M),
+                                   "coherence": float(rng.uniform(0.1, 0.3)),
+                                   "doppler": float(rng.uniform(-0.3, 0.3))})]
+
+    if allowed is not None:
+        candidates = [c for c in candidates if c[0] in allowed]
+    if not candidates:
+        # multitone can hit essentially any index; safe fallback.
+        candidates = [("multitone",
+                       {"n_tones": int(np.clip(target, 1, M - 1)),
+                        "doppler_spread": 0.9})]
+
+    return candidates[int(rng.integers(len(candidates)))]
+
+
+# ----------------------------------------------------------------------
 # Clean-block sources
 # ----------------------------------------------------------------------
 def synthetic_strip(n_cpi, M, K, rng):
@@ -135,12 +213,20 @@ def cpi_record(cov):
     }
 
 
-def build_tb(blocks, scenario, styles, inr_range, M, K, rng, tb_id):
+def build_tb(blocks, scenario, styles, inr_range, M, K, rng, tb_id,
+             target_knee=None, inr_fixed=None):
     """
     Build all CPI records for one threshold block.
 
-    blocks   : list of n_cpi clean (M, K) complex arrays
-    scenario : "clean" | "uniform" | "intermittent"
+    blocks      : list of n_cpi clean (M, K) complex arrays
+    scenario    : "clean" | "uniform" | "intermittent"
+    target_knee : if set (balanced mode), choose a style + params aimed
+                  at this knee index via style_for_knee, instead of a
+                  uniform random style. Ignored for the clean scenario.
+    inr_fixed   : if set, use this INR (with small jitter) instead of a
+                  uniform draw over inr_range; lets balanced mode hold
+                  obviousness roughly constant while sweeping the knee.
+
     Returns a list of per-CPI record dicts (global features filled in by
     the caller after the whole TB is known).
     """
@@ -153,9 +239,13 @@ def build_tb(blocks, scenario, styles, inr_range, M, K, rng, tb_id):
     rfi_mask = np.zeros(n_cpi, dtype=bool)
 
     if scenario != "clean":
-        style = str(rng.choice(styles))
-        params = draw_style_params(style, rng)
-        base_inr = float(rng.uniform(*inr_range))
+        if target_knee is not None:
+            style, params = style_for_knee(target_knee, M, rng, allowed=styles)
+        else:
+            style = str(rng.choice(styles))
+            params = draw_style_params(style, rng)
+        base_inr = (float(inr_fixed) if inr_fixed is not None
+                    else float(rng.uniform(*inr_range)))
         gen = get_generator(style, inr_db=base_inr, **params)
         if scenario == "uniform":
             rfi_mask[:] = True
@@ -215,6 +305,140 @@ def pick_scenario(rng, clean_frac, intermittent_frac):
     return "uniform"
 
 
+def _strip_provider(tb_jobs_iter, args, M, K, rng):
+    """
+    Yield clean CPI strips one TB at a time, transparently handling both
+    synthetic and real sources. Returns (granule_name, blocks) or
+    (granule_name, None) when a real scene was too small.
+    """
+    for job in tb_jobs_iter:
+        if job is None:
+            yield "synthetic", synthetic_strip(args.cpi_per_tb, M, K, rng)
+        else:
+            blocks = real_strip(os.path.join(args.data_dir, job),
+                                args.cpi_per_tb, M, K, rng)
+            yield job, blocks
+
+
+def build_balanced(tb_jobs, args, M, K, rng):
+    """
+    Quota-driven generation: aim for a roughly uniform number of CPI
+    samples in each knee band (including a clean band), rather than
+    accepting whatever the styles happen to produce.
+
+    How it works
+    ------------
+    The knee axis [0, M] is split into bands (see _bands). Each band has
+    a target count. For every TB we pick the most under-filled band and
+    steer generation toward it: a clean band -> a clean TB; an RFI band
+    -> a TB whose style and parameters are chosen (via style_for_knee)
+    to land in that band. After the TB is built, each CPI is binned by
+    its ACTUAL measured label; CPIs whose band is already full are
+    dropped so no band overflows badly. This corrects for any residual
+    mismatch between the targeted and realized knee.
+
+    A configurable share of RFI TBs are made "intermittent" so the
+    global F factor keeps a realistic, discriminative spread; their
+    clean CPIs count toward the clean band and their RFI CPIs toward
+    whatever band they realize.
+    """
+    bands = _bands(M)
+    n_bands = len(bands)
+
+    # Target per band. The clean band shares the same target as the rest
+    # unless the user pins a clean fraction.
+    total_target = args.target_per_band * n_bands
+    target = {i: args.target_per_band for i in range(n_bands)}
+    if args.clean_frac is not None:
+        clean_idx = 0  # band 0 is the clean band by construction
+        target[clean_idx] = int(round(args.clean_frac * total_target))
+
+    counts = {i: 0 for i in range(n_bands)}
+    overflow = max(1, int(round(args.cpi_per_tb * 0.5)))  # allowed slack
+
+    def neediest_band():
+        # Most under-filled band by remaining absolute count.
+        deficits = [(target[i] - counts[i], i) for i in range(n_bands)]
+        deficits.sort(reverse=True)
+        return deficits[0][1] if deficits[0][0] > 0 else None
+
+    def band_of(label):
+        for i, (lo, hi) in enumerate(bands):
+            if lo <= label <= hi:
+                return i
+        return n_bands - 1
+
+    provider = _strip_provider(iter(tb_jobs), args, M, K, rng)
+    all_records = []
+    tb_id = 0
+    made = 0
+    max_tbs = args.max_tbs if args.max_tbs > 0 else len(tb_jobs)
+
+    while made < max_tbs:
+        nb = neediest_band()
+        if nb is None:
+            break  # every band met its target
+
+        try:
+            granule, blocks = next(provider)
+        except StopIteration:
+            # Real sources exhausted; top up with synthetic strips.
+            granule, blocks = "synthetic", synthetic_strip(
+                args.cpi_per_tb, M, K, rng)
+        if blocks is None:
+            continue  # scene too small
+
+        if nb == 0:
+            scenario = "clean"
+            target_knee = None
+        else:
+            lo, hi = bands[nb]
+            target_knee = int(rng.integers(lo, hi + 1))
+            scenario = ("intermittent"
+                        if rng.random() < args.intermittent_frac
+                        else "uniform")
+
+        recs = build_tb(blocks, scenario, args._styles, args._inr_range,
+                        M, K, rng, tb_id, target_knee=target_knee,
+                        inr_fixed=None)
+
+        # Bin by actual label; keep only CPIs whose band still has room.
+        kept = []
+        for r in recs:
+            b = band_of(r["label"])
+            if counts[b] < target[b] + overflow:
+                counts[b] += 1
+                kept.append(r)
+        for r in kept:
+            r["granule"] = granule
+        all_records.extend(kept)
+        tb_id += 1
+        made += 1
+
+        if made % 25 == 0:
+            filled = sum(1 for i in range(n_bands)
+                         if counts[i] >= target[i])
+            print("  ... {} TBs, {}/{} bands filled".format(
+                made, filled, n_bands))
+
+    return all_records, tb_id, bands, counts, target
+
+
+def _bands(M):
+    """Knee bands used by balanced generation. Band 0 is the clean band."""
+    return [
+        (0, 0),
+        (1, 1),
+        (2, 2),
+        (3, 5),
+        (6, 9),
+        (10, 14),
+        (15, 20),
+        (21, 26),
+        (27, M),
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Build a knee-classifier training set by injecting "
@@ -240,12 +464,27 @@ def main():
                     help="Comma list of styles, or 'all'.")
     ap.add_argument("--inr-min", type=float, default=2.0)
     ap.add_argument("--inr-max", type=float, default=30.0)
-    ap.add_argument("--clean-frac", type=float, default=0.25,
-                    help="Fraction of TBs that are fully clean.")
+    ap.add_argument("--clean-frac", type=float, default=None,
+                    help="Balanced mode: fraction of the total target that "
+                         "should be clean (label 0); default gives the "
+                         "clean band the same target as every other band. "
+                         "Legacy mode: fraction of TBs that are fully clean "
+                         "(defaults to 0.25 there).")
     ap.add_argument("--intermittent-frac", type=float, default=0.4,
                     help="Among RFI TBs, fraction that are intermittent.")
     ap.add_argument("--val-frac", type=float, default=0.2,
                     help="Validation fraction (split by TB to avoid leak).")
+    # Balanced (quota-driven) generation.
+    ap.add_argument("--balance", dest="balance", action="store_true",
+                    default=True,
+                    help="Quota-driven balanced generation (default ON).")
+    ap.add_argument("--no-balance", dest="balance", action="store_false",
+                    help="Disable balancing; use legacy random scenarios.")
+    ap.add_argument("--target-per-band", type=int, default=300,
+                    help="Balanced mode: target CPI samples per knee band.")
+    ap.add_argument("--max-tbs", type=int, default=0,
+                    help="Balanced mode: hard cap on TBs built "
+                         "(0 = until every band meets target).")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--figure", action="store_true",
                     help="Write a diagnostic PNG next to the output.")
@@ -263,12 +502,23 @@ def main():
         if bad:
             sys.exit("unknown styles: {}".format(bad))
 
-    # Decide the TB work list as (granule_name_or_None) entries.
-    tb_jobs = []
+    # Stash resolved options for the balanced scheduler.
+    args._styles = styles
+    args._inr_range = inr_range
+
+    # Decide the TB work pool as (granule_name_or_None) entries. In
+    # balanced mode the scheduler stops on quota, so the pool is sized
+    # generously and recycled if needed; in legacy mode it is the exact
+    # list of TBs to build.
     if args.synthetic or not args.qc_csv:
         if not args.synthetic:
             print("No --qc-csv given; falling back to synthetic mode.")
-        tb_jobs = [None] * args.n_tbs
+        if args.balance:
+            # Large synthetic pool; scheduler caps it by quota / max-tbs.
+            pool_size = args.max_tbs if args.max_tbs > 0 else 100000
+            tb_jobs = [None] * pool_size
+        else:
+            tb_jobs = [None] * args.n_tbs
     else:
         from rfi_gen import canvas
         clean_files = canvas.read_clean_list(args.qc_csv)
@@ -279,26 +529,46 @@ def main():
                      "Use --synthetic to build without real data."
                      .format(args.data_dir))
         print("CLEAN granules available: {}".format(len(present)))
-        for f in present:
-            tb_jobs.extend([f] * args.tbs_per_file)
-
-    # Build every threshold block.
-    all_records = []
-    tb_id = 0
-    for job in tb_jobs:
-        scenario = pick_scenario(rng, args.clean_frac, args.intermittent_frac)
-        if job is None:
-            blocks = synthetic_strip(args.cpi_per_tb, M, K, rng)
+        if args.balance:
+            # Recycle granules round-robin into a generous pool; each TB
+            # samples a random window so repeats still differ.
+            pool_size = args.max_tbs if args.max_tbs > 0 else 100000
+            tb_jobs = [present[i % len(present)] for i in range(pool_size)]
+            rng.shuffle(tb_jobs)
         else:
-            blocks = real_strip(os.path.join(args.data_dir, job),
-                                args.cpi_per_tb, M, K, rng)
-            if blocks is None:
-                continue  # scene too small; skip
-        recs = build_tb(blocks, scenario, styles, inr_range, M, K, rng, tb_id)
-        for r in recs:
-            r["granule"] = job if job is not None else "synthetic"
-        all_records.extend(recs)
-        tb_id += 1
+            tb_jobs = []
+            for f in present:
+                tb_jobs.extend([f] * args.tbs_per_file)
+
+    # Build threshold blocks.
+    if args.balance:
+        print("Balanced generation: target {} samples/band, {} bands."
+              .format(args.target_per_band, len(_bands(M))))
+        all_records, tb_id, bands, counts, target = build_balanced(
+            tb_jobs, args, M, K, rng)
+        print("Per-band fill (band -> count / target):")
+        for i, (lo, hi) in enumerate(bands):
+            tag = "clean" if i == 0 else "{}-{}".format(lo, hi)
+            print("  {:>7}: {} / {}".format(tag, counts[i], target[i]))
+    else:
+        clean_frac = 0.25 if args.clean_frac is None else args.clean_frac
+        all_records = []
+        tb_id = 0
+        for job in tb_jobs:
+            scenario = pick_scenario(rng, clean_frac, args.intermittent_frac)
+            if job is None:
+                blocks = synthetic_strip(args.cpi_per_tb, M, K, rng)
+            else:
+                blocks = real_strip(os.path.join(args.data_dir, job),
+                                    args.cpi_per_tb, M, K, rng)
+                if blocks is None:
+                    continue  # scene too small; skip
+            recs = build_tb(blocks, scenario, styles, inr_range, M, K,
+                            rng, tb_id)
+            for r in recs:
+                r["granule"] = job if job is not None else "synthetic"
+            all_records.extend(recs)
+            tb_id += 1
 
     if not all_records:
         sys.exit("No samples were built. Check inputs.")
@@ -371,6 +641,8 @@ def main():
         "norm_mean": mean.tolist(), "norm_std": std.tolist(),
         "label_histogram": label_hist,
         "mode": "synthetic" if (args.synthetic or not args.qc_csv) else "real",
+        "balanced": bool(args.balance),
+        "target_per_band": (args.target_per_band if args.balance else None),
     }
     json_path = os.path.splitext(args.out)[0] + "_meta.json"
     with open(json_path, "w") as f:
