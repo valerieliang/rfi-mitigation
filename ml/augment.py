@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-build_training_set.py
+augment.py
 
 Assemble a labeled training set for the knee classifier in model.py by
 overlaying synthetic RFI (from the rfi_gen package) onto clean NISAR
@@ -445,12 +445,27 @@ def main():
                     "synthetic RFI into clean NISAR slow-time blocks.")
     ap.add_argument("--qc-csv", default=None,
                     help="QC summary CSV listing CLEAN granules.")
+    ap.add_argument("--split-csv", default=None, metavar="scene_split.csv",
+                    help="Scene-level split manifest produced by split_scenes.py. "
+                         "When provided, only files tagged with --split are used. "
+                         "Use this instead of separate train_dir/val_dir folders.")
+    ap.add_argument("--split", default=None, choices=["train", "val"],
+                    help="Which split to build ('train' or 'val'). "
+                         "Requires --split-csv.")
     ap.add_argument("--data-dir", default=".",
                     help="Directory holding the granule .h5 files.")
     ap.add_argument("--synthetic", action="store_true",
                     help="Use synthetic clean blocks instead of real data.")
     ap.add_argument("--out", default="training_set.npz",
                     help="Output .npz path.")
+    ap.add_argument("--norm-stats", default=None, metavar="<train_set.npz>",
+                    help="Load normalization stats (norm_mean, norm_std) from "
+                         "a pre-computed training set instead of computing "
+                         "from this dataset. Use this when building validation "
+                         "sets: pass your train_set.npz here so val features "
+                         "are standardized using train statistics (proper "
+                         "cross-validation). If not set, stats are computed "
+                         "from the current dataset.")
     ap.add_argument("--M", type=int, default=32, help="CPI size (pulses).")
     ap.add_argument("--k-range", type=int, default=128,
                     help="Range samples per CPI block.")
@@ -510,25 +525,41 @@ def main():
     # balanced mode the scheduler stops on quota, so the pool is sized
     # generously and recycled if needed; in legacy mode it is the exact
     # list of TBs to build.
-    if args.synthetic or not args.qc_csv:
+    if args.synthetic or not (args.qc_csv or args.split_csv):
         if not args.synthetic:
-            print("No --qc-csv given; falling back to synthetic mode.")
+            print("No --qc-csv or --split-csv given; falling back to synthetic mode.")
         if args.balance:
-            # Large synthetic pool; scheduler caps it by quota / max-tbs.
             pool_size = args.max_tbs if args.max_tbs > 0 else 100000
             tb_jobs = [None] * pool_size
         else:
             tb_jobs = [None] * args.n_tbs
     else:
         from rfi_gen import canvas
-        clean_files = canvas.read_clean_list(args.qc_csv)
+
+        # Build the list of candidate filenames from whichever CSV was given.
+        if args.split_csv:
+            # scene_split.csv from split_scenes.py: columns filename, split, ...
+            import csv as _csv
+            with open(args.split_csv, newline="") as f:
+                rows = list(_csv.DictReader(f))
+            if args.split:
+                rows = [r for r in rows if r.get("split") == args.split]
+                print("Split '{}': {} scenes from {}".format(
+                    args.split, len(rows), args.split_csv))
+            else:
+                print("No --split given; using all {} scenes from {}".format(
+                    len(rows), args.split_csv))
+            clean_files = [r["filename"] for r in rows]
+        else:
+            clean_files = canvas.read_clean_list(args.qc_csv)
+
         present = [f for f in clean_files
                    if os.path.exists(os.path.join(args.data_dir, f))]
         if not present:
-            sys.exit("No CLEAN granules from the CSV were found in {}. "
-                     "Use --synthetic to build without real data."
+            sys.exit("No granules found in {}. "
+                     "Check --data-dir and --split-csv/--qc-csv."
                      .format(args.data_dir))
-        print("CLEAN granules available: {}".format(len(present)))
+        print("Granules available: {}".format(len(present)))
         if args.balance:
             # Recycle granules round-robin into a generous pool; each TB
             # samples a random window so repeats still differ.
@@ -601,11 +632,23 @@ def main():
     is_val = np.array([1 if t in val_tbs else 0 for t in tb_ids],
                       dtype=np.int32)
 
-    # Standardize global features using TRAIN rows only.
+    # Standardize global features. If --norm-stats is set, load pre-computed
+    # stats (from the training set) for proper cross-validation. Otherwise
+    # compute from the current dataset.
     train_mask = is_val == 0
-    mean = global_raw[train_mask].mean(axis=0)
-    std = global_raw[train_mask].std(axis=0)
-    std[std < 1e-6] = 1.0
+    if args.norm_stats:
+        # Load normalization parameters from a pre-computed set.
+        d_norm = np.load(args.norm_stats, allow_pickle=True)
+        mean = d_norm["norm_mean"]
+        std = d_norm["norm_std"]
+        print("Loaded normalization stats from: {}".format(args.norm_stats))
+    else:
+        # Compute from current training data.
+        mean = global_raw[train_mask].mean(axis=0)
+        std = global_raw[train_mask].std(axis=0)
+        std[std < 1e-6] = 1.0
+        print("Computed normalization stats from current training data.")
+    
     global_input = ((global_raw - mean) / std).astype(np.float32)
 
     # Save.
