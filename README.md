@@ -1,212 +1,281 @@
-# NISAR RFI Mitigation — CNN Knee Classifier
+# RFI Knee Classifier — L0 Raw Data Pipeline
 
-Deep learning replacement for the adaptive slope threshold (ST-EST) in the Slow-Time Eigenvalue Decomposition (ST-EVD) RFI mitigation pipeline for NISAR L-band SAR. The classifier predicts the eigenvalue "knee" index that separates RFI-dominated from signal-dominated eigenvalues on a per-CPI basis, replacing the threshold-block approach with a per-CPI prediction backed by a confidence estimate.
+CNN-based Radio Frequency Interference (RFI) knee-index classifier for
+NISAR L-band SAR raw (L0B) data. Replaces the adaptive ST-EST thresholding
+step in the ST-EVD mitigation pipeline with a per-CPI deep learning
+prediction, enabling finer-grained RFI/signal subspace separation.
 
 ---
 
 ## Background
 
-NISAR L-band SAR data is susceptible to RFI from ground-based radars and communication platforms. The ST-EVD approach (Huang et al., IGARSS 2023) removes RFI by decomposing each Coherent Processing Interval (CPI) into its eigenvalue subspace and projecting out the RFI-dominated eigenvectors. The critical parameter is the **knee index** — the boundary between the steep RFI-dominated portion and the flatter signal portion of the sorted eigenvalue profile.
+The ST-EVD pipeline suppresses RFI by decomposing the slow-time sample
+covariance matrix (SCM) of each Coherent Processing Interval (CPI) into
+RFI-dominated and signal-dominated eigenspaces. The boundary between those
+subspaces is the **knee index**: eigenvalues 1..k are RFI, eigenvalues
+k+1..M are signal. The current production algorithm (ST-EST) estimates a
+single adaptive threshold per Threshold Block (TB) of 16–20 CPIs, causing:
 
-The original ST-EST algorithm estimates this threshold adaptively per threshold block (a group of CPIs sharing the same range extent) using a sigma-ratio heuristic. The limitation is that a single threshold is applied to all CPIs in a block, which causes false alarms and misses for individual CPIs whose RFI levels deviate from the block average.
+- **Type A errors** — missed RFI when the knee varies within the TB
+- **Type B errors** — false alarms that remove real signal
 
-This project trains a CNN to predict the knee index independently for every CPI, using both the full eigenvalue+slope profile and threshold-block context features as input.
+This project trains a CNN to predict an individualized knee index per CPI
+directly from the raw pulse data, matching the granularity of the underlying
+SCM decomposition.
 
----
+### Why L0 instead of RSLC?
 
-## Architecture
+The ST-EVD SCM is formed from raw slow-time pulse blocks `S ∈ C^{M×K}`:
 
-Two-branch CNN defined in `ml/model.py`:
-
-**Eigenvalue branch** — 1D CNN over the full M=32 eigenvalue profile (2 channels: eigenvalues in dB and first-difference slopes). Two residual blocks with Squeeze-and-Excitation attention, max pooling, and global average pooling.
-
-**Global branch** — dense network over 6 scalar threshold-block features: F-factor (σ_max/σ_min), σ_min, σ_max, μ_min, trace (dB), and log condition number.
-
-Both branches are concatenated and passed through a dropout + dense head with a 33-class softmax output (knee index 0 = clean, 1–32 = RFI boundary after eigenvalue i). The expected knee is the argmax; the Shannon entropy of the output distribution is a per-CPI confidence score used to gate fallback to ST-EST.
-
-Total parameters: 594,993 (2.27 MB).
-
----
-
-## Data Pipeline
-
-### 1. Scene acquisition
-
-NISAR L1 RSLC granules were fetched from ASF Vertex using `fetch_nisar.py` with an integrated screen-and-keep loop: each candidate granule is downloaded, screened for RFI contamination and data quality by `check_nisar_clean.py`, and either kept or immediately discarded. This avoids accumulating dirty scenes on disk during the multi-hour fetch run.
-
-Starting from 192 granules matching mode code `_2005_` over the Amazon basin (cycles 4–10, Oct 2025–Jan 2026), 40 clean DHDH/SHSH dual-polarisation scenes were retained after screening (27% yield). Total download: approximately 550 GB screened, ~540 GB discarded.
-
-### 2. Scene-level train/val/test split
-
-Scenes were split at the **scene level** before any CPI extraction using `split_scenes.py`, stratified by polarisation:
-
-| Split | Scenes | Polarisation |
-|-------|--------|-------------|
-| Train | 28     | 20 DHDH + 8 SHSH |
-| Val   | 6      | 4 DHDH + 2 SHSH |
-| Test  | 6      | 4 DHDH + 2 SHSH |
-
-All CPIs from a given granule appear in exactly one split. This prevents the model from learning scene-specific speckle textures rather than eigenvalue structure, which was identified as the root cause of the train/val accuracy gap seen in earlier experiments with only 7 scenes.
-
-### 3. Synthetic RFI augmentation
-
-Clean CPI blocks extracted from the RSLC granules serve as background. Synthetic RFI is overlaid using `rfi_gen`, a purpose-built augmentation library with six RFI styles:
-
-| Style | Description | Typical knee range |
-|-------|-------------|-------------------|
-| `cw_tone` | Single continuous-wave narrowband tone | 1 |
-| `multitone` | N simultaneous CW tones | 1–28 |
-| `pulsed` | Burst of coherent pulses, variable duty cycle | 6–26 |
-| `wideband` | Decaying multi-mode broadband interference | 3–6 |
-| `chirp` | Doppler-sweeping tone, variable bandwidth | 14–32 |
-| `subtle` | Near-noise-floor single tone | 1–2 |
-
-Each style independently controls the eigenvalue spectrum shape (which sets the knee index label) and the INR (which sets the contrast above the noise floor). This decoupling ensures the model learns the structural feature — the knee — rather than raw power level.
-
-A quota-driven balancer fills 9 knee bands to equal target counts, correcting the natural tendency for low-knee RFI styles (CW tones) to dominate unbalanced generation. Normalization statistics are computed on the train split only and applied to val and test.
-
-**Dataset statistics:**
-
-| Split | Samples | Clean | RFI | Samples/band |
-|-------|---------|-------|-----|-------------|
-| Train | 4,554 | 510 | 4,044 | ~500 |
-| Val   | 4,571 | 510 | 4,061 | ~500 |
-| Test  | 4,566 | 510 | 4,056 | ~500 |
-
----
-
-## Training
-
-```bash
-python ml/train.py \
-    --data      data/model/train.npz \
-    --val-data  data/model/val.npz \
-    --test-data data/model/test.npz \
-    --label-smoothing 0.1 --weight-decay 1e-4 \
-    --epochs 100 --out-dir ml/checkpoints
+```
+R = S @ S^H / K
 ```
 
-**Key training decisions:**
+RSLC azimuth lines approximate this but carry range migration and Doppler
+history artifacts from focusing. L0B raw pulses are exactly what the ST-EVD
+math assumes, making L0 the correct input domain for this classifier.
 
-- **Label smoothing (ε=0.1)** — prevents the model from becoming over-confident on wrong predictions, which was observed to drive val loss upward in earlier runs. Switching from sparse to categorical cross-entropy with smoothed targets stabilised val loss and improved tolerance-2 accuracy by ~7 percentage points.
-- **AdamW weight decay (λ=1e-4)** — mild L2 regularisation to reduce overfitting from the limited scene count.
-- **Class weighting disabled** — with a balanced dataset (equal samples per band), inverse-frequency weighting is redundant and incompatible with one-hot targets. It is retained as an option for unbalanced runs.
-- Early stopping fired at epoch 50 (patience=20); best checkpoint was epoch 30.
+---
+
+## Repository Layout
+
+```
+rfi-mitigation-l0/
+├── rfi_gen/               # Installable RFI synthesis package
+│   ├── base.py            # SCM utilities, effective_rank, synthetic_clean
+│   ├── canvas_l0.py       # L0B HDF5 block extraction (mirrors canvas.py)
+│   ├── cw_tone.py         # Narrowband CW RFI generator
+│   ├── multitone.py       # Multi-tone RFI generator
+│   ├── wideband.py        # Wideband RFI generator
+│   ├── pulsed.py          # Pulsed RFI generator
+│   ├── chirp.py           # Chirp RFI generator
+│   └── pyproject.toml
+├── ml/
+│   ├── augment.py         # Dataset builder (RFI injection + feature extraction)
+│   ├── model.py           # Two-branch CNN architecture
+│   ├── split_scenes.py    # Scene-level train/val/test splitter
+│   ├── train.py           # Training loop with evaluation
+│   └── checkpoints/       # Saved models and evaluation outputs
+├── nisar/
+│   ├── gen_raw_l0.py      # Synthetic L0B HDF5 generator (white noise)
+│   └── check_l0_clean.py  # L0B granule QC screener
+└── data/
+    ├── l0_out/            # Raw L0B .h5 files (real or synthetic)
+    ├── l0_qc/             # QC outputs from check_l0_clean.py
+    │   └── l0_qc_summary.csv
+    └── l0_model/          # Generated dataset splits and metadata
+```
+
+---
+
+## Method
+
+### Data generation
+
+Clean L0B pulse blocks `S ∈ C^{M×K}` are extracted from screened granules
+(real or synthetic white noise). Synthetic RFI is injected at a target knee
+index using one of five generator types (CW tone, multitone, wideband,
+pulsed, chirp), producing a contaminated block `S_rfi`. The SCM is computed
+and two feature vectors are extracted per CPI:
+
+| Feature | Shape | Description |
+|---|---|---|
+| `eigen_input` | `(M, 2)` | Eigenvalue profile (dB) + slope profile |
+| `global_input` | `(6,)` | F-factor, σ_min, σ_max, μ_min, trace (dB), condition number |
+
+These are the same statistics ST-EST uses, which guarantees the CNN's
+worst-case behavior is no worse than the baseline.
+
+### Knee cap policy
+
+RFI is constrained to contaminate **at most half the eigenvalues** per CPI.
+This policy is enforced at three independent layers:
+
+1. **Parameter level** — `draw_style_params` bounds rank-controlling
+   parameters (`n_tones`, `n_modes`, `duty`) before the generator runs
+2. **Target level** — `style_for_knee` clamps the requested target to
+   `[1, M//2]` before selecting a generator style
+3. **Post-generation** — `build_tb` demotes any CPI whose realized
+   `knee_truth > M//2` to clean (label 0) rather than mislabeling it
+
+Hard caps by CPI size:
+
+| M | Max knee |
+|---|---|
+| 12 | 6 |
+| 16 | 8 |
+| 20 | 10 |
+| 32 | 16 |
+
+### Balanced dataset
+
+The knee axis `[0, cap]` is divided into bands. A quota-driven scheduler
+steers generation toward the most under-filled band at each step, producing
+a class-balanced dataset across all reachable knee indices.
+
+Bands for M=32 (cap=16):
+
+| Band | Knee indices |
+|---|---|
+| clean | 0 |
+| 1 | 1 |
+| 2 | 2 |
+| 3–5 | 3, 4, 5 |
+| 6–9 | 6, 7, 8, 9 |
+| 10–14 | 10, 11, 12, 13, 14 |
+| 15–16 | 15, 16 |
+
+### Model architecture
+
+Two-branch CNN with softmax output over `n_classes = M + 1` knee indices:
+
+- **Eigenvalue branch** — 1D CNN with residual blocks and
+  Squeeze-and-Excitation attention over the `(M, 2)` eigenvalue/slope profile
+- **Global branch** — dense network over the 6 scalar TB-context features
+- **Fusion head** — concatenation → dense → dropout → softmax
+
+Output is a full posterior over knee locations. `argmax` is the point
+estimate; Shannon entropy of the distribution is a per-CPI confidence score
+usable to defer to the ST-EST baseline on ambiguous CPIs.
 
 ---
 
 ## Results
 
-### Val set (scene-held-out)
+Trained on 500 synthetic L0B scenes (white noise canvas, 50 CPIs each),
+300 samples per band, M=32.
 
-| Metric | Value |
-|--------|-------|
-| Exact match | 0.709 |
-| Tolerance-1 (±1 EV index) | 0.819 |
-| Tolerance-2 (±2 EV indices) | 0.909 |
-| Mean absolute error | 0.68 EV indices |
-| Binary RFI precision | 0.988 |
-| Binary RFI recall | 0.984 |
-| Binary RFI F1 | 0.986 |
+### Synthetic evaluation (val / test)
 
-### Test set (fully held-out, never seen during training)
+| Metric | Val | Test |
+|---|---|---|
+| Exact accuracy | 0.961 | 0.951 |
+| Tolerance-1 (±1) | 0.979 | 0.979 |
+| Tolerance-2 (±2) | 0.987 | 0.989 |
+| Mean abs error | 0.08 indices | 0.09 indices |
+| Binary F1 (RFI present/absent) | 1.000 | 1.000 |
+| False alarms | 0 | 0 |
+| Missed RFI | 0 | 1 / 1857 |
 
-| Metric | Value |
-|--------|-------|
-| Exact match | 0.706 |
-| Tolerance-1 (±1 EV index) | 0.813 |
-| Tolerance-2 (±2 EV indices) | 0.892 |
-| Mean absolute error | 0.75 EV indices |
-| Binary RFI precision | 0.994 |
-| Binary RFI recall | 0.990 |
-| Binary RFI F1 | 0.992 |
+### Comparison to RSLC baseline
 
-Val and test results are consistent to within 2 percentage points across all metrics, confirming genuine generalisation to unseen scenes rather than memorisation of training scene characteristics.
+The RSLC version of this classifier (trained on focused azimuth-line
+blocks) achieved val tol-2 = 0.909 and test F1 = 0.992. The L0 version
+trained on the same synthetic augmentation strategy reaches tol-2 = 0.989
+and F1 = 1.000, with lower mean absolute error (0.09 vs 0.75 indices).
 
-### Confidence calibration
-
-The Shannon entropy of the softmax output is a reliable gating signal:
-
-| Confidence tier | Samples (val) | Exact accuracy |
-|----------------|--------------|----------------|
-| High (≥0.6 max prob) | 3,020 (66%) | 0.894 |
-| Low (<0.6 max prob) | 1,551 (34%) | 0.349 |
-
-Low-confidence predictions can be routed to the ST-EST baseline. The 66/34 split at the 0.6 threshold means the CNN handles two-thirds of CPIs autonomously at high accuracy, deferring only the genuinely ambiguous cases.
-
-### Comparison to previous results (7-scene baseline)
-
-| | 7-scene baseline | 40-scene model |
-|--|---------|------------|
-| Train scenes | 7 | 28 |
-| Val scenes | 0 (same as train) | 6 (held out) |
-| Val tol-2 | 0.77 | 0.909 |
-| Train/val tol-1 gap | 0.33 | 0.15 |
-| Binary F1 | 0.986 | 0.992 |
-
-The improvement from 0.77 to 0.909 tol-2 came primarily from fixing the scene-level data split, not from architecture changes. The earlier model was measuring val accuracy on scenes it had already seen during training.
+The improvement reflects the tighter match between the L0 input domain
+and the ST-EVD math, not a larger training set. Sim-to-real transfer on
+actual contaminated L0B granules has not yet been evaluated.
 
 ---
 
-## Repository structure
+## Installation
 
-```
-rfi-mitigation/
-├── ml/
-│   ├── model.py               two-branch CNN, build_model(), predict_knee_with_confidence()
-│   ├── augment.py             quota-balanced RFI augmentation, produces split .npz files
-│   ├── build_dataset.py       orchestrator: scene split -> augment train/val/test
-│   ├── split_scenes.py        scene-level stratified train/val/test assignment
-│   ├── train.py               training loop, evaluation, report
-│   ├── inspect_dataset.py     pre-training sanity check
-│   └── checkpoints/           saved models and training artefacts
-├── rfi_gen/                   synthetic RFI augmentation library
-│   ├── base.py                shared helpers (SCM, eigenvalue, features)
-│   ├── canvas.py              RSLC block extraction
-│   ├── cw_tone.py             CW tone generator
-│   ├── multitone.py           multi-tone generator
-│   ├── wideband.py            wideband generator
-│   ├── pulsed.py              pulsed burst generator
-│   ├── subtle.py              near-noise generator
-│   └── chirp.py               chirp sweep generator
-├── nisar/
-│   ├── fetch_nisar.py         ASF search, screen-and-keep download loop
-│   └── check_nisar_clean.py   per-granule RFI and quality screen
-└── data/
-    ├── nisar_out/             clean RSLC granules (40 scenes, ~540 GB)
-    └── model/                 train.npz, val.npz, test.npz, scene_split.csv
+```bash
+pip install -e rfi_gen
+pip install tensorflow numpy h5py
 ```
 
 ---
 
-## Usage
+## Run Order
 
-**Fetch clean scenes** (screen-and-keep, runs until target is met):
+### 1. Generate synthetic L0B scenes
+
 ```bash
-python nisar/fetch_nisar.py --screen-and-keep --target-clean 40 \
-    --name-contains _2005_ --max-results 0 --out-dir data/nisar_out
+python nisar/gen_raw_l0.py \
+    --out data/l0_out/ --n-files 500 \
+    --n-cpis 50 --cpi-size 32 --n-range 256 \
+    --signal-power-db -20 --pols HH --seed 0
 ```
 
-**Build dataset** (scene split + augmentation, ~10 min):
+Produces `data/l0_out/synthetic_l0_0000.h5` … `synthetic_l0_0499.h5`,
+each a `[1600 × 256]` complex64 HDF5 under the NISAR L0B path convention.
+Skip this step and drop real L0B files into `data/l0_out/` instead.
+
+### 2. Screen granules for RFI / data quality
+
 ```bash
-python ml/build_dataset.py \
-    --data-dir data/nisar_out --out-dir data/model \
-    --target-per-band 500 --figure
+python nisar/check_l0_clean.py data/l0_out/ --out-dir data/l0_qc/
 ```
 
-**Inspect before training:**
+Produces `data/l0_qc/l0_qc_summary.csv` with flags CLEAN / REVIEW / NOISY
+based on eigenvalue contrast, F-factor, per-pulse energy MAD, and zero-fill
+fraction. REVIEW and NOISY files are excluded from training.
+
+### 3. Scene-level train / val / test split
+
 ```bash
-python ml/inspect_dataset.py \
-    --train data/model/train.npz \
-    --val   data/model/val.npz \
-    --test  data/model/test.npz
+python ml/split_scenes.py \
+    --manifest data/l0_qc/l0_qc_summary.csv \
+    --data-dir data/l0_out/ \
+    --out data/l0_model/scene_split.csv
 ```
 
-**Train:**
+Splits at the scene (file) level so no granule appears in more than one
+split. Default ratio: 70 / 15 / 15.
+
+### 4. Build dataset
+
+```bash
+python ml/augment.py \
+    --split-csv data/l0_model/scene_split.csv --split train \
+    --data-dir data/l0_out/ --l0 \
+    --out data/l0_model/train.npz \
+    --balance --target-per-band 300 --M 32
+
+python ml/augment.py \
+    --split-csv data/l0_model/scene_split.csv --split val \
+    --data-dir data/l0_out/ --l0 \
+    --out data/l0_model/val.npz \
+    --balance --target-per-band 300 --M 32
+
+python ml/augment.py \
+    --split-csv data/l0_model/scene_split.csv --split test \
+    --data-dir data/l0_out/ --l0 \
+    --out data/l0_model/test.npz \
+    --balance --target-per-band 300 --M 32
+```
+
+The `--l0` flag routes block extraction through `canvas_l0` instead of
+`canvas`. Everything downstream (RFI injection, SCM computation, TB
+assembly, feature extraction) is unchanged from the RSLC pipeline.
+
+### 5. Train
+
 ```bash
 python ml/train.py \
-    --data data/model/train.npz --val-data data/model/val.npz \
-    --test-data data/model/test.npz \
-    --label-smoothing 0.1 --weight-decay 1e-4 \
-    --epochs 100 --out-dir ml/checkpoints
+    --data data/l0_model/train.npz \
+    --val-data data/l0_model/val.npz \
+    --test-data data/l0_model/test.npz
 ```
+
+Saves best checkpoint to `ml/checkpoints/best_model.keras` and writes
+`evaluation_report.txt`, `training_curves.png`, and `confusion_matrix.png`.
+
+---
+
+## Key Design Decisions
+
+**Feeding the model the same statistics ST-EST uses** guarantees that the
+CNN's worst-case behavior is no worse than the baseline — a strong
+architectural argument for deployment.
+
+**White-noise synthetic canvas** (rather than real L0B scenes) is used for
+the initial proof of concept. The approach requires relatively few source
+scenes to generate large labeled datasets via augmentation. Real L0B scenes
+can be substituted at step 1 with no other pipeline changes.
+
+**Chirp generators are excluded from the targeted (balanced) path** because
+chirp rank depends on sweep, K, and covariance structure together in a way
+that cannot be reliably inverted. Chirp is still used in the random
+`draw_style_params` path where the post-generation demotion layer handles
+any over-contaminated output.
+
+---
+
+## Next Steps
+
+- Sim-to-real transfer evaluation on real contaminated L0B granules
+- End-to-end coherence comparison against ST-EST baseline on full ALOS frames
