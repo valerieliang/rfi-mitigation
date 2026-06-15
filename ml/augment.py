@@ -71,26 +71,41 @@ TINY = 1e-20
 # ----------------------------------------------------------------------
 # Per-style random parameter draws (vary the knee index across the set)
 # ----------------------------------------------------------------------
-def draw_style_params(style, rng):
-    """Random style parameters so the knee index varies across TBs."""
+def draw_style_params(style, rng, M=32):
+    """
+    Random style parameters so the knee index varies across TBs.
+
+    All rank-controlling parameters are capped so the realized knee
+    index stays within [1, M//2].  The post-generation check in
+    build_tb is a second safety net for generators (chirp, pulsed)
+    whose rank is only approximately controlled by their parameters.
+    """
+    cap = knee_cap(M)
     if style == "cw_tone":
         return {"doppler": float(rng.uniform(-0.3, 0.3))}
     if style == "multitone":
-        return {"n_tones": int(rng.integers(1, 7)),
+        # n_tones directly sets the rank; clamp to cap.
+        return {"n_tones": int(rng.integers(1, cap + 1)),
                 "doppler_spread": float(rng.uniform(0.3, 0.8)),
                 "power_taper_db": float(rng.choice([0.0, 0.0, 1.5]))}
     if style == "wideband":
-        return {"n_modes": int(rng.integers(4, 9)),
+        # n_modes approximates the rank; clamp to cap.
+        return {"n_modes": int(rng.integers(4, min(9, cap + 1))),
                 "decay_db": float(rng.uniform(1.5, 4.0)),
                 "doppler_spread": float(rng.uniform(0.6, 1.0))}
     if style == "pulsed":
-        return {"duty": float(rng.uniform(0.2, 0.7)),
+        # duty * M approximates the rank; cap duty at cap/M (~0.5).
+        max_duty = cap / float(M)
+        return {"duty": float(rng.uniform(0.2, max_duty)),
                 "coherence": float(rng.uniform(0.1, 0.9)),
                 "doppler": float(rng.uniform(-0.3, 0.3))}
     if style == "subtle":
         return {"n_tones": int(rng.integers(1, 3))}
     if style == "chirp":
-        return {"sweep": float(rng.uniform(0.5, 1.0)),
+        # Chirp rank grows with sweep; cap sweep at the value corresponding
+        # to knee = cap via _chirp_sweep_for_knee.
+        max_sweep = _chirp_sweep_for_knee(cap, M)
+        return {"sweep": float(rng.uniform(0.3, max_sweep)),
                 "f0": float(rng.uniform(-0.1, 0.1))}
     return {}
 
@@ -111,11 +126,22 @@ def draw_style_params(style, rng):
 # real style variety rather than a single generator. The actual knee is
 # still measured after generation; this only biases the draw.
 
+def knee_cap(M):
+    """
+    Maximum allowed knee index: at most half of all eigenvalues may be
+    RFI-dominated. Matches the per-CPI size caps used at inference time.
+    """
+    return M // 2
+
+
 def _chirp_sweep_for_knee(target, M):
-    """Invert the chirp sweep -> knee trend (roughly linear in [14, M])."""
-    lo_knee, hi_knee = 14, M
+    """Invert the chirp sweep -> knee trend (roughly linear in [14, M//2])."""
+    cap = knee_cap(M)
+    lo_knee, hi_knee = 14, cap
     lo_sw, hi_sw = 0.4, 1.0
-    t = (np.clip(target, lo_knee, hi_knee) - lo_knee) / max(hi_knee - lo_knee, 1)
+    if hi_knee <= lo_knee:
+        return lo_sw
+    t = (np.clip(target, lo_knee, hi_knee) - lo_knee) / float(hi_knee - lo_knee)
     return float(lo_sw + t * (hi_sw - lo_sw))
 
 
@@ -123,11 +149,19 @@ def style_for_knee(target, M, rng, allowed=None):
     """
     Return (style, params) likely to yield a knee at `target`.
 
+    `target` is silently clamped to [1, M//2] so that no style can be
+    parameterized to produce RFI across more than half the eigenvalues.
+    Post-generation enforcement in build_tb drops any CPI that still
+    exceeds the cap (can happen for chirp/pulsed whose rank is
+    approximate).
+
     Several styles are offered per knee band so the balanced set keeps
     the RFI-type variety. If `allowed` is given, only those styles are
     considered (falling back to multitone, which can hit any index).
     """
-    target = int(np.clip(target, 1, M))
+    cap = knee_cap(M)
+    # Clamp target to [1, cap] -- never request more than half the eigenvalues.
+    target = int(np.clip(target, 1, cap))
     candidates = []
 
     if target == 1:
@@ -143,31 +177,31 @@ def style_for_knee(target, M, rng, allowed=None):
                                       "doppler_spread": 0.8}),
                        ("wideband", {"n_modes": target, "decay_db": 2.0,
                                      "doppler_spread": 0.9})]
-    elif 7 <= target <= 12:
+    elif 7 <= target <= min(12, cap):
         candidates += [("multitone", {"n_tones": target,
                                       "doppler_spread": 0.9}),
                        ("pulsed", {"duty": target / float(M),
                                    "coherence": float(rng.uniform(0.1, 0.3)),
                                    "doppler": float(rng.uniform(-0.3, 0.3))})]
-    elif 13 <= target <= 20:
-        candidates += [("pulsed", {"duty": target / float(M),
+    else:
+        # target in [13, cap]: pulsed duty is capped at cap/M (~0.5).
+        # chirp is excluded here because its realized rank depends on
+        # sweep in a way that is not reliably invertible; it belongs
+        # only in the random draw_style_params path where Layer-3
+        # post-gen demotion handles any over-contaminated result.
+        safe_duty = target / float(M)
+        candidates += [("pulsed", {"duty": safe_duty,
                                    "coherence": float(rng.uniform(0.1, 0.3)),
                                    "doppler": float(rng.uniform(-0.3, 0.3))}),
                        ("multitone", {"n_tones": target,
                                       "doppler_spread": 0.95})]
-    else:  # 21 .. M
-        candidates += [("chirp", {"sweep": _chirp_sweep_for_knee(target, M),
-                                  "f0": float(rng.uniform(-0.1, 0.1))}),
-                       ("pulsed", {"duty": target / float(M),
-                                   "coherence": float(rng.uniform(0.1, 0.3)),
-                                   "doppler": float(rng.uniform(-0.3, 0.3))})]
 
     if allowed is not None:
         candidates = [c for c in candidates if c[0] in allowed]
     if not candidates:
-        # multitone can hit essentially any index; safe fallback.
+        # multitone fallback: n_tones capped at cap, not M-1.
         candidates = [("multitone",
-                       {"n_tones": int(np.clip(target, 1, M - 1)),
+                       {"n_tones": int(np.clip(target, 1, cap)),
                         "doppler_spread": 0.9})]
 
     return candidates[int(rng.integers(len(candidates)))]
@@ -181,16 +215,23 @@ def synthetic_strip(n_cpi, M, K, rng):
     return [synthetic_clean(M, K, rng) for _ in range(n_cpi)]
 
 
-def real_strip(h5_path, n_cpi, M, K, rng):
+def real_strip(h5_path, n_cpi, M, K, rng, use_l0=False):
     """
     A contiguous real strip sliced into n_cpi CPIs of (M, K).
 
+    When use_l0 is True, reads from an L0B raw file via canvas_l0
+    (pulse axis is the true slow-time axis). When False, reads from an
+    RSLC file via canvas (azimuth lines used as a proxy for pulses).
+
     Returns a list of n_cpi blocks, or None if the scene is too small.
     """
-    from rfi_gen import canvas
+    if use_l0:
+        from rfi_gen import canvas_l0 as _canvas
+    else:
+        from rfi_gen import canvas as _canvas
     try:
-        strip = canvas.extract_block(h5_path, n_pulses=n_cpi * M,
-                                     n_range=K, rng=rng)
+        strip = _canvas.extract_block(h5_path, n_pulses=n_cpi * M,
+                                      n_range=K, rng=rng)
     except Exception:
         return None
     return [strip[k * M:(k + 1) * M, :] for k in range(n_cpi)]
@@ -238,12 +279,15 @@ def build_tb(blocks, scenario, styles, inr_range, M, K, rng, tb_id,
     base_inr = 0.0
     rfi_mask = np.zeros(n_cpi, dtype=bool)
 
+    cap = knee_cap(M)
+
     if scenario != "clean":
         if target_knee is not None:
             style, params = style_for_knee(target_knee, M, rng, allowed=styles)
         else:
             style = str(rng.choice(styles))
-            params = draw_style_params(style, rng)
+            # Pass M so draw_style_params can cap rank-controlling params.
+            params = draw_style_params(style, rng, M=M)
         base_inr = (float(inr_fixed) if inr_fixed is not None
                     else float(rng.uniform(*inr_range)))
         gen = get_generator(style, inr_db=base_inr, **params)
@@ -261,11 +305,22 @@ def build_tb(blocks, scenario, styles, inr_range, M, K, rng, tb_id,
         if rfi_mask[k]:
             gen.inr_db = float(base_inr + rng.uniform(-2.0, 2.0))
             real = gen.apply(clean, rng=rng)
-            cov = real.covariance()
-            rec = cpi_record(cov)
-            rec["label"] = int(real.knee_truth)
-            rec["style"] = style
-            rec["inr"] = gen.inr_db
+            # Post-generation safety net: chirp and pulsed generators
+            # control rank only approximately. If the realized knee
+            # exceeds M//2, demote the record to clean rather than
+            # mislabeling it as over-contaminated.
+            if real.knee_truth > cap:
+                cov = slow_time_scm(clean)
+                rec = cpi_record(cov)
+                rec["label"] = 0
+                rec["style"] = "clean"
+                rec["inr"] = float("nan")
+            else:
+                cov = real.covariance()
+                rec = cpi_record(cov)
+                rec["label"] = int(real.knee_truth)
+                rec["style"] = style
+                rec["inr"] = gen.inr_db
         else:
             cov = slow_time_scm(clean)
             rec = cpi_record(cov)
@@ -311,12 +366,14 @@ def _strip_provider(tb_jobs_iter, args, M, K, rng):
     synthetic and real sources. Returns (granule_name, blocks) or
     (granule_name, None) when a real scene was too small.
     """
+    use_l0 = getattr(args, "l0", False)
     for job in tb_jobs_iter:
         if job is None:
             yield "synthetic", synthetic_strip(args.cpi_per_tb, M, K, rng)
         else:
             blocks = real_strip(os.path.join(args.data_dir, job),
-                                args.cpi_per_tb, M, K, rng)
+                                args.cpi_per_tb, M, K, rng,
+                                use_l0=use_l0)
             yield job, blocks
 
 
@@ -500,6 +557,12 @@ def main():
     ap.add_argument("--max-tbs", type=int, default=0,
                     help="Balanced mode: hard cap on TBs built "
                          "(0 = until every band meets target).")
+    ap.add_argument("--l0", action="store_true",
+                    help="Read raw L0B HDF5 files instead of RSLC granules. "
+                         "Uses canvas_l0 in place of canvas, so --qc-csv "
+                         "should point to the CSV produced by check_l0_clean.py. "
+                         "The rest of the pipeline (RFI injection, SCM, TB "
+                         "assembly, feature extraction) is unchanged.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--figure", action="store_true",
                     help="Write a diagnostic PNG next to the output.")
@@ -534,7 +597,12 @@ def main():
         else:
             tb_jobs = [None] * args.n_tbs
     else:
-        from rfi_gen import canvas
+        # Select the appropriate canvas module depending on --l0.
+        if args.l0:
+            from rfi_gen import canvas_l0 as _canvas_mod
+            print("L0 mode: reading raw L0B granules via canvas_l0.")
+        else:
+            from rfi_gen import canvas as _canvas_mod
 
         # Build the list of candidate filenames from whichever CSV was given.
         if args.split_csv:
@@ -551,7 +619,7 @@ def main():
                     len(rows), args.split_csv))
             clean_files = [r["filename"] for r in rows]
         else:
-            clean_files = canvas.read_clean_list(args.qc_csv)
+            clean_files = _canvas_mod.read_clean_list(args.qc_csv)
 
         present = [f for f in clean_files
                    if os.path.exists(os.path.join(args.data_dir, f))]
@@ -591,7 +659,8 @@ def main():
                 blocks = synthetic_strip(args.cpi_per_tb, M, K, rng)
             else:
                 blocks = real_strip(os.path.join(args.data_dir, job),
-                                    args.cpi_per_tb, M, K, rng)
+                                    args.cpi_per_tb, M, K, rng,
+                                    use_l0=args.l0)
                 if blocks is None:
                     continue  # scene too small; skip
             recs = build_tb(blocks, scenario, styles, inr_range, M, K,
@@ -683,7 +752,8 @@ def main():
         "feature_names": feat_names,
         "norm_mean": mean.tolist(), "norm_std": std.tolist(),
         "label_histogram": label_hist,
-        "mode": "synthetic" if (args.synthetic or not args.qc_csv) else "real",
+        "mode": ("synthetic" if (args.synthetic or not args.qc_csv)
+                 else ("real_l0" if args.l0 else "real_rslc")),
         "balanced": bool(args.balance),
         "target_per_band": (args.target_per_band if args.balance else None),
     }

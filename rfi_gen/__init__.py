@@ -12,7 +12,6 @@ at all:
   multitone  several tones, knee placed at a chosen index r
   wideband   partially coherent band, a few decaying eigenvalues, soft
   pulsed     transient burst, smeared / ambiguous boundary
-  subtle     low-INR tones, knee present in the label but barely visible
   chirp      frequency sweep, eigenvalues fill a band, no clear knee
 
 Two independent knobs:
@@ -36,7 +35,6 @@ from .cw_tone import CWTone
 from .multitone import MultiTone
 from .wideband import Wideband
 from .pulsed import PulsedBurst
-from .subtle import SubtleNearNoise
 from .chirp import ChirpSweep
 
 # Registry in rough obvious-to-none order.
@@ -45,7 +43,6 @@ STYLES = {
     "multitone": MultiTone,
     "wideband": Wideband,
     "pulsed": PulsedBurst,
-    "subtle": SubtleNearNoise,
     "chirp": ChirpSweep,
 }
 
@@ -68,7 +65,7 @@ __all__ = [
     "RFIGenerator", "RFIRealization", "STYLES",
     "get_generator", "all_generators",
     "CWTone", "MultiTone", "Wideband", "PulsedBurst",
-    "SubtleNearNoise", "ChirpSweep",
+    "ChirpSweep",
     "slow_time_scm", "eig_profile", "eig_db", "slope_db", "synthetic_clean",
     "effective_rank", "knee_contrast_db", "estimate_knee", "cpi_features",
 ]
