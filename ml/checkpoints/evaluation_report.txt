@@ -1,0 +1,48 @@
+
+========================================================
+KNEE CLASSIFIER  --  EVALUATION REPORT
+========================================================
+Train data:    data/l0_model/train.npz
+Val data:      data/l0_model/val.npz
+Best model:    ml/checkpoints\best_model.keras
+Train samples: 2167   Val samples: 2167
+
+--- Knee-index accuracy (val) ---
+Exact match:         0.961
+Tolerance-1 (+/-1):  0.979
+Tolerance-2 (+/-2):  0.987
+Mean abs error:      0.08 eigenvalue indices
+
+--- RFI detection binary (val) ---
+Precision:  1.000
+Recall:     1.000
+F1:         1.000
+TP=1857  TN=310  FP=0  FN=0
+
+--- Confidence calibration (val) ---
+High-conf (>=0.6): 2002 samples  exact acc=0.988
+Low-conf  (<0.6):  165 samples  exact acc=0.636
+Mean entropy:      0.763
+
+--- Training ---
+Stopped at epoch: 53
+Best val loss:    0.7798
+========================================================
+
+========================================================
+TEST SET EVALUATION
+Data:    data/l0_model/test.npz
+Samples: 2167
+
+--- Knee-index accuracy ---
+Exact match:         0.951
+Tolerance-1 (+/-1):  0.979
+Tolerance-2 (+/-2):  0.989
+Mean abs error:      0.09 eigenvalue indices
+
+--- RFI detection binary ---
+Precision:  1.000
+Recall:     0.999
+F1:         1.000
+TP=1856  TN=310  FP=0  FN=1
+========================================================

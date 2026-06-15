@@ -482,18 +482,34 @@ def build_balanced(tb_jobs, args, M, K, rng):
 
 
 def _bands(M):
-    """Knee bands used by balanced generation. Band 0 is the clean band."""
-    return [
-        (0, 0),
-        (1, 1),
-        (2, 2),
-        (3, 5),
-        (6, 9),
+    """
+    Knee bands used by balanced generation. Band 0 is the clean band.
+
+    All RFI bands are constrained to [1, knee_cap(M)] so every band
+    is reachable by the generators. The old fixed bands (which extended
+    to M) caused bands above M//2 to never fill.
+    """
+    cap = knee_cap(M)
+    # Fine-grained low bands; merge into cap at the top.
+    raw = [
+        (0,  0),   # clean
+        (1,  1),
+        (2,  2),
+        (3,  5),
+        (6,  9),
         (10, 14),
-        (15, 20),
-        (21, 26),
-        (27, M),
     ]
+    # Only add higher bands if cap allows them.
+    if cap >= 15:
+        raw.append((15, min(cap, 20)))
+    if cap >= 21:
+        raw.append((21, min(cap, 26)))
+    if cap >= 27:
+        raw.append((27, cap))
+
+    # Trim any band whose lo > cap (can happen for small M).
+    bands = [(lo, min(hi, cap)) for lo, hi in raw if lo <= cap]
+    return bands
 
 
 def main():
@@ -506,8 +522,8 @@ def main():
                     help="Scene-level split manifest produced by split_scenes.py. "
                          "When provided, only files tagged with --split are used. "
                          "Use this instead of separate train_dir/val_dir folders.")
-    ap.add_argument("--split", default=None, choices=["train", "val"],
-                    help="Which split to build ('train' or 'val'). "
+    ap.add_argument("--split", default=None, choices=["train", "val", "test"],
+                    help="Which split to build ('train', 'val', or 'test'). "
                          "Requires --split-csv.")
     ap.add_argument("--data-dir", default=".",
                     help="Directory holding the granule .h5 files.")
@@ -694,9 +710,15 @@ def main():
     inr = np.array([r["inr"] for r in all_records], dtype=np.float32)
 
     # Split by TB id to prevent leakage of shared global features.
+    # When --split-csv is used the train/val/test separation is already
+    # done at the scene level, so every sample here belongs to one split.
+    # Force val_frac=0 in that case so the .npz is 100% split=0 and the
+    # caller (train.py --train-data / --val-data / --test-data) handles
+    # the three-way separation externally.
     uniq = np.unique(tb_ids)
     rng.shuffle(uniq)
-    n_val = max(1, int(round(args.val_frac * len(uniq))))
+    effective_val_frac = 0.0 if args.split_csv else args.val_frac
+    n_val = max(0, int(round(effective_val_frac * len(uniq))))
     val_tbs = set(uniq[:n_val].tolist())
     is_val = np.array([1 if t in val_tbs else 0 for t in tb_ids],
                       dtype=np.int32)
