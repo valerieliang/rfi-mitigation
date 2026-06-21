@@ -50,8 +50,8 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from data_gen.rfi_gen_stap import RFIField, _make_rfi_field, _RFI_STYLES
-from data_gen.synth_stap import complex_gaussian
+from rfi_gen_stap import RFIField, _make_rfi_field, _RFI_STYLES
+from synth_stap import complex_gaussian
 
 # ---------------------------------------------------------------------------
 # Component IDs used to partition the SeedSequence tree.

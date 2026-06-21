@@ -25,7 +25,7 @@ For x ~ CN(0, sigma^2):  sigma = 10 ** (power_dB / 20)
 from __future__ import annotations
 
 import numpy as np
-from data_gen.rfi_gen_stap import _make_rfi_field
+from rfi_gen_stap import _make_rfi_field
 
 
 # ---------------------------------------------------------------------------

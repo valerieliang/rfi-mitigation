@@ -1,0 +1,2 @@
+python ./data_gen/save_stap_dataset.py --jnr-min 20 --jnr-max 30 --out high_power_rfi_jnr.h5
+python ./data_gen/save_stap_dataset.py --jnr-min 10 --jnr-max 20 --out low_power_rfi_jnr.h5

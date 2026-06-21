@@ -370,7 +370,7 @@ def make_rfi_generator(style: str, **kwargs) -> CWToneRFI | WidebandRFI:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from data_gen.synth_stap import complex_gaussian
+    from synth_stap import complex_gaussian
 
     K, M     = 128, 16
     noise_db = 3.0
