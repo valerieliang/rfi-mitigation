@@ -2,56 +2,56 @@
 """
 get_cpi_dataset.py
 
-Divide full STAP images (N, K_full, M_full) into CPI blocks
-(N * n_blocks, K_cpi, M_cpi).
+Sub-divide synthetic STAP CPI blocks along the range axis.
 
-CPI dimensions
---------------
-K_cpi : range bins per CPI block  -- number of snapshots for the SCM estimate.
-        Must satisfy K_cpi >= 2 * M_cpi for a non-degenerate SCM.
-        Recommended: 4 * M_cpi or higher.
+NISAR ST-EVD convention
+-----------------------
+M : pulses per CPI  (rows)    -- SCM dimension; fixed at generation time
+K : range bins      (columns) -- snapshot count; may be subdivided here
 
-M_cpi : pulses per CPI             -- SCM dimension; yields M_cpi eigenvalues.
-        Must equal the M stored in the source file (checked at runtime).
+Each sample in the source file has shape (M, K_full).
+This script splits K_full columns into n_blocks = K_full // K_cpi non-
+overlapping sub-blocks, producing samples of shape (M, K_cpi).
 
-The overdetermination ratio K_cpi / M_cpi is printed for each file so you
-can verify SCM quality before committing to a chop configuration.
+The SCM for each output block is R = S @ S.conj().T / K_cpi, shape (M, M).
+
+Constraint: K_cpi >= 2 * M (non-degenerate SCM). Recommended: K_cpi >= 4*M.
+
+When to use this script
+-----------------------
+Use it only if you want more training samples at reduced snapshot count.
+With the default K_full=128, M=16 (8x overdetermined), chopping to
+K_cpi=64 gives 2 blocks per sample at 4x overdetermination -- still good.
+Chopping to K_cpi=32 gives 4 blocks at 2x -- borderline.
+
+If your dataset is large enough, skip this and train on the full (M, K_full)
+blocks directly.
 
 Input HDF5 layout (produced by save_stap_dataset.py)
 -----------------------------------------------------
-/data/contaminated   (N, K_full, M)  complex64
-/data/clean          (N, K_full, M)  complex64
-/data/signal         (N, K_full, M)  complex64
-/data/noise          (N, K_full, M)  complex64
-/data/rfi            (N, K_full, M)  complex64
+/data/contaminated   (N, M, K_full)  complex64
+/data/clean          (N, M, K_full)  complex64
+/data/signal         (N, M, K_full)  complex64
+/data/noise          (N, M, K_full)  complex64
+/data/rfi            (N, M, K_full)  complex64
 /labels/label        (N,)            bytes
 /labels/rfi_style    (N,)            bytes
 /labels/jnr_db       (N,)            int32
-/meta/               group           attributes (K, M, ...)
+/meta/               group           attributes (M, K, ...)
 
 Output HDF5 layout
 ------------------
-Same structure; data shapes become (N * n_blocks, K_cpi, M_cpi).
-/meta/ attributes copied from source; K and M updated to CPI values.
-Added attributes: K_full, M_full, n_blocks, cpi_k, cpi_m, source_file.
+Same structure; shapes become (N * n_blocks, M, K_cpi).
+/meta/ attributes copied; K updated to K_cpi.
+Added: K_full, n_blocks, source_file.
 
 Usage
 -----
-    # Single file, CPI = (64 range bins) x (16 pulses)
-    python get_cpi_dataset.py \\
-        --input cw_high_jnr.h5 --output cw_high_jnr_cpi.h5 \\
-        --cpi-k 64 --cpi-m 16
+    # Single file -- K_cpi=64 (4x overdetermined for M=16)
+    python get_cpi_dataset.py --input cw_high_jnr.h5 --output cw_high_jnr_cpi.h5 --K-cpi 64
 
     # All files in a directory
-    python get_cpi_dataset.py \\
-        --input-dir data/ --output-dir data_cpi/ \\
-        --cpi-k 64 --cpi-m 16
-
-Recommended K_cpi values for M=16
------------------------------------
-    K_cpi=32   2x overdetermined   minimum usable
-    K_cpi=64   4x overdetermined   recommended
-    K_cpi=128  8x overdetermined   use full image (no chopping)
+    python get_cpi_dataset.py --input-dir data/full_stap --output-dir data/per_cpi --K-cpi 64
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ import numpy as np
 DATA_KEYS  = ("contaminated", "clean", "signal", "noise", "rfi")
 LABEL_KEYS = ("label", "rfi_style", "jnr_db")
 
-MIN_OVERDETERMINATION = 2   # K_cpi / M_cpi must be >= this
+MIN_OVERDETERMINATION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -75,24 +75,24 @@ MIN_OVERDETERMINATION = 2   # K_cpi / M_cpi must be >= this
 
 def chop_matrix(arr: np.ndarray, k_cpi: int) -> np.ndarray:
     """
-    Reshape (N, K_full, M) into (N * n_blocks, K_cpi, M).
+    Reshape (N, M, K_full) into (N * n_blocks, M, K_cpi).
 
-    Trailing range bins that do not fill a complete block are discarded.
+    The chop is along the range (column) axis, axis=2.
+    Trailing columns that do not fill a complete block are discarded.
     """
-    n, k_full, m = arr.shape
+    n, m, k_full = arr.shape
     n_blocks = k_full // k_cpi
     usable_k = n_blocks * k_cpi
-    arr = arr[:, :usable_k, :]
-    arr = arr.reshape(n, n_blocks, k_cpi, m)
-    arr = arr.reshape(n * n_blocks, k_cpi, m)
+
+    arr = arr[:, :, :usable_k]               # (N, M, n_blocks*k_cpi)
+    arr = arr.reshape(n, m, n_blocks, k_cpi) # (N, M, n_blocks, k_cpi)
+    arr = arr.transpose(0, 2, 1, 3)          # (N, n_blocks, M, k_cpi)
+    arr = arr.reshape(n * n_blocks, m, k_cpi)
     return arr
 
 
 def chop_labels(arr: np.ndarray, n_blocks: int) -> np.ndarray:
-    """
-    Repeat each label n_blocks times to match expanded data shape.
-    Works for numeric and object (bytes) arrays.
-    """
+    """Repeat each label n_blocks times to match expanded data shape."""
     return np.repeat(arr, n_blocks, axis=0)
 
 
@@ -103,18 +103,16 @@ def chop_labels(arr: np.ndarray, n_blocks: int) -> np.ndarray:
 def convert_file(
     input_path: str | Path,
     output_path: str | Path,
-    cpi_k: int,
-    cpi_m: int,
+    k_cpi: int,
 ) -> None:
     """
-    Chop one HDF5 file into CPI blocks of shape (cpi_k, cpi_m).
+    Chop one HDF5 file into sub-blocks of K_cpi range bins each.
 
     Parameters
     ----------
     input_path  : Source .h5 file from save_stap_dataset.py.
     output_path : Destination .h5 file.
-    cpi_k       : Range bins per CPI block (snapshot count for SCM).
-    cpi_m       : Pulses per CPI (SCM dimension). Must match file's M.
+    k_cpi       : Range bins per output block (snapshot count for SCM).
     """
     input_path  = Path(input_path)
     output_path = Path(output_path)
@@ -129,56 +127,49 @@ def convert_file(
                     f"File must be produced by save_stap_dataset.py."
                 )
 
-        n, k_full, m_full = fin["data/contaminated"].shape
+        n, m, k_full = fin["data/contaminated"].shape
+        file_m = int(fin["meta"].attrs.get("M", m))
 
-        # Validate M
-        file_m = int(fin["meta"].attrs.get("M", m_full))
-        if cpi_m != file_m:
+        if m != file_m:
             raise ValueError(
-                f"--cpi-m {cpi_m} does not match M={file_m} stored in "
-                f"{input_path.name}. They must be equal."
+                f"Data M dimension {m} disagrees with meta M={file_m}."
             )
-        if m_full != file_m:
+        if k_cpi < MIN_OVERDETERMINATION * m:
             raise ValueError(
-                f"Data M dimension {m_full} disagrees with meta M={file_m}."
-            )
-
-        # Validate K
-        if cpi_k < MIN_OVERDETERMINATION * cpi_m:
-            raise ValueError(
-                f"--cpi-k {cpi_k} < {MIN_OVERDETERMINATION} * M={cpi_m} "
-                f"({MIN_OVERDETERMINATION * cpi_m}). "
+                f"K_cpi={k_cpi} < {MIN_OVERDETERMINATION}*M={m} "
+                f"({MIN_OVERDETERMINATION * m}). "
                 f"SCM would be rank-deficient. "
-                f"Use at least --cpi-k {MIN_OVERDETERMINATION * cpi_m}."
+                f"Use at least --K-cpi {MIN_OVERDETERMINATION * m}."
             )
-        if cpi_k > k_full:
+        if k_cpi > k_full:
             raise ValueError(
-                f"--cpi-k {cpi_k} > K_full={k_full}: cannot form even one block."
+                f"K_cpi={k_cpi} > K_full={k_full}: cannot form even one block."
             )
 
-        n_blocks = k_full // cpi_k
+        n_blocks = k_full // k_cpi
         n_out    = n * n_blocks
-        ratio    = cpi_k / cpi_m
+        ratio    = k_cpi / m
 
-        print(f"  CPI dims        : K_cpi={cpi_k}  M_cpi={cpi_m}  "
+        print(f"  M (pulses, rows)    : {m}")
+        print(f"  K_full (range cols) : {k_full}")
+        print(f"  K_cpi (output cols) : {k_cpi}  "
               f"(overdetermination = {ratio:.1f}x)")
-        print(f"  shape in        : ({n}, {k_full}, {m_full})")
-        print(f"  n_blocks/image  : {n_blocks}")
-        print(f"  shape out       : ({n_out}, {cpi_k}, {cpi_m})")
+        print(f"  n_blocks per sample : {n_blocks}")
+        print(f"  shape in            : ({n}, {m}, {k_full})")
+        print(f"  shape out           : ({n_out}, {m}, {k_cpi})")
+        print(f"  SCM formula         : R = S @ S.conj().T / {k_cpi}")
 
         with h5py.File(output_path, "w") as fout:
 
-            # Data
             grp_data = fout.create_group("data")
             for key in DATA_KEYS:
                 raw     = fin[f"data/{key}"][:]
-                chopped = chop_matrix(raw, cpi_k)
+                chopped = chop_matrix(raw, k_cpi)
                 grp_data.create_dataset(
                     key, data=chopped,
                     compression="gzip", compression_opts=4,
                 )
 
-            # Labels
             grp_lbl = fout.create_group("labels")
             for key in LABEL_KEYS:
                 raw     = fin[f"labels/{key}"][:]
@@ -187,31 +178,24 @@ def convert_file(
                     key, data=chopped, compression="gzip",
                 )
 
-            # Meta
             grp_meta = fout.create_group("meta")
             if "meta" in fin:
                 for k, v in fin["meta"].attrs.items():
                     grp_meta.attrs[k] = v
-            # Override / add CPI-specific fields
-            grp_meta.attrs["K"]           = cpi_k
-            grp_meta.attrs["M"]           = cpi_m
+            grp_meta.attrs["K"]           = k_cpi
             grp_meta.attrs["K_full"]      = k_full
-            grp_meta.attrs["M_full"]      = m_full
             grp_meta.attrs["n_blocks"]    = n_blocks
-            grp_meta.attrs["cpi_k"]       = cpi_k
-            grp_meta.attrs["cpi_m"]       = cpi_m
             grp_meta.attrs["source_file"] = input_path.name
 
-    # Read-back summary
     with h5py.File(output_path, "r") as fout:
         n_written = fout["data/contaminated"].shape[0]
         labels    = fout["labels/label"][:]
         n_cont    = int(np.sum(labels == b"contaminated"))
         n_clean   = int(np.sum(labels == b"clean"))
 
-    print(f"  written         : {n_written} CPI blocks  "
+    print(f"  written             : {n_written} blocks  "
           f"({n_cont} contaminated, {n_clean} clean)")
-    print(f"  saved to        : {output_path}")
+    print(f"  saved to            : {output_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -220,42 +204,26 @@ def convert_file(
 
 def _parse() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Divide STAP images into CPI blocks by (K_cpi, M_cpi) dimensions.",
+        description=(
+            "Sub-divide STAP CPI blocks along the range axis. "
+            "Chops (N, M, K_full) -> (N*n_blocks, M, K_cpi)."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument(
-        "--input", type=str,
-        help="Single input .h5 file.",
-    )
-    mode.add_argument(
-        "--input-dir", type=str,
-        help="Directory of .h5 files (all processed).",
-    )
+    mode.add_argument("--input",     type=str, help="Single input .h5 file.")
+    mode.add_argument("--input-dir", type=str, help="Directory of .h5 files.")
 
-    p.add_argument(
-        "--output", type=str, default=None,
-        help="Output .h5 path (single-file mode only).",
-    )
-    p.add_argument(
-        "--output-dir", type=str, default=None,
-        help="Output directory.",
-    )
-    p.add_argument(
-        "--cpi-k", type=int, default=64,
-        help=(
-            "Range bins per CPI block (snapshot count for the SCM estimate). "
-            "Must be >= 2 * cpi-m. Recommended: 4 * cpi-m."
-        ),
-    )
-    p.add_argument(
-        "--cpi-m", type=int, default=16,
-        help=(
-            "Pulses per CPI (SCM dimension; number of eigenvalues). "
-            "Must match M stored in the source file."
-        ),
-    )
+    p.add_argument("--output",     type=str, default=None,
+                   help="Output .h5 path (single-file mode only).")
+    p.add_argument("--output-dir", type=str, default=None,
+                   help="Output directory.")
+    p.add_argument("--K-cpi",      type=int, default=64,
+                   help=(
+                       "Range bins per output block (snapshot count for SCM). "
+                       "Must be >= 2*M. Recommended: 4*M (=64 for M=16)."
+                   ))
     return p.parse_args()
 
 
@@ -273,7 +241,7 @@ def main() -> None:
         else:
             output_path = input_path.parent / f"{input_path.stem}_cpi.h5"
 
-        convert_file(input_path, output_path, args.cpi_k, args.cpi_m)
+        convert_file(input_path, output_path, args.K_cpi)
 
     else:
         input_dir = Path(args.input_dir)
@@ -287,7 +255,7 @@ def main() -> None:
 
         print(f"Found {len(files)} file(s) in {input_dir}")
         for f in files:
-            convert_file(f, out_dir / f"{f.stem}_cpi.h5", args.cpi_k, args.cpi_m)
+            convert_file(f, out_dir / f"{f.stem}_cpi.h5", args.K_cpi)
 
     print("\nDone.")
 

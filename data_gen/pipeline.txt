@@ -1,0 +1,18 @@
+# Generate datasets (separated by style and JNR range)
+
+python data_gen/gen_stap_dataset.py --style cw_tone  --jnr-min 20 --jnr-max 30 --out data/full_stap/cw_high_jnr.h5
+python data_gen/gen_stap_dataset.py --style cw_tone  --jnr-min  6 --jnr-max 10 --out data/full_stap/cw_low_jnr.h5
+python data_gen/gen_stap_dataset.py --style wideband --jnr-min 20 --jnr-max 30 --out data/full_stap/wb_high_jnr.h5
+python data_gen/gen_stap_dataset.py --style wideband --jnr-min  6 --jnr-max 10 --out data/full_stap/wb_low_jnr.h5
+
+# Plot eigenvalue profiles to verify
+
+python data_gen/plot_eigenvalues.py --h5 data/full_stap/cw_high_jnr.h5 --n-plot 20 --seed 0
+python data_gen/plot_eigenvalues.py --h5 data/full_stap/cw_low_jnr.h5 --n-plot 20 --seed 0
+python data_gen/plot_eigenvalues.py --h5 data/full_stap/wb_high_jnr.h5 --n-plot 20 --seed 0
+python data_gen/plot_eigenvalues.py --h5 data/full_stap/wb_low_jnr.h5 --n-plot 20 --seed 0
+
+# Chop into smaller CPI blocks
+
+python data_gen/get_cpi_dataset.py --input-dir data/full_stap --output-dir data/per_cpi --K-cpi 64
+
