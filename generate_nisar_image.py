@@ -30,6 +30,7 @@ HDF5 layout:
                       of the active run within this CPI's pulse band.
 """
 
+import os
 import numpy as np
 import h5py
 from dataclasses import dataclass, field
@@ -408,3 +409,93 @@ def divide_cpi_and_save(
                     start, end = meta.rfi_spans[block_idx]
                     dset.attrs['rfi_start'] = start
                     dset.attrs['rfi_end']   = end
+
+
+# ---------------------------------------------------------------------------
+# PIPELINE CONFIGURATION
+# ---------------------------------------------------------------------------
+
+# Each entry defines one output folder and the RFI parameters used to fill it.
+# Folder structure: data/<power_level>_power/<rfi_type>/image_<seed>.h5
+_PIPELINE_CONFIGS = [
+    {
+        'rfi_type'  : 'single_tone',
+        'jnr_range' : LOW_POWER_JNR_RANGE,
+        'power_level': 'low',
+    },
+    {
+        'rfi_type'  : 'single_tone',
+        'jnr_range' : HIGH_POWER_JNR_RANGE,
+        'power_level': 'high',
+    },
+    {
+        'rfi_type'  : 'wideband',
+        'jnr_range' : LOW_POWER_JNR_RANGE,
+        'power_level': 'low',
+    },
+    {
+        'rfi_type'  : 'wideband',
+        'jnr_range' : HIGH_POWER_JNR_RANGE,
+        'power_level': 'high',
+    },
+]
+
+N_IMAGES   = 10     # number of raw images (seeds 0..N_IMAGES-1)
+DATA_ROOT  = 'data' # root output directory
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
+def main():
+    """
+    End-to-end data generation pipeline.
+
+    Steps
+    -----
+    1. For each of N_IMAGES base seeds, generate a clean image (implicitly
+       embedded inside generate_rfi_image via generate_clean_image).
+    2. For each pipeline config (4 combinations of power level x RFI type),
+       inject RFI into every image and save it as an HDF5 file under:
+           data/<power_level>_power/<rfi_type>/image_<seed>.h5
+
+    Seeds are used directly as the image index (0 to N_IMAGES-1) so that
+    each image is fully reproducible from its filename alone.
+    """
+    seeds = list(range(N_IMAGES))
+
+    for cfg in _PIPELINE_CONFIGS:
+        rfi_type    = cfg['rfi_type']
+        jnr_range   = cfg['jnr_range']
+        power_level = cfg['power_level']
+
+        out_dir = os.path.join(DATA_ROOT, f"{power_level}_power", rfi_type)
+        os.makedirs(out_dir, exist_ok=True)
+
+        print(f"\n[{power_level}_power / {rfi_type}]  JNR range: {jnr_range} dB")
+
+        for seed in seeds:
+            out_path = os.path.join(out_dir, f"image_{seed}.h5")
+
+            rfi_image, meta = generate_rfi_image(
+                seed      = seed,
+                jnr_range = jnr_range,
+                rfi_type  = rfi_type,
+            )
+
+            divide_cpi_and_save(
+                matrix      = rfi_image,
+                meta        = meta,
+                seed        = seed,
+                jnr_range   = jnr_range,
+                output_path = out_path,
+            )
+
+            print(f"  seed={seed:02d}  jnr={meta.jnr_db:2d} dB  -> {out_path}")
+
+    print("\nDone.")
+
+
+if __name__ == '__main__':
+    main()
