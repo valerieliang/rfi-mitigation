@@ -312,7 +312,8 @@ def print_knee_confusion_matrix(y_true, y_pred, class_labels):
     col_w   = max(8, max(len(class_labels[c]) for c in present) + 2)
     row_w   = max(len(class_labels[c]) for c in present) + 2
 
-    header  = f"{'True \\ Pred':<{row_w}}" + "".join(
+    corner  = 'True \\ Pred'
+    header  = f"{corner:<{row_w}}" + "".join(
         f"{class_labels[c]:>{col_w}}" for c in present
     )
     sep     = "-" * len(header)
