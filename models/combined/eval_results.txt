@@ -1,0 +1,10 @@
+
+=== combined ===
+  N test samples : 5000
+  Exact accuracy : 0.9994
+  Tol-1 accuracy : 0.9994  (|pred - label| <= 1)
+  --- RFI samples (label < M) ---
+  Exact           : 0.9992
+  Tol-1           : 0.9992
+  --- No-RFI samples (label == M) ---
+  Exact           : 1.0000

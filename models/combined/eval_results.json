@@ -1,0 +1,9 @@
+{
+  "run": "combined",
+  "n_test": 5000,
+  "exact_acc": 0.9994,
+  "tol1_acc": 0.9994,
+  "exact_rfi": 0.99925,
+  "tol1_rfi": 0.99925,
+  "exact_no_rfi": 1.0
+}

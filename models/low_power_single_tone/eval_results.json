@@ -1,0 +1,9 @@
+{
+  "run": "low_power_single_tone",
+  "n_test": 2000,
+  "exact_acc": 1.0,
+  "tol1_acc": 1.0,
+  "exact_rfi": 1.0,
+  "tol1_rfi": 1.0,
+  "exact_no_rfi": 1.0
+}
