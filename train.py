@@ -54,9 +54,14 @@ Outputs
 Model saved to:
     models/multi_band/best_model.keras
 
-Evaluation printed to stdout and saved as:
-    models/multi_band/eval_results.txt
+Evaluation PNGs saved to models/multi_band/:
+    training_curves.png   -- loss and accuracy vs epoch
+    confusion_matrix.png  -- knee confusion matrix (normalised by row)
+    metrics.png           -- bar chart of scalar evaluation metrics
+
+JSON metrics saved to:
     models/multi_band/eval_results.json
+    models/summary.json
 """
 
 import os
@@ -285,78 +290,171 @@ def split_dataset(eigen, global_, labels):
 
 
 # ---------------------------------------------------------------------------
-# METRICS
+# PLOT HELPERS
 # ---------------------------------------------------------------------------
 
-def print_knee_confusion_matrix(y_true, y_pred, class_labels):
+def save_training_curves_png(history, out_dir):
     """
-    Print a compact knee confusion matrix to stdout.
+    Save loss and accuracy training curves to out_dir/training_curves.png.
 
-    Rows are true labels; columns are predicted labels.  Only classes that
-    appear in y_true or y_pred are shown, keeping the table readable.
+    Two-panel figure: left panel shows train/val loss; right panel shows
+    train/val sparse categorical accuracy.
+
+    Args:
+        history  : Keras History object returned by model.fit.
+        out_dir  (str): Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    epochs = range(1, len(history.history['loss']) + 1)
+
+    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12, 4))
+
+    ax_loss.plot(epochs, history.history['loss'],     label='Train loss')
+    ax_loss.plot(epochs, history.history['val_loss'], label='Val loss')
+    ax_loss.set_xlabel('Epoch')
+    ax_loss.set_ylabel('Loss')
+    ax_loss.set_title('Training & Validation Loss')
+    ax_loss.legend()
+    ax_loss.grid(True, linestyle='--', alpha=0.5)
+
+    acc_key     = 'acc'     if 'acc'     in history.history else 'sparse_categorical_accuracy'
+    val_acc_key = 'val_acc' if 'val_acc' in history.history else 'val_sparse_categorical_accuracy'
+    ax_acc.plot(epochs, history.history[acc_key],     label='Train acc')
+    ax_acc.plot(epochs, history.history[val_acc_key], label='Val acc')
+    ax_acc.set_xlabel('Epoch')
+    ax_acc.set_ylabel('Accuracy')
+    ax_acc.set_title('Training & Validation Accuracy')
+    ax_acc.legend()
+    ax_acc.grid(True, linestyle='--', alpha=0.5)
+
+    fig.tight_layout()
+    path = os.path.join(out_dir, 'training_curves.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+def save_confusion_matrix_png(y_true, y_pred, class_labels, out_dir):
+    """
+    Save a normalised knee confusion matrix heatmap to out_dir/confusion_matrix.png.
+
+    Only classes present in y_true or y_pred are shown.  Each row is
+    normalised by its true-class count so cell values are recall fractions.
+    The raw count is annotated inside each cell.
 
     Args:
         y_true       (np.ndarray): Ground-truth integer labels, shape (N,).
         y_pred       (np.ndarray): Predicted integer labels, shape (N,).
-        class_labels (list[str]): Human-readable name for each class index.
-                                  Index M should be the no-RFI sentinel label.
+        class_labels (list[str]): Name for each class index (index 0 = clean).
+        out_dir      (str): Directory where the PNG is written.
     """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
     present = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
     n       = len(present)
     idx_map = {cls: i for i, cls in enumerate(present)}
+    labels  = [class_labels[c] for c in present]
 
     matrix  = np.zeros((n, n), dtype=np.int32)
     for t, p in zip(y_true.tolist(), y_pred.tolist()):
         matrix[idx_map[t], idx_map[p]] += 1
 
-    col_w   = max(8, max(len(class_labels[c]) for c in present) + 2)
-    row_w   = max(len(class_labels[c]) for c in present) + 2
+    row_sums = matrix.sum(axis=1, keepdims=True).clip(min=1)
+    normed   = matrix / row_sums
 
-    corner  = 'True \\ Pred'
-    header  = f"{corner:<{row_w}}" + "".join(
-        f"{class_labels[c]:>{col_w}}" for c in present
-    )
-    sep     = "-" * len(header)
+    fig, ax = plt.subplots(figsize=(max(6, n * 0.7), max(5, n * 0.6)))
+    im = ax.imshow(normed, vmin=0.0, vmax=1.0, cmap='Blues')
+    fig.colorbar(im, ax=ax, label='Recall (row-normalised)')
 
-    print("\nKnee Confusion Matrix (rows=true, cols=predicted):")
-    print(sep)
-    print(header)
-    print(sep)
-    for ri, rt in enumerate(present):
-        row_str = f"{class_labels[rt]:<{row_w}}"
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('True')
+    ax.set_title('Knee Confusion Matrix')
+
+    thresh = 0.5
+    for ri in range(n):
         for ci in range(n):
-            row_str += f"{matrix[ri, ci]:>{col_w}}"
-        print(row_str)
-    print(sep)
+            color = 'white' if normed[ri, ci] > thresh else 'black'
+            ax.text(ci, ri, str(matrix[ri, ci]),
+                    ha='center', va='center', fontsize=7, color=color)
 
-    # Per-class recall on the diagonal
-    print("\nPer-class recall (diagonal / row sum):")
-    for ri, rt in enumerate(present):
-        row_sum = matrix[ri].sum()
-        recall  = matrix[ri, ri] / row_sum if row_sum > 0 else float('nan')
-        print(f"  {class_labels[rt]:<{row_w - 2}}  {recall:.3f}  ({matrix[ri, ri]}/{row_sum})")
+    fig.tight_layout()
+    path = os.path.join(out_dir, 'confusion_matrix.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
 
 
-def evaluate(model, eigen_test, global_test, y_test, run_name):
+def save_metrics_png(results, out_dir):
     """
-    Evaluate model on a held-out test set, print results, and return metrics.
+    Save a horizontal bar chart of scalar evaluation metrics to out_dir/metrics.png.
 
-    Reported metrics:
-        exact accuracy  -- argmax prediction == label
-        tol-1 accuracy  -- |argmax - label| <= 1
-        RFI / no-RFI breakdown
-        knee confusion matrix
+    Args:
+        results (dict): Output of evaluate() containing accuracy metrics.
+        out_dir (str):  Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    metric_names = [
+        'Exact accuracy',
+        'Tol-1 accuracy',
+        'RFI exact',
+        'RFI tol-1',
+        'No-RFI exact',
+    ]
+    metric_keys = [
+        'exact_acc', 'tol1_acc', 'exact_rfi', 'tol1_rfi', 'exact_no_rfi',
+    ]
+    values = [results[k] for k in metric_keys]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bars = ax.barh(metric_names, values, color='steelblue')
+    ax.set_xlim(0, 1.05)
+    ax.set_xlabel('Value')
+    ax.set_title(f"Evaluation Metrics  --  {results['run']}\n"
+                 f"N test = {results['n_test']}")
+    ax.grid(True, axis='x', linestyle='--', alpha=0.5)
+
+    for bar, val in zip(bars, values):
+        ax.text(min(val + 0.01, 1.0), bar.get_y() + bar.get_height() / 2,
+                f'{val:.4f}', va='center', fontsize=9)
+
+    fig.tight_layout()
+    path = os.path.join(out_dir, 'metrics.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+def evaluate(model, eigen_test, global_test, y_test, run_name, out_dir):
+    """
+    Evaluate model on a held-out test set and save result PNGs + JSON.
+
+    Saves:
+        out_dir/confusion_matrix.png  -- row-normalised heatmap
+        out_dir/metrics.png           -- bar chart of scalar metrics
+        out_dir/eval_results.json     -- all metrics as JSON
 
     Args:
         model       : Trained Keras model.
         eigen_test  (np.ndarray): shape (N, M, 2)
         global_test (np.ndarray): shape (N, 6)
         y_test      (np.ndarray): shape (N,) integer labels
-        run_name    (str): Label used in printout.
+        run_name    (str): Label used in figure titles.
+        out_dir     (str): Directory where outputs are written.
 
     Returns:
         results (dict): Computed metrics.
-        report  (str):  Plain-text summary.
     """
     probs  = model.predict([eigen_test, global_test], verbose=0)
     y_pred = np.argmax(probs, axis=-1)
@@ -386,25 +484,23 @@ def evaluate(model, eigen_test, global_test, y_test, run_name):
         'exact_no_rfi' : exact_norfi,
     }
 
-    lines = [
-        f"\n=== {run_name} ===",
-        f"  N test samples : {results['n_test']}",
-        f"  Exact accuracy : {exact:.4f}",
-        f"  Tol-1 accuracy : {tol1:.4f}  (|pred - label| <= 1)",
-        f"  --- RFI samples (label > 0) ---",
-        f"  Exact           : {exact_rfi:.4f}",
-        f"  Tol-1           : {tol1_rfi:.4f}",
-        f"  --- No-RFI samples (label == 0) ---",
-        f"  Exact           : {exact_norfi:.4f}",
-    ]
-    report = '\n'.join(lines)
-    print(report)
+    print(f"\n=== {run_name} ===")
+    print(f"  N test  : {results['n_test']}")
+    print(f"  Exact   : {exact:.4f}")
+    print(f"  Tol-1   : {tol1:.4f}")
+    print(f"  RFI exact / tol-1 : {exact_rfi:.4f} / {tol1_rfi:.4f}")
+    print(f"  No-RFI exact      : {exact_norfi:.4f}")
+    print("  Saving evaluation plots ...")
 
     # class_labels: index 0 = clean, indices 1..16 = knee-0..knee-15
     class_labels = ["clean"] + [f"knee-{k}" for k in range(M)]
-    print_knee_confusion_matrix(y_test, y_pred, class_labels)
+    save_confusion_matrix_png(y_test, y_pred, class_labels, out_dir)
+    save_metrics_png(results, out_dir)
 
-    return results, report
+    with open(os.path.join(out_dir, 'eval_results.json'), 'w') as fh:
+        json.dump(results, fh, indent=2)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -479,10 +575,9 @@ def train_one_run(run_name, eigen_train, eigen_val, eigen_test,
         verbose         = 2,
     )
 
-    results, report = evaluate(model, eigen_test, global_test, y_test, run_name)
+    save_training_curves_png(model.history, out_dir)
+    results = evaluate(model, eigen_test, global_test, y_test, run_name, out_dir)
 
-    with open(os.path.join(out_dir, 'eval_results.txt'), 'w') as fh:
-        fh.write(report + '\n')
     with open(os.path.join(out_dir, 'eval_results.json'), 'w') as fh:
         json.dump(results, fh, indent=2)
 
@@ -545,20 +640,13 @@ def main():
     # ------------------------------------------------------------------
     # Step 4: Summary
     # ------------------------------------------------------------------
-    print("\n\n" + "="*60)
-    print(f"{'Metric':<30} {'Value':>10}")
-    print("="*60)
-    print(f"{'Exact accuracy':<30} {results['exact_acc']:>10.4f}")
-    print(f"{'Tol-1 accuracy':<30} {results['tol1_acc']:>10.4f}")
-    print(f"{'RFI exact':<30} {results['exact_rfi']:>10.4f}")
-    print(f"{'RFI tol-1':<30} {results['tol1_rfi']:>10.4f}")
-    print(f"{'No-RFI exact':<30} {results['exact_no_rfi']:>10.4f}")
-    print("="*60)
-
     summary_path = os.path.join(MODELS_ROOT, 'summary.json')
     with open(summary_path, 'w') as fh:
         json.dump(results, fh, indent=2)
     print(f"\nSummary saved to {summary_path}")
+    print(f"Training plots : models/multi_band/training_curves.png")
+    print(f"Confusion matrix: models/multi_band/confusion_matrix.png")
+    print(f"Metrics bar chart: models/multi_band/metrics.png")
 
 
 if __name__ == '__main__':
