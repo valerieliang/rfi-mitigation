@@ -1,8 +1,10 @@
 import h5py
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-HDF5_PATH = r'nisar_data\raw'  # update to full filename if needed
+HDF5_PATH = './nisar_data/raw/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5'
 DATASET_PATH = '/science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV'
 
 with h5py.File(HDF5_PATH, 'r') as f:
@@ -37,7 +39,8 @@ plt.ylabel('Pulse (Slow-Time) Index')
 plt.title('NISAR L0B  HV  Power (dB)')
 plt.tight_layout()
 plt.savefig('nisar_hv_power.png', dpi=150)
-plt.show()
+plt.close()
+print("Saved: nisar_hv_power.png")
 
 # --- range power spectrum of a single pulse (sanity check) ---
 mid_pulse = num_pulses // 2
@@ -51,4 +54,5 @@ plt.ylabel('Power (dB)')
 plt.title(f'Range Frequency Spectrum  --  Pulse {mid_pulse}')
 plt.tight_layout()
 plt.savefig('nisar_hv_range_spectrum.png', dpi=150)
-plt.show()
+plt.close()
+print("Saved: nisar_hv_range_spectrum.png")
