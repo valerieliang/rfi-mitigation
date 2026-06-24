@@ -4,32 +4,25 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-HDF5_PATH = './nisar_data/raw/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5'
-DATASET_PATH = '/science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV'
-
-with h5py.File(HDF5_PATH, 'r') as f:
-    dataset = f[DATASET_PATH]
-    raw = dataset[:]
-
-print("Matrix Shape:", raw.shape)
-print("Data Type:", raw.dtype)
-
-# Structured dtype with 'r' and 'i' fields -- assemble as complex
-matrix = raw['r'].astype(np.float32) + 1j * raw['i'].astype(np.float32)
-
-pulse_count, range_count = matrix.shape
-
-img_pwr_db = 10 * np.log10(np.abs(matrix)**2 / range_count)
-
-SLICES = [
-    (50000,  58000,  'Pulses 50000-58000',   'nisar_hv_mid.png'),
-    (170000, 178000, 'Pulses 170000-178000', 'nisar_hv_bottom.png'),
+BLOCKS = [
+    ('./nisar_data/processed/block_mid.h5',    'nisar_hv_mid.png'),
+    ('./nisar_data/processed/block_bottom.h5', 'nisar_hv_bottom.png'),
 ]
 
-for start, end, title, fname in SLICES:
+for block_path, fname in BLOCKS:
+    with h5py.File(block_path, 'r') as f:
+        block       = f['data'][:]
+        pulse_start = f['data'].attrs['pulse_start']
+        pulse_end   = f['data'].attrs['pulse_end']
+
+    range_count = block.shape[1]
+    pwr_db = 10 * np.log10(np.maximum(np.abs(block)**2 / range_count, 1e-12))
+
+    title = f'Pulses {pulse_start}-{pulse_end}'
+
     fig, ax = plt.subplots()
     im = ax.imshow(
-        img_pwr_db[start:end, :],
+        pwr_db,
         aspect='auto',
         cmap='gray',
         origin='lower',
@@ -37,7 +30,7 @@ for start, end, title, fname in SLICES:
     fig.colorbar(im, ax=ax, label='Power (dB)')
     ax.set_title(title)
     ax.set_xlabel('Range Sample')
-    ax.set_ylabel('Pulse Index')
+    ax.set_ylabel('Pulse Index (block-relative)')
     fig.savefig(fname, dpi=300, bbox_inches='tight')
     plt.close(fig)
-    print(f"Saved {fname}")
+    print(f"Saved {fname}  ({title})")
