@@ -50,6 +50,136 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from train import extract_features
 
 # ---------------------------------------------------------------------------
+# PLOTTING
+# ---------------------------------------------------------------------------
+
+def plot_eigenvalue_profiles(out_h5_path, block_name, plot_dir):
+    """
+    Generate two eigenvalue profile plots for one block group in the output
+    HDF5 and save as PNG.
+
+    Reads eigen_input[:, 0] (eigenvalues in dB) and knee_index / confidence
+    directly from the per-CPI groups written by write_cpi_groups.
+
+    Only range tile ri=0 is used so the number of profiles equals n_cpi_rows,
+    matching the spaghetti-plot style from the reference script.
+
+    Plot 1 -- All CPI rows overlaid (color-coded by predicted knee index)
+        One line per CPI row at ri=0, colored by knee_index. A vertical
+        dashed line marks the mean predicted knee across all tiles in the block.
+
+    Plot 2 -- 2x5 grid of 10 evenly-spaced CPI rows
+        CPI rows sampled at equal spacing, colored by knee_index, with the
+        predicted knee marked as a vertical dashed line per subplot.
+
+    Args:
+        out_h5_path : Path to the knee_maps.h5 output file.
+        block_name  : Group name inside the HDF5 (e.g. 'block_mid').
+        plot_dir    : Directory where the two PNG files are saved.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    os.makedirs(plot_dir, exist_ok=True)
+
+    with h5py.File(out_h5_path, 'r') as f:
+        blk        = f[block_name]
+        n_cpi_rows = int(blk.attrs['n_cpi_rows'])
+        m_pulses   = int(blk.attrs['M'])
+
+        profiles   = []   # (n_cpi_rows,) each entry shape (M,)
+        knees      = []   # int per CPI row
+        confs      = []   # float per CPI row
+
+        for ci in range(n_cpi_rows):
+            grp      = blk[f'cpi_{ci}_0']
+            ev_db    = grp['eigen_input'][:, 0]   # eigenvalues dB, shape (M,)
+            knee_val = int(grp['knee_index'][()])
+            conf_val = float(grp['confidence'][()])
+            profiles.append(ev_db)
+            knees.append(knee_val)
+            confs.append(conf_val)
+
+    knees    = np.array(knees)
+    confs    = np.array(confs)
+    ev_index = np.arange(m_pulses)
+
+    # Color scale spans [0, M] (the full knee label range)
+    norm = mcolors.Normalize(vmin=0, vmax=m_pulses)
+    cmap = cm.plasma
+
+    # ------------------------------------------------------------------
+    # Plot 1: all CPI rows overlaid, colored by predicted knee index
+    # ------------------------------------------------------------------
+    fig1, ax1 = plt.subplots(figsize=(9, 5))
+
+    for ev_db, knee_val in zip(profiles, knees):
+        ax1.plot(ev_index, ev_db, color=cmap(norm(knee_val)),
+                 alpha=0.35, linewidth=0.7)
+
+    mean_knee = knees.mean()
+    ax1.axvline(mean_knee, color='white', linewidth=1.2, linestyle='--',
+                label=f'mean knee = {mean_knee:.1f}')
+
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig1.colorbar(sm, ax=ax1)
+    cbar.set_label('Predicted Knee Index', fontsize=11)
+
+    ax1.set_xlabel('Eigenvalue Index', fontsize=11)
+    ax1.set_ylabel('Eigenvalue Power (dB)', fontsize=11)
+    ax1.set_title(
+        f'Eigenvalue Profiles -- All CPI Rows  (ri=0, color = knee index)\n'
+        f'{block_name}  |  M={m_pulses}  |  '
+        f'mean knee={mean_knee:.1f}  mean conf={confs.mean():.3f}',
+        fontsize=10,
+    )
+    ax1.legend(fontsize=9)
+    ax1.grid(True, linestyle='--', alpha=0.4)
+    fig1.tight_layout()
+
+    out1 = os.path.join(plot_dir, f'{block_name}_ev_all_cpi.png')
+    fig1.savefig(out1, dpi=150)
+    plt.close(fig1)
+
+    # ------------------------------------------------------------------
+    # Plot 2: 2x5 grid of 10 evenly-spaced CPI rows
+    # ------------------------------------------------------------------
+    step         = max(n_cpi_rows // 10, 1)
+    selected_cis = [i * step for i in range(10)]
+    n_cols, n_rows = 5, 2
+    fig2, axes = plt.subplots(n_rows, n_cols, figsize=(16, 6), sharey=True)
+
+    for ax, ci in zip(axes.flat, selected_cis):
+        ev_db    = profiles[ci]
+        knee_val = knees[ci]
+        conf_val = confs[ci]
+        ax.plot(ev_index, ev_db, color=cmap(norm(knee_val)), linewidth=1.4)
+        ax.axvline(knee_val, color='red', linewidth=1.0, linestyle='--')
+        ax.set_title(f'ci={ci}  knee={knee_val}  conf={conf_val:.2f}',
+                     fontsize=9)
+        ax.set_xlabel('EV Index', fontsize=8)
+        ax.set_ylabel('dB', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, linestyle='--', alpha=0.4)
+
+    fig2.suptitle(
+        f'Eigenvalue Profiles -- Selected CPI Rows  (ri=0, color = knee index)\n'
+        f'{block_name}',
+        fontsize=11,
+    )
+    fig2.tight_layout()
+
+    out2 = os.path.join(plot_dir, f'{block_name}_ev_selected_cpi.png')
+    fig2.savefig(out2, dpi=150)
+    plt.close(fig2)
+
+    print(f'    plots -> {os.path.basename(out1)}, {os.path.basename(out2)}')
+
+# ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
 
@@ -79,25 +209,91 @@ DEFAULT_OUT   = os.path.join('nisar_data', 'processed', 'knee_maps.h5')
 # RAW BLOCK LOADING
 # ---------------------------------------------------------------------------
 
+def _decode_chunk(chunk, dataset, group):
+    """
+    Decode a raw chunk to complex64 following the same logic as isce3's
+    DataDecoder (python/packages/nisar/products/readers/Raw/DataDecoder.py).
+
+    Three encoding formats exist in NISAR L0B files:
+
+    1. BFPQLUT  -- Block Floating Point Quantization with lookup table.
+                   A sibling dataset BFPQLUT (float32) is present in the
+                   same HDF5 group. Each sample is a compound {r, i} index
+                   into the LUT: complex = LUT[r] + j*LUT[i].
+
+    2. complex32 (float16 pairs) -- Compound dtype {r: float16, i: float16}.
+                   h5py >= 3.8 exposes this as a compound dtype; older h5py
+                   raises TypeError on .dtype access and we fall back to
+                   treating it as complex32.
+
+    3. complex64 -- Already native; no decoding needed.
+
+    The NISAR RRSD (L0B) products encountered here use encoding (1) or (3).
+    The compound U16 dtype ({r: U16, i: U16}) is the BFPQLUT index format:
+    each sample is a pair of uint16 indices into the LUT.
+
+    Args:
+        chunk   : Raw numpy array as returned by h5py slice.
+        dataset : The h5py dataset object (for dtype introspection).
+        group   : The parent h5py group (to check for BFPQLUT sibling).
+
+    Returns:
+        block (np.ndarray): complex64
+    """
+    # Path 1: BFPQLUT encoding (U16 compound indices into float32 LUT)
+    if "BFPQLUT" in group:
+        lut   = np.asarray(group["BFPQLUT"], dtype=np.float32)
+        block = lut[chunk['r']].astype(np.float32)               + 1j * lut[chunk['i']].astype(np.float32)
+        return block.astype(np.complex64)
+
+    # Path 2: float16 compound (complex32)
+    # h5py >= 3.8 exposes compound dtype; older versions raise TypeError
+    try:
+        storage_dtype = dataset.dtype
+        is_complex32  = (
+            storage_dtype.names is not None
+            and set(storage_dtype.names) == {'r', 'i'}
+            and storage_dtype['r'] == np.float16
+        )
+    except TypeError:
+        is_complex32 = True   # older h5py with complex32
+
+    if is_complex32:
+        block = chunk['r'].astype(np.float32)               + 1j * chunk['i'].astype(np.float32)
+        return block.astype(np.complex64)
+
+    # Path 3: already complex64
+    if np.issubdtype(chunk.dtype, np.complexfloating):
+        return chunk.astype(np.complex64)
+
+    raise ValueError(
+        f"Unsupported raw data dtype: {dataset.dtype}. "
+        "Expected BFPQLUT compound, float16 compound, or complex64."
+    )
+
+
 def load_block(l0_path, dataset_path, pulse_start, pulse_end):
     """
-    Read a pulse range from the raw L0B HDF5 and return a complex64 array.
+    Read a pulse range from the raw NISAR L0B HDF5 and return complex64.
+
+    Handles all three NISAR L0B encoding formats (BFPQLUT, complex32,
+    complex64) by delegating to _decode_chunk.
 
     Args:
         l0_path      : Path to the raw NISAR L0B HDF5 file.
-        dataset_path : Internal HDF5 path to the raw dataset.
+        dataset_path : Internal HDF5 path to the raw dataset (e.g.
+                       /science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV).
         pulse_start  : First pulse index (inclusive).
         pulse_end    : Last pulse index (exclusive).
 
     Returns:
         block (np.ndarray): complex64, shape (pulse_end-pulse_start, range_count)
     """
-    with h5py.File(l0_path, 'r') as f:
-        raw   = f[dataset_path]
-        chunk = raw[pulse_start:pulse_end, :]
-
-    # Structured dtype with 'r' and 'i' fields -> complex
-    block = chunk['r'].astype(np.float32) + 1j * chunk['i'].astype(np.float32)
+    with h5py.File(l0_path, 'r', libver='latest', swmr=True) as f:
+        dataset = f[dataset_path]
+        group   = dataset.parent
+        chunk   = dataset[pulse_start:pulse_end, :]
+        block   = _decode_chunk(chunk, dataset, group)
     return block
 
 
@@ -213,10 +409,14 @@ def main():
         description='Infer knee-index map directly from a raw NISAR L0B file, '
                     'storing results per CPI tile in HDF5.'
     )
-    parser.add_argument('--l0',    default=DEFAULT_L0,
+    parser.add_argument('--l0',      default=DEFAULT_L0,
                         help='Path to raw NISAR L0B HDF5 file.')
-    parser.add_argument('--model', default=DEFAULT_MODEL)
-    parser.add_argument('--out',   default=DEFAULT_OUT)
+    parser.add_argument('--model',   default=DEFAULT_MODEL)
+    parser.add_argument('--out',     default=DEFAULT_OUT)
+    parser.add_argument('--plot',    action='store_true',
+                        help='Save eigenvalue profile PNGs after inference.')
+    parser.add_argument('--plot-dir', default=None,
+                        help='Directory for plots (default: same dir as --out).')
     args = parser.parse_args()
 
     if not os.path.exists(args.l0):
@@ -224,11 +424,16 @@ def main():
     if not os.path.exists(args.model):
         raise FileNotFoundError(f'Model not found: {args.model}')
 
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(out_dir, exist_ok=True)
+
+    plot_dir = args.plot_dir if args.plot_dir else out_dir
 
     print(f'L0B source : {args.l0}')
     print(f'Model      : {args.model}')
     print(f'Output     : {args.out}')
+    if args.plot:
+        print(f'Plot dir   : {plot_dir}')
     print()
 
     print('Loading model ...')
@@ -277,6 +482,13 @@ def main():
                   f'mean={knee.mean():.2f}')
             print(f'  mean conf  : {conf.mean():.4f}')
             print(f'  mean ent   : {ent.mean():.4f}')
+
+            if args.plot:
+                print(f'  Plotting ...')
+                # HDF5 file must be flushed before reading back for plots
+                out_f.flush()
+                plot_eigenvalue_profiles(args.out, block_name, plot_dir)
+
             print()
 
     print(f'Done. Wrote {args.out}')
