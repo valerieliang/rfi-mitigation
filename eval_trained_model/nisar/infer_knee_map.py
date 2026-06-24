@@ -505,6 +505,126 @@ def write_cpi_groups(blk_grp, eigen_buf, global_buf, knee, conf, ent,
             idx += 1
 
 
+
+# ---------------------------------------------------------------------------
+# RAW DATA SANITY CHECK
+# ---------------------------------------------------------------------------
+
+def raw_check(l0_path, plot_dir, n_samples=16):
+    """
+    Decode a small sample of CPI tiles directly from the L0B file and plot
+    their eigenvalue profiles + range power spectra.
+
+    This is the first diagnostic to run when model outputs look suspicious.
+    It bypasses feature extraction and the model entirely, showing the raw
+    decoded signal so you can verify:
+      - The BFPQLUT decode produced valid IQ (not all-zero, not quantised flat)
+      - The SCM eigenvalue spectrum has the expected shape (descending, spread)
+      - Range power spectra look like SAR data (not white noise or DC spikes)
+
+    Samples n_samples tiles spread across the first TARGETS block at ri=0
+    (azimuth sweep, fixed range column 0).
+
+    Args:
+        l0_path  : Path to raw NISAR L0B HDF5 file.
+        plot_dir : Directory to save the PNG.
+        n_samples: Number of CPI tiles to sample (default 16, shown in 4x4 grid).
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    pulse_start, pulse_end, block_name = TARGETS[0]
+    n_pulses   = pulse_end - pulse_start
+    n_cpi_rows = n_pulses // M
+
+    # Sample evenly across azimuth at range tile 0
+    sample_cis = np.linspace(0, n_cpi_rows - 1, n_samples, dtype=int)
+
+    print(f'  raw_check: loading block [{pulse_start}:{pulse_end}] ...')
+    block = load_block(l0_path, L0B_DATASET, pulse_start, pulse_end)
+    block = block[:n_cpi_rows * M, :BLOCK_WIDTH]   # only ri=0
+
+    n_cols = 4
+    n_rows = int(np.ceil(n_samples / n_cols))
+
+    # --- Plot 1: eigenvalue profiles ---
+    fig1, axes1 = plt.subplots(n_rows, n_cols, figsize=(16, n_rows * 3),
+                                sharey=False)
+    fig1.suptitle(
+        f'Raw Eigenvalue Profiles -- {block_name}  ri=0\n'
+        f'{n_samples} CPI tiles sampled across azimuth\n'
+        f'L0B: {os.path.basename(l0_path)}',
+        fontsize=11,
+    )
+    ev_index = np.arange(M)
+
+    for ax, ci in zip(axes1.flat, sample_cis):
+        p0  = ci * M
+        cpi = block[p0:p0 + M, :]
+        if not _is_valid_tile(cpi):
+            ax.set_title(f'ci={ci}  INVALID (gap)', fontsize=8)
+            ax.axis('off')
+            continue
+        scm     = (cpi @ cpi.conj().T) / cpi.shape[1]
+        eigvals = np.linalg.eigvalsh(scm).real[::-1]
+        eigvals = np.maximum(eigvals, 1e-12)
+        ev_db   = 10.0 * np.log10(eigvals)
+        ax.plot(ev_index, ev_db, linewidth=1.2, color='steelblue')
+        ax.set_title(f'ci={ci}  span={ev_db[0]-ev_db[-1]:.1f} dB', fontsize=8)
+        ax.set_xlabel('EV index', fontsize=7)
+        ax.set_ylabel('dB', fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.grid(True, linestyle='--', alpha=0.4)
+
+    # turn off unused axes
+    for ax in axes1.flat[n_samples:]:
+        ax.axis('off')
+
+    fig1.tight_layout()
+    out1 = os.path.join(plot_dir, f'{block_name}_raw_eigenvalues.png')
+    fig1.savefig(out1, dpi=130)
+    plt.close(fig1)
+    print(f'  raw eigenvalue plot -> {os.path.basename(out1)}')
+
+    # --- Plot 2: range power spectra (one pulse per tile) ---
+    fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(16, n_rows * 3),
+                                sharey=False)
+    fig2.suptitle(
+        f'Range Power Spectra (first pulse of each tile) -- {block_name}  ri=0\n'
+        f'{n_samples} CPI tiles sampled across azimuth\n'
+        f'L0B: {os.path.basename(l0_path)}',
+        fontsize=11,
+    )
+
+    for ax, ci in zip(axes2.flat, sample_cis):
+        p0     = ci * M
+        cpi    = block[p0:p0 + M, :]
+        if not _is_valid_tile(cpi):
+            ax.set_title(f'ci={ci}  INVALID (gap)', fontsize=8)
+            ax.axis('off')
+            continue
+        pulse  = cpi[0, :]
+        spec   = np.abs(np.fft.fftshift(np.fft.fft(pulse))) ** 2
+        spec   = 10.0 * np.log10(np.maximum(spec, 1e-12))
+        freqs  = np.fft.fftshift(np.fft.fftfreq(len(pulse)))
+        ax.plot(freqs, spec, linewidth=0.8, color='darkorange')
+        ax.set_title(f'ci={ci}  peak={spec.max():.1f} dB', fontsize=8)
+        ax.set_xlabel('Norm. freq', fontsize=7)
+        ax.set_ylabel('dB', fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.grid(True, linestyle='--', alpha=0.4)
+
+    for ax in axes2.flat[n_samples:]:
+        ax.axis('off')
+
+    fig2.tight_layout()
+    out2 = os.path.join(plot_dir, f'{block_name}_raw_range_spectra.png')
+    fig2.savefig(out2, dpi=130)
+    plt.close(fig2)
+    print(f'  range spectra plot  -> {os.path.basename(out2)}')
+
+
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
@@ -522,12 +642,15 @@ def main():
                         help='Save eigenvalue profile PNGs after inference.')
     parser.add_argument('--plot-dir', default=None,
                         help='Directory for plots (default: same dir as --out).')
+    parser.add_argument('--raw-check', action='store_true',
+                        help='Plot raw decoded eigenvalue profiles and range '
+                             'spectra from the L0B file before running '
+                             'inference. Use this to verify the BFPQLUT decode '
+                             'and SCM quality without running the full pipeline.')
     args = parser.parse_args()
 
     if not os.path.exists(args.l0):
         raise FileNotFoundError(f'L0B file not found: {args.l0}')
-    if not os.path.exists(args.model):
-        raise FileNotFoundError(f'Model not found: {args.model}')
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(out_dir, exist_ok=True)
@@ -535,11 +658,18 @@ def main():
     plot_dir = args.plot_dir if args.plot_dir else out_dir
 
     print(f'L0B source : {args.l0}')
-    print(f'Model      : {args.model}')
     print(f'Output     : {args.out}')
-    if args.plot:
+    if args.plot or args.raw_check:
         print(f'Plot dir   : {plot_dir}')
     print()
+
+    if args.raw_check:
+        print('--- Raw data sanity check ---')
+        raw_check(args.l0, plot_dir)
+        print()
+
+    if not os.path.exists(args.model):
+        raise FileNotFoundError(f'Model not found: {args.model}')
 
     print('Loading model ...')
     model = tf.keras.models.load_model(args.model)
