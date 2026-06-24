@@ -296,16 +296,30 @@ def load_block(l0_path, dataset_path, pulse_start, pulse_end):
 # FEATURE EXTRACTION
 # ---------------------------------------------------------------------------
 
+def _is_valid_tile(cpi):
+    """
+    Return False if a CPI tile is invalid (satellite gap / fill zone).
+
+    Invalid tiles are all-zero or near-zero rows from black bands between
+    data collection segments. They produce degenerate SCMs and must not
+    be passed to the model.
+
+    A tile is marked invalid if more than half its pulse rows have zero
+    total power (sum of |sample|^2 == 0).
+    """
+    row_power = np.sum(np.abs(cpi) ** 2, axis=1)   # (M,)
+    zero_rows = np.sum(row_power == 0.0)
+    return zero_rows <= (cpi.shape[0] // 2)
+
+
 def _extract_features(cpi):
     """
     Compute per-CPI features from a raw complex tile.
 
-    Mirrors extract_features() in train.py exactly so this script is
-    self-contained and does not import from train.
+    Mirrors extract_features() in train.py so this script is self-contained.
 
     Args:
         cpi (np.ndarray): complex64, shape (M, K)
-                          M pulses x K range samples
 
     Returns:
         eigen_input  (np.ndarray): float32, shape (M, 2)
@@ -314,35 +328,39 @@ def _extract_features(cpi):
                          pad to length M
         global_input (np.ndarray): float32, shape (6,)
             [F_factor, sigma_min, sigma_max, mu_min, trace_db, condition_number]
-            Approximates the ST-EST threshold-block statistics on a per-CPI
-            basis so the model has context about overall RFI likelihood.
     """
     eps = 1e-12
 
     # Sample Covariance Matrix (M x M)
-    scm  = (cpi @ cpi.conj().T) / cpi.shape[1]
+    scm     = (cpi @ cpi.conj().T) / cpi.shape[1]
 
     # Eigenvalues (real, descending order)
     eigvals = np.linalg.eigvalsh(scm).real[::-1]
     eigvals = np.maximum(eigvals, eps)
 
-    ev_db   = 10.0 * np.log10(eigvals)            # (M,)
-    slopes  = np.diff(ev_db)                       # (M-1,)
-    slopes  = np.append(slopes, slopes[-1])        # pad to (M,)
+    ev_db  = 10.0 * np.log10(eigvals)         # (M,)
+    slopes = np.diff(ev_db)                    # (M-1,)
+    slopes = np.append(slopes, slopes[-1])     # pad to (M,)
 
     eigen_input = np.stack([ev_db, slopes], axis=1).astype(np.float32)
 
     # Global / ST-EST proxy features
-    lam_max = eigvals[0]
-    lam_min = eigvals[-1]
+    # sigma_max: std of the top-half eigenvalue diffs (most likely RFI region)
+    # sigma_min: std of the bottom-half eigenvalue diffs (signal/noise floor)
+    # mu_min   : mean of the bottom-half eigenvalue diffs
+    # These approximate the TB-level sigma_max/sigma_min used by ST-EST.
+    half      = max(len(eigvals) // 2, 1)
+    diffs_top = np.diff(eigvals[:half])
+    diffs_bot = np.diff(eigvals[half:])
 
-    trace        = float(np.real(np.trace(scm)))
-    trace_db     = 10.0 * np.log10(max(trace, eps))
-    cond_number  = float(lam_max / max(lam_min, eps))
-    sigma_max    = float(np.std(np.diff(eigvals[:1])))   # variation of max EV
-    sigma_min    = float(np.std(np.diff(eigvals[-1:])))  # variation of min EV
-    mu_min       = float(np.mean(np.diff(eigvals[-1:])))
-    f_factor     = float(sigma_max / max(sigma_min, eps))
+    sigma_max   = float(np.std(diffs_top))  if len(diffs_top) > 0 else 0.0
+    sigma_min   = float(np.std(diffs_bot))  if len(diffs_bot) > 0 else 0.0
+    mu_min      = float(np.mean(diffs_bot)) if len(diffs_bot) > 0 else 0.0
+    f_factor    = sigma_max / max(sigma_min, eps)
+
+    trace       = float(np.real(np.trace(scm)))
+    trace_db    = 10.0 * np.log10(max(trace, eps))
+    cond_number = float(eigvals[0] / max(eigvals[-1], eps))
 
     global_input = np.array(
         [f_factor, sigma_min, sigma_max, mu_min, trace_db, cond_number],
@@ -352,9 +370,22 @@ def _extract_features(cpi):
     return eigen_input, global_input
 
 
+# Sentinel values written for invalid (gap) tiles so the HDF5 is complete
+# but downstream code can filter by the valid flag.
+_INVALID_EIGEN  = np.zeros((M, 2),  dtype=np.float32)
+_INVALID_GLOBAL = np.zeros((6,),    dtype=np.float32)
+_INVALID_KNEE   = np.int16(-1)
+_INVALID_CONF   = np.float32(0.0)
+_INVALID_ENT    = np.float32(0.0)
+
+
 def extract_all_features(block, n_cpi_rows, n_range_cols):
     """
-    Tile block into CPI tiles and extract features for every tile.
+    Tile block into CPI tiles and extract features for every valid tile.
+
+    Invalid tiles (satellite gap rows, all-zero pulses) are detected via
+    _is_valid_tile and stored with sentinel values. The valid flag in each
+    HDF5 group identifies them downstream.
 
     Args:
         block        : complex64, shape (n_cpi_rows*M, >=n_range_cols*BLOCK_WIDTH)
@@ -362,8 +393,9 @@ def extract_all_features(block, n_cpi_rows, n_range_cols):
         n_range_cols : Number of range tiles derived from block range width.
 
     Returns:
-        eigen_buf  : float32, shape (n_cpi_rows*n_range_cols, M, 2)
-        global_buf : float32, shape (n_cpi_rows*n_range_cols, 6)
+        eigen_buf  : float32, shape (n_tiles, M, 2)
+        global_buf : float32, shape (n_tiles, 6)
+        valid_mask : bool,    shape (n_tiles,)  True = valid data
     """
     range_used = n_range_cols * BLOCK_WIDTH
     block      = block[:n_cpi_rows * M, :range_used]
@@ -371,6 +403,7 @@ def extract_all_features(block, n_cpi_rows, n_range_cols):
     n_tiles    = n_cpi_rows * n_range_cols
     eigen_buf  = np.empty((n_tiles, M, 2), dtype=np.float32)
     global_buf = np.empty((n_tiles, 6),    dtype=np.float32)
+    valid_mask = np.ones(n_tiles, dtype=bool)
 
     idx = 0
     for ci in range(n_cpi_rows):
@@ -378,40 +411,55 @@ def extract_all_features(block, n_cpi_rows, n_range_cols):
         for ri in range(n_range_cols):
             r0  = ri * BLOCK_WIDTH
             cpi = block[p0:p0 + M, r0:r0 + BLOCK_WIDTH]
-            eigen_buf[idx], global_buf[idx] = _extract_features(cpi)
+            if _is_valid_tile(cpi):
+                eigen_buf[idx], global_buf[idx] = _extract_features(cpi)
+            else:
+                eigen_buf[idx]  = _INVALID_EIGEN
+                global_buf[idx] = _INVALID_GLOBAL
+                valid_mask[idx] = False
             idx += 1
 
-    return eigen_buf, global_buf
+    return eigen_buf, global_buf, valid_mask
 
 
 # ---------------------------------------------------------------------------
 # INFERENCE
 # ---------------------------------------------------------------------------
 
-def run_inference(model, eigen_buf, global_buf):
+def run_inference(model, eigen_buf, global_buf, valid_mask):
     """
-    Run model over pre-extracted feature buffers.
+    Run model over pre-extracted feature buffers, skipping invalid tiles.
 
     Args:
         model      : Loaded Keras model.
         eigen_buf  : float32, shape (n_tiles, M, 2)
         global_buf : float32, shape (n_tiles, 6)
+        valid_mask : bool,    shape (n_tiles,)
 
     Returns:
-        knee : int16,   shape (n_tiles,)
-        conf : float32, shape (n_tiles,)
-        ent  : float32, shape (n_tiles,)
+        knee : int16,   shape (n_tiles,)  -1 for invalid tiles
+        conf : float32, shape (n_tiles,)   0 for invalid tiles
+        ent  : float32, shape (n_tiles,)   0 for invalid tiles
     """
+    n_tiles = len(valid_mask)
+    knee    = np.full(n_tiles, _INVALID_KNEE,  dtype=np.int16)
+    conf    = np.full(n_tiles, _INVALID_CONF,  dtype=np.float32)
+    ent     = np.full(n_tiles, _INVALID_ENT,   dtype=np.float32)
+
+    valid_idx = np.where(valid_mask)[0]
+    if len(valid_idx) == 0:
+        return knee, conf, ent
+
     probs = model.predict(
-        [eigen_buf, global_buf],
+        [eigen_buf[valid_idx], global_buf[valid_idx]],
         batch_size=512,
         verbose=0,
-    )   # (n_tiles, M+1)
+    )   # (n_valid, M+1)
 
-    knee = np.argmax(probs, axis=-1).astype(np.int16)
-    conf = np.max(probs, axis=-1).astype(np.float32)
-    eps  = 1e-12
-    ent  = (-np.sum(probs * np.log(probs + eps), axis=-1)).astype(np.float32)
+    eps = 1e-12
+    knee[valid_idx] = np.argmax(probs, axis=-1).astype(np.int16)
+    conf[valid_idx] = np.max(probs, axis=-1).astype(np.float32)
+    ent[valid_idx]  = (-np.sum(probs * np.log(probs + eps), axis=-1)).astype(np.float32)
 
     return knee, conf, ent
 
@@ -421,19 +469,24 @@ def run_inference(model, eigen_buf, global_buf):
 # ---------------------------------------------------------------------------
 
 def write_cpi_groups(blk_grp, eigen_buf, global_buf, knee, conf, ent,
-                     n_cpi_rows, n_range_cols):
+                     valid_mask, n_cpi_rows, n_range_cols):
     """
     Write one HDF5 group per CPI tile under blk_grp.
 
     Group naming: cpi_{ci}_{ri}
 
+    Invalid tiles (satellite gap zones) are written with sentinel values and
+    valid=0 so downstream code can filter them out without special-casing
+    missing groups.
+
     Args:
         blk_grp      : h5py.Group for the current block (e.g. /block_mid)
         eigen_buf    : float32, shape (n_tiles, M, 2)
         global_buf   : float32, shape (n_tiles, 6)
-        knee         : int16,   shape (n_tiles,)
+        knee         : int16,   shape (n_tiles,)  -1 = invalid
         conf         : float32, shape (n_tiles,)
         ent          : float32, shape (n_tiles,)
+        valid_mask   : bool,    shape (n_tiles,)
         n_cpi_rows   : int
         n_range_cols : int
     """
@@ -447,6 +500,7 @@ def write_cpi_groups(blk_grp, eigen_buf, global_buf, knee, conf, ent,
             cpi_grp.create_dataset('entropy',      data=ent[idx])
             cpi_grp.create_dataset('eigen_input',  data=eigen_buf[idx])
             cpi_grp.create_dataset('global_input', data=global_buf[idx])
+            cpi_grp.create_dataset('valid',        data=np.bool_(valid_mask[idx]))
 
             idx += 1
 
@@ -508,12 +562,16 @@ def main():
                   f'= {n_cpi_rows * n_range_cols} tiles')
 
             print(f'  Extracting features ...')
-            eigen_buf, global_buf = extract_all_features(
+            eigen_buf, global_buf, valid_mask = extract_all_features(
                 block, n_cpi_rows, n_range_cols
             )
+            n_valid   = int(valid_mask.sum())
+            n_invalid = len(valid_mask) - n_valid
+            print(f'  Valid tiles  : {n_valid}  /  Invalid (gap): {n_invalid}')
 
             print(f'  Running inference ...')
-            knee, conf, ent = run_inference(model, eigen_buf, global_buf)
+            knee, conf, ent = run_inference(model, eigen_buf, global_buf,
+                                            valid_mask)
 
             print(f'  Writing per-CPI groups ...')
             blk_grp = out_f.create_group(block_name)
@@ -527,12 +585,18 @@ def main():
             blk_grp.attrs['n_range_cols'] = n_range_cols
 
             write_cpi_groups(blk_grp, eigen_buf, global_buf, knee, conf, ent,
-                             n_cpi_rows, n_range_cols)
+                             valid_mask, n_cpi_rows, n_range_cols)
 
-            print(f'  knee_index : min={knee.min()}  max={knee.max()}  '
-                  f'mean={knee.mean():.2f}')
-            print(f'  mean conf  : {conf.mean():.4f}')
-            print(f'  mean ent   : {ent.mean():.4f}')
+            valid_knee = knee[valid_mask]
+            valid_conf = conf[valid_mask]
+            valid_ent  = ent[valid_mask]
+            if len(valid_knee) > 0:
+                print(f'  knee_index : min={valid_knee.min()}  '
+                      f'max={valid_knee.max()}  mean={valid_knee.mean():.2f}')
+                print(f'  mean conf  : {valid_conf.mean():.4f}')
+                print(f'  mean ent   : {valid_ent.mean():.4f}')
+            else:
+                print(f'  (no valid tiles in this block)')
 
             if args.plot:
                 print(f'  Plotting ...')
