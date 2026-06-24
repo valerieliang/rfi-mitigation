@@ -39,15 +39,10 @@ Usage
 """
 
 import os
-import sys
 import argparse
 import numpy as np
 import h5py
 import tensorflow as tf
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from train import extract_features
 
 # ---------------------------------------------------------------------------
 # PLOTTING
@@ -301,14 +296,70 @@ def load_block(l0_path, dataset_path, pulse_start, pulse_end):
 # FEATURE EXTRACTION
 # ---------------------------------------------------------------------------
 
+def _extract_features(cpi):
+    """
+    Compute per-CPI features from a raw complex tile.
+
+    Mirrors extract_features() in train.py exactly so this script is
+    self-contained and does not import from train.
+
+    Args:
+        cpi (np.ndarray): complex64, shape (M, K)
+                          M pulses x K range samples
+
+    Returns:
+        eigen_input  (np.ndarray): float32, shape (M, 2)
+            channel 0 -- eigenvalues of the SCM in dB, sorted descending
+            channel 1 -- finite-differenced slopes, last value repeated to
+                         pad to length M
+        global_input (np.ndarray): float32, shape (6,)
+            [F_factor, sigma_min, sigma_max, mu_min, trace_db, condition_number]
+            Approximates the ST-EST threshold-block statistics on a per-CPI
+            basis so the model has context about overall RFI likelihood.
+    """
+    eps = 1e-12
+
+    # Sample Covariance Matrix (M x M)
+    scm  = (cpi @ cpi.conj().T) / cpi.shape[1]
+
+    # Eigenvalues (real, descending order)
+    eigvals = np.linalg.eigvalsh(scm).real[::-1]
+    eigvals = np.maximum(eigvals, eps)
+
+    ev_db   = 10.0 * np.log10(eigvals)            # (M,)
+    slopes  = np.diff(ev_db)                       # (M-1,)
+    slopes  = np.append(slopes, slopes[-1])        # pad to (M,)
+
+    eigen_input = np.stack([ev_db, slopes], axis=1).astype(np.float32)
+
+    # Global / ST-EST proxy features
+    lam_max = eigvals[0]
+    lam_min = eigvals[-1]
+
+    trace        = float(np.real(np.trace(scm)))
+    trace_db     = 10.0 * np.log10(max(trace, eps))
+    cond_number  = float(lam_max / max(lam_min, eps))
+    sigma_max    = float(np.std(np.diff(eigvals[:1])))   # variation of max EV
+    sigma_min    = float(np.std(np.diff(eigvals[-1:])))  # variation of min EV
+    mu_min       = float(np.mean(np.diff(eigvals[-1:])))
+    f_factor     = float(sigma_max / max(sigma_min, eps))
+
+    global_input = np.array(
+        [f_factor, sigma_min, sigma_max, mu_min, trace_db, cond_number],
+        dtype=np.float32,
+    )
+
+    return eigen_input, global_input
+
+
 def extract_all_features(block, n_cpi_rows, n_range_cols):
     """
     Tile block into CPI tiles and extract features for every tile.
 
     Args:
-        block       : complex64, shape (n_cpi_rows*M, >=n_range_cols*BLOCK_WIDTH)
-        n_cpi_rows  : Number of CPI rows derived from block pulse count.
-        n_range_cols: Number of range tiles derived from block range width.
+        block        : complex64, shape (n_cpi_rows*M, >=n_range_cols*BLOCK_WIDTH)
+        n_cpi_rows   : Number of CPI rows derived from block pulse count.
+        n_range_cols : Number of range tiles derived from block range width.
 
     Returns:
         eigen_buf  : float32, shape (n_cpi_rows*n_range_cols, M, 2)
@@ -327,7 +378,7 @@ def extract_all_features(block, n_cpi_rows, n_range_cols):
         for ri in range(n_range_cols):
             r0  = ri * BLOCK_WIDTH
             cpi = block[p0:p0 + M, r0:r0 + BLOCK_WIDTH]
-            eigen_buf[idx], global_buf[idx] = extract_features(cpi)
+            eigen_buf[idx], global_buf[idx] = _extract_features(cpi)
             idx += 1
 
     return eigen_buf, global_buf
