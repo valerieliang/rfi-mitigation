@@ -8,21 +8,28 @@ Label convention
 Keras requires non-negative class indices, so the 17 classes are encoded as:
 
     label 0       -> no RFI (clean sentinel)
-    label 1..16   -> knee at eigenvalue index 0..15
+    label 1..16   -> knee at position 1..16 (1-based indexing, matches plot visualization)
 
-The knee index equals the number of distinct pulse rows occupied by RFI in
+The knee label equals the number of distinct pulse rows occupied by RFI in
 this block, because each distinct row contributes rank-1 to the SCM and
-therefore produces one elevated eigenvalue in the descending spectrum:
+therefore produces one elevated eigenvalue in the descending spectrum.
 
-    n_distinct_rows == 1 -> label 1  (knee at index 0)
-    n_distinct_rows == 2 -> label 2  (knee at index 1)
+In 1-based indexing (matching eigenvalue profile plots):
+    n_distinct_rows == 1 -> label 1  (knee at position 1, largest eigenvalue)
+    n_distinct_rows == 2 -> label 2  (knee at position 2, 2nd largest eigenvalue)
     ...
-    n_distinct_rows == 6 -> label 6  (knee at index 5)
-    clean                -> label 0
+    n_distinct_rows == 6 -> label 6  (knee at position 6, 6th largest eigenvalue)
+    clean (no RFI)       -> label 0
 
-Distinct rows are determined from the 'local_idx' fields stored in the
-'rfi_bands' JSON attribute on each HDF5 dataset.  Two bands sharing the
-same local_idx still occupy one row and produce one elevated eigenvalue.
+In 0-based array indexing (for accessing eigvals_normalized[idx]):
+    label 1 -> eigvals_normalized[0]  (knee after 1st eigenvalue)
+    label 2 -> eigvals_normalized[1]  (knee after 2nd eigenvalue)
+    ...
+    label k -> eigvals_normalized[k-1] (knee after k-th eigenvalue)
+
+Distinct rows are determined from the 'pulse_positions' fields stored in the
+'rfi_bands' JSON attribute on each HDF5 dataset. Two bands sharing the
+same pulse position still occupy one row and produce one elevated eigenvalue.
 
 Model output has 17 classes (labels 0..16).
 
@@ -178,27 +185,33 @@ def label_from_rfi_bands(rfi_bands_json):
     """
     Derive the knee label from the 'rfi_bands' JSON attribute of an HDF5 tile.
 
-    The knee label is directly stored as 'knee' in the new JSON format.
-    knee = number of distinct RFI pulses (0 if no RFI).
-    Label 0 is reserved for clean (no RFI).
+    The label equals the number of distinct pulse positions occupied by RFI.
+    This directly corresponds to the knee position in 1-based indexing used in plots.
+
+    Examples (1-based indexing):
+        - 0 distinct RFI pulses → label 0 (clean)
+        - 1 distinct RFI pulse  → label 1 (knee at position 1)
+        - 2 distinct RFI pulses → label 2 (knee at position 2)
+        - etc.
 
     Args:
         rfi_bands_json (str): JSON string with keys:
             pulse_positions (list[int]): 1-based pulse positions of RFI bands
-            knee (int): number of RFI pulses (0 if no RFI)
+            knee (int): number of RFI bands (may include duplicates)
             jnr_db_list (list[int]): JNR in dB for each band
 
     Returns:
-        label (int): knee value, 0 for clean, [1, MAX_BANDS] for RFI.
+        label (int): Number of distinct RFI pulse positions.
+                     0 for clean, [1, MAX_BANDS] for RFI.
+                     Matches 1-based knee position in eigenvalue plots.
     """
     payload = json.loads(rfi_bands_json)
-    knee = payload['knee']
-    # knee is already the number of distinct pulse positions
-    # For the new format, we need to count distinct positions
-    if knee == 0:
+
+    # Count distinct pulse positions
+    # Multiple RFI bands on the same pulse row count as 1 elevated eigenvalue
+    if payload['knee'] == 0:
         return 0  # No RFI
     else:
-        # Count distinct pulse positions (convert to 0-based, then count unique)
         pulse_positions = payload['pulse_positions']
         n_distinct = len(set(pulse_positions))
         return n_distinct
@@ -520,8 +533,9 @@ def evaluate(model, eigen_test, global_test, y_test, run_name, out_dir):
     print(f"  No-RFI exact      : {exact_norfi:.4f}")
     print("  Saving evaluation plots ...")
 
-    # class_labels: index 0 = clean, indices 1..16 = knee-0..knee-15
-    class_labels = ["clean"] + [f"knee-{k}" for k in range(M)]
+    # class_labels: label 0 = clean, label k = knee at position k (1-based)
+    # Example: label 1 = "knee@1", label 2 = "knee@2", etc.
+    class_labels = ["clean"] + [f"knee@{k}" for k in range(1, M + 1)]
     save_confusion_matrix_png(y_test, y_pred, class_labels, out_dir)
     save_metrics_png(results, out_dir)
 
@@ -636,8 +650,10 @@ def main():
     print(f"  RFI samples  : {len(y_rfi)}")
     unique, counts = np.unique(y_rfi, return_counts=True)
     for u, c in zip(unique.tolist(), counts.tolist()):
-        knee_idx = u - 1  # label u -> knee at eigenvalue index u-1
-        print(f"    label {u} (knee-{knee_idx}): {c}")
+        if u == 0:
+            print(f"    label {u} (clean): {c}")
+        else:
+            print(f"    label {u} (knee at position {u}): {c}")
 
     # ------------------------------------------------------------------
     # Step 2: Clean baseline
