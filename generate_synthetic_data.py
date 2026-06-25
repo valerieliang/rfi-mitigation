@@ -478,6 +478,7 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
         all_profiles = []
         all_max_eigval_db = []
         all_max_jnr  = []
+        all_knees = []
 
         for pulse_offset in block_pulse_offsets:
             dset      = f[f"cpi_{pulse_offset}_0"]
@@ -489,9 +490,14 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
             payload  = json.loads(str(dset.attrs['rfi_bands']))
             if payload['knee'] > 0:
                 max_jnr  = float(np.max(payload['jnr_db_list']))
+                # Compute knee: number of distinct pulse positions
+                n_distinct = len(set(payload['pulse_positions']))
+                knee = n_distinct  # Knee index in 1-based indexing
             else:
                 max_jnr = 0.0
+                knee = 0  # No RFI
             all_max_jnr.append(max_jnr)
+            all_knees.append(knee)
 
     norm = mcolors.Normalize(vmin=jnr_min_global, vmax=jnr_max_global)
     cmap = cm.plasma
@@ -501,9 +507,12 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     # ------------------------------------------------------------------
     fig1, ax1 = plt.subplots(figsize=(9, 5))
 
-    for ev_norm, max_jnr in zip(all_profiles, all_max_jnr):
+    for ev_norm, max_jnr, knee in zip(all_profiles, all_max_jnr, all_knees):
         ax1.plot(ev_index_1based, ev_norm, color=cmap(norm(max_jnr)), alpha=0.45,
                  linewidth=0.8)
+        # Mark knee position if RFI is present
+        if knee > 0:
+            ax1.plot(knee, ev_norm[knee-1], 'rx', markersize=4, alpha=0.3)
 
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
@@ -514,7 +523,7 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     ax1.set_ylabel('Normalized Eigenvalue (0-1)', fontsize=11)
     ax1.set_ylim([0, 1.05])
     ax1.set_title(
-        f'Eigenvalue Profiles -- All Blocks  (color = max JNR per block)\n'
+        f'Eigenvalue Profiles -- All Blocks  (color = max JNR per block, red x = knee)\n'
         f'SNR={snr_db:.1f} dB  |  JNR range {jnr_min_global}-{jnr_max_global} dB  |  '
         f'bands 1-{MAX_BANDS}  |  {os.path.basename(h5_path)}',
         fontsize=11,
@@ -538,10 +547,18 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
         ev_norm   = all_profiles[block_idx]
         max_eigval_db = all_max_eigval_db[block_idx]
         max_jnr = all_max_jnr[block_idx]
+        knee = all_knees[block_idx]
+
         ax.plot(ev_index_1based, ev_norm, color=cmap(norm(max_jnr)), linewidth=1.4)
+
+        # Mark knee position if RFI is present
+        if knee > 0:
+            ax.plot(knee, ev_norm[knee-1], 'rx', markersize=8, markeredgewidth=2)
+            ax.axvline(x=knee, color='red', linestyle='--', alpha=0.3, linewidth=1)
+
         ax.set_title(
             f'Block {block_idx}\n'
-            f'λ_max={max_eigval_db:.1f} dB, JNR={max_jnr:.0f} dB',
+            f'λ_max={max_eigval_db:.1f} dB, JNR={max_jnr:.0f} dB, knee={knee}',
             fontsize=8
         )
         ax.set_xlabel('EV Index', fontsize=8)
