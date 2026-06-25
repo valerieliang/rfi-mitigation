@@ -22,9 +22,9 @@ For every tile the output records:
 Output HDF5 layout
 ------------------
 Root attrs: source_file, M, BLOCK_WIDTH, pulse_offset, model_path,
-            label_encoding (text), rfi/clean pulse bounds
+            label_encoding (text), high-rfi/low-rfi pulse bounds
 
-/{region}/                          e.g. /rfi/  or  /clean/
+/{region}/                          e.g. /high-rfi/  or  /low-rfi/
     attrs: region_label, pulse_start, pulse_stop, ci_start, ci_stop,
            n_cpi_rows, n_range_cols, n_tiles, n_valid, n_rfi_detected
 
@@ -48,8 +48,8 @@ Usage
     python eval_knee.py --h5    nisar_data/processed/cpi_blocks.h5
     python eval_knee.py --model models/multi_band/best_model.keras
     python eval_knee.py --out   nisar_data/processed/knee_predictions.h5
-    python eval_knee.py --rfi-start 63000 --rfi-stop 87000
-    python eval_knee.py --clean-start 106000 --clean-stop 122000
+    python eval_knee.py --high-rfi-start 63000 --high-rfi-stop 87000
+    python eval_knee.py --low-rfi-start 106000 --low-rfi-stop 122000
 """
 
 import os
@@ -62,10 +62,10 @@ DEFAULT_H5           = os.path.join('nisar_data', 'processed', 'cpi_blocks.h5')
 DEFAULT_MODEL        = os.path.join('models', 'multi_band', 'best_model.keras')
 DEFAULT_OUT          = os.path.join('nisar_data', 'processed', 'knee_predictions.h5')
 DEFAULT_BATCH        = 512
-DEFAULT_RFI_START    = 63000
-DEFAULT_RFI_STOP     = 87000
-DEFAULT_CLEAN_START  = 106000
-DEFAULT_CLEAN_STOP   = 122000
+DEFAULT_HIGH_RFI_START   = 63000
+DEFAULT_HIGH_RFI_STOP    = 87000
+DEFAULT_LOW_RFI_START    = 106000
+DEFAULT_LOW_RFI_STOP     = 122000
 DEFAULT_PULSE_OFFSET = 46528
 
 LABEL_ENCODING = (
@@ -315,8 +315,8 @@ def main():
     print()
 
     regions = [
-        ('rfi',   args.rfi_start,   args.rfi_stop),
-        ('clean', args.clean_start, args.clean_stop),
+        ('high-rfi',   args.high_rfi_start,   args.high_rfi_stop),
+        ('low-rfi', args.low_rfi_start, args.low_rfi_stop),
     ]
 
     with h5py.File(args.out, 'w') as dst:
@@ -326,10 +326,10 @@ def main():
         dst.attrs['model_path']        = args.model
         dst.attrs['pulse_offset']      = args.pulse_offset
         dst.attrs['label_encoding']    = LABEL_ENCODING
-        dst.attrs['rfi_pulse_start']   = args.rfi_start
-        dst.attrs['rfi_pulse_stop']    = args.rfi_stop
-        dst.attrs['clean_pulse_start'] = args.clean_start
-        dst.attrs['clean_pulse_stop']  = args.clean_stop
+        dst.attrs['high_rfi_pulse_start']   = args.high_rfi_start
+        dst.attrs['high_rfi_pulse_stop']    = args.high_rfi_stop
+        dst.attrs['low_rfi_pulse_start'] = args.low_rfi_start
+        dst.attrs['low_rfi_pulse_stop']  = args.low_rfi_stop
 
         print('=' * 60)
         for region_name, g_start, g_stop in regions:
@@ -364,7 +364,7 @@ def main():
     print('To read a tile:')
     print('  import h5py')
     print(f"  with h5py.File('{args.out}', 'r') as f:")
-    print("      grp  = f['rfi/cpi_500_105']")
+    print("      grp  = f['high-rfi/cpi_500_105']")
     print("      print(grp.attrs['global_pulse_start'])  # first global pulse")
     print("      print(grp.attrs['global_range_start'])  # first range sample")
     print("      print(grp['knee_index'][()])            # predicted class")

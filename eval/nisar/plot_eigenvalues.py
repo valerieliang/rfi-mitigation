@@ -2,7 +2,7 @@
 plot_eigenvalues.py  --  Stage 2: Eigenvalue Profile Plots
 
 Reads cpi_blocks.h5 and produces targeted diagnostic plots for two
-pulse regions of interest (RFI-contaminated and clean urban), sampling
+pulse regions of interest (high-RFI and low-RFI), sampling
 the middle range column of each CPI row in the region.
 
 For each region, two PNGs are saved:
@@ -20,7 +20,7 @@ Usage
     python plot_eigenvalues.py
     python plot_eigenvalues.py --h5 nisar_data/processed/cpi_blocks.h5
     python plot_eigenvalues.py --rfi-start 63000 --rfi-stop 87000
-    python plot_eigenvalues.py --clean-start 106000 --clean-stop 122000
+    python plot_eigenvalues.py --low-rfi-start 106000 --low-rfi-stop 122000
     python plot_eigenvalues.py --grid-step 50
 """
 
@@ -37,10 +37,10 @@ from matplotlib.collections import LineCollection
 
 DEFAULT_H5          = os.path.join('nisar_data', 'processed', 'cpi_blocks.h5')
 DEFAULT_OUT         = os.path.join('nisar_data', 'processed')
-DEFAULT_RFI_START   = 63000
-DEFAULT_RFI_STOP    = 87000
-DEFAULT_CLEAN_START = 106000
-DEFAULT_CLEAN_STOP  = 122000
+DEFAULT_HIGH_RFI_START   = 63000
+DEFAULT_HIGH_RFI_STOP    = 87000
+DEFAULT_LOW_RFI_START = 106000
+DEFAULT_LOW_RFI_STOP  = 122000
 DEFAULT_FILE_PULSE_OFFSET = 46528
 DEFAULT_GRID_STEP   = 100   # plot every Nth valid CPI in the grid figure
 
@@ -199,14 +199,14 @@ def plot_grid(profiles, region_label, out_dir, M, pulse_offset,
 def main():
     parser = argparse.ArgumentParser(
         description='Stage 2: targeted eigenvalue profile plots for RFI '
-                    'and clean regions.'
+                    'and low-RFI regions.'
     )
     parser.add_argument('--h5',           default=DEFAULT_H5)
     parser.add_argument('--out',          default=DEFAULT_OUT)
-    parser.add_argument('--rfi-start',    type=int, default=DEFAULT_RFI_START)
-    parser.add_argument('--rfi-stop',     type=int, default=DEFAULT_RFI_STOP)
-    parser.add_argument('--clean-start',  type=int, default=DEFAULT_CLEAN_START)
-    parser.add_argument('--clean-stop',   type=int, default=DEFAULT_CLEAN_STOP)
+    parser.add_argument('--high-rfi-start', type=int, default=DEFAULT_HIGH_RFI_START)
+    parser.add_argument('--high-rfi-stop',  type=int, default=DEFAULT_HIGH_RFI_STOP)
+    parser.add_argument('--low-rfi-start',  type=int, default=DEFAULT_LOW_RFI_START)
+    parser.add_argument('--low-rfi-stop',   type=int, default=DEFAULT_LOW_RFI_STOP)
     parser.add_argument('--pulse-offset', type=int, default=DEFAULT_FILE_PULSE_OFFSET)
     parser.add_argument('--grid-step',    type=int, default=DEFAULT_GRID_STEP,
                         help='Plot every Nth valid CPI row in the grid figure '
@@ -236,8 +236,8 @@ def main():
     print()
 
     regions = [
-        ('rfi',   args.rfi_start,   args.rfi_stop),
-        ('clean', args.clean_start, args.clean_stop),
+        ('high-rfi',   args.high_rfi_start,   args.high_rfi_stop),
+        ('low-rfi', args.low_rfi_start, args.low_rfi_stop),
     ]
 
     for label, g_start, g_stop in regions:
