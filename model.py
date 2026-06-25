@@ -1,22 +1,22 @@
 """
 CNN-based RFI / Signal Eigenvalue boundary (knee) estimator.
- 
+
 Two-branch architecture:
-  - Eigenvalue branch: 1D CNN over the full eigenvalue + slope profile
-  - Global branch: dense network over scalar covariance / threshold-block statistics
- 
-Key fixes vs. previous iterations:
-  1. Residual skip connection is restored (was commented out -> "ResBlock" was
-     not actually a residual block).
-  2. Conv branch now consumes the FULL eigenvalue profile (M values) plus the
-     full slope profile (M-1 values) as two channels, rather than a truncated
-     21-element flat vector.
-  3. Global branch accepts threshold-block context (F factor, sigma_min,
-     sigma_max, mu_min, trace, condition number) in addition to per-CPI stats.
-  4. Output head is now softmax over knee indices [0, M], producing a full
+  - Eigenvalue branch: 1D CNN over the full NORMALIZED eigenvalue + slope profile
+  - Global branch: dense network over scalar covariance statistics (normalized)
+
+Key features:
+  1. Residual skip connection in conv blocks for gradient flow.
+  2. Conv branch consumes the FULL eigenvalue profile (M values) plus the
+     full slope profile (M-1 values) as two channels.
+  3. Global branch accepts normalized context features:
+     [condition_number, sigma_min, sigma_max, mu_min, f_factor].
+  4. Eigenvalues are NORMALIZED to [0, 1] by dividing by max eigenvalue for
+     scale invariance across different SNR levels.
+  5. Output head is softmax over knee indices [0, M], producing a full
      posterior over the knee location. The expected knee (argmax) is the
      point estimate; the entropy of the distribution is a usable confidence
-     score per CPI. Sparse categorical cross-entropy replaces Huber loss.
+     score per CPI. Sparse categorical cross-entropy loss.
 """
  
 import tensorflow as tf
@@ -85,8 +85,9 @@ def build_model(
     cpi_size : int
         Number of pulses per CPI (M). Eigenvalue profile length.
     n_global_features : int
-        Number of scalar context features per CPI. Suggested set:
-        [F_factor, sigma_min, sigma_max, mu_min, trace_db, condition_number].
+        Number of scalar context features per CPI. Current set (normalized):
+        [condition_number, sigma_min, sigma_max, mu_min, f_factor].
+        All features except condition_number and f_factor are normalized by max eigenvalue.
     n_knee_classes : int or None
         Number of output classes for the knee index. Defaults to cpi_size + 1
         so that index 0 means "no RFI present" and indices 1..M mean
@@ -98,7 +99,8 @@ def build_model(
  
     Inputs
     ------
-    eigen_input  : (cpi_size, 2)  channels = [eigenvalues_dB, slopes_dB_padded]
+    eigen_input  : (cpi_size, 2)  channels = [eigenvalues_normalized, slopes_normalized_padded]
+                   Eigenvalues are normalized to [0, 1] by dividing by max eigenvalue.
     global_input : (n_global_features,)
  
     Output

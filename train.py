@@ -29,17 +29,17 @@ Model output has 17 classes (labels 0..16).
 Feature extraction (per CPI block)
 -----------------------------------
 eigen_input  shape (M, 2):
-    channel 0 -- eigenvalues in dB, descending, from SCM = CPI @ CPI^H / K
-    channel 1 -- finite differences of eigenvalues (slopes), length M,
+    channel 0 -- eigenvalues NORMALIZED to [0, 1], descending, from SCM = CPI @ CPI^H / K
+                 (divided by max eigenvalue for scale invariance)
+    channel 1 -- finite differences of NORMALIZED eigenvalues (slopes), length M,
                  zero-padded at index M-1 so the tensor stays (M, 2)
 
-global_input shape (6,):
-    0  trace_db         -- 10*log10(trace(R))
-    1  condition_number -- lambda_max / lambda_min (dB: ev_db[0] - ev_db[-1])
-    2  sigma_min        -- std of bottom-half SCM diagonal rows
-    3  sigma_max        -- std of top-half SCM diagonal rows
-    4  mu_min           -- mean of bottom-half SCM diagonal rows
-    5  f_factor         -- sigma_max / (sigma_min + eps)
+global_input shape (5,):
+    0  condition_number -- lambda_max / lambda_min (ratio, scale-invariant)
+    1  sigma_min        -- std of bottom-half SCM diagonal (normalized by max eigenvalue)
+    2  sigma_max        -- std of top-half SCM diagonal (normalized by max eigenvalue)
+    3  mu_min           -- mean of bottom-half SCM diagonal (normalized by max eigenvalue)
+    4  f_factor         -- sigma_max / (sigma_min + eps) (ratio, scale-invariant)
 
 Directory layout expected on disk
 -----------------------------------
@@ -87,7 +87,7 @@ DATA_ROOT   = 'data'
 MODELS_ROOT = 'models'
 M           = BLOCK_HEIGHT      # pulses per CPI = number of eigenvalues
 N_CLASSES   = M + 1             # labels 0..M-1 are RFI knee indices; M = no RFI
-N_GLOBAL    = 6
+N_GLOBAL    = 5                 # global features: cond_number, sigma_min, sigma_max, mu_min, f_factor
 N_SEEDS     = 10                # image_0.h5 .. image_9.h5
 
 EPOCHS      = 50
@@ -109,49 +109,62 @@ def _scm_from_cpi(cpi):
         cpi (np.ndarray): Complex array shape (M, K).
 
     Returns:
-        R          (np.ndarray): Complex (M, M) SCM = CPI @ CPI^H / K.
-        eigvals_db (np.ndarray): Real eigenvalues in dB, descending, shape (M,).
+        R                  (np.ndarray): Complex (M, M) SCM = CPI @ CPI^H / K.
+        eigvals_normalized (np.ndarray): Real eigenvalues normalized to [0,1], descending, shape (M,).
     """
     M, K = cpi.shape
     R = (cpi @ cpi.conj().T) / K
     eigvals = np.linalg.eigvalsh(R)             # ascending
     eigvals = np.sort(np.real(eigvals))[::-1]   # descending
-    eigvals_db = 10.0 * np.log10(np.maximum(eigvals, 1e-12))
-    return R, eigvals_db
+    # Normalize by max eigenvalue for scale invariance
+    max_eigval = eigvals[0]
+    eigvals_normalized = eigvals / max(max_eigval, 1e-12)
+    return R, eigvals_normalized
 
 
 def extract_features(cpi):
     """
     Extract eigen_input and global_input feature vectors from one CPI tile.
+    Uses NORMALIZED eigenvalues (scaled by max eigenvalue) for scale invariance.
 
     Args:
         cpi (np.ndarray): Complex array shape (M, K).
 
     Returns:
-        eigen   (np.ndarray): shape (M, 2)  -- [eigvals_db, slopes_padded]
-        global_ (np.ndarray): shape (6,)    -- scalar context features
+        eigen   (np.ndarray): shape (M, 2)  -- [eigvals_normalized, slopes_normalized]
+        global_ (np.ndarray): shape (5,)    -- scalar context features
     """
-    R, eigvals_db = _scm_from_cpi(cpi)
+    M, K = cpi.shape
+    R, eigvals_normalized = _scm_from_cpi(cpi)
 
     # --- Eigenvalue branch features ----------------------------------------
-    slopes        = np.diff(eigvals_db)             # length M-1
+    # Compute slopes from NORMALIZED eigenvalues
+    slopes        = np.diff(eigvals_normalized)     # length M-1
     slopes_padded = np.append(slopes, 0.0)          # length M, zero at end
-    eigen = np.stack([eigvals_db, slopes_padded], axis=-1).astype(np.float32)
+    eigen = np.stack([eigvals_normalized, slopes_padded], axis=-1).astype(np.float32)
 
     # --- Global branch features --------------------------------------------
-    # Diagonal of SCM gives per-row power estimates.
-    diag_db  = 10.0 * np.log10(np.maximum(np.real(np.diag(R)), 1e-12))
+    # Diagonal of SCM, normalized by max eigenvalue
+    diag = np.real(np.diag(R))
+    # Get max eigenvalue in original (non-normalized) space for normalization
+    eigvals_original = np.linalg.eigvalsh(R)
+    max_eigval = np.max(eigvals_original)
+    diag_normalized = diag / max(max_eigval, 1e-12)
+
     half     = max(M // 2, 1)
-    sigma_max = float(np.std(diag_db[:half]))
-    sigma_min = float(np.std(diag_db[half:]))
-    mu_min    = float(np.mean(diag_db[half:]))
-    trace_db  = 10.0 * np.log10(float(np.maximum(np.real(np.trace(R)), 1e-12)))
-    cond_db   = float(eigvals_db[0] - eigvals_db[-1])
+    sigma_max = float(np.std(diag_normalized[:half]))
+    sigma_min = float(np.std(diag_normalized[half:]))
+    mu_min    = float(np.mean(diag_normalized[half:]))
+
+    # Condition number (ratio, scale-invariant)
+    cond_number = eigvals_normalized[0] / max(eigvals_normalized[-1], 1e-12)
+
+    # F-factor (ratio, scale-invariant)
     eps       = 1e-6
     f_factor  = sigma_max / (sigma_min + eps)
 
     global_ = np.array(
-        [trace_db, cond_db, sigma_min, sigma_max, mu_min, f_factor],
+        [cond_number, sigma_min, sigma_max, mu_min, f_factor],
         dtype=np.float32,
     )
     return eigen, global_
@@ -165,23 +178,30 @@ def label_from_rfi_bands(rfi_bands_json):
     """
     Derive the knee label from the 'rfi_bands' JSON attribute of an HDF5 tile.
 
-    Label equals the number of distinct local pulse indices occupied by RFI.
-    Each distinct row contributes rank-1 to the SCM, producing one elevated
-    eigenvalue. The knee sits at eigenvalue index (n_distinct - 1), and the
-    encoded label is n_distinct so that label 0 is reserved for the clean
-    sentinel (no RFI).
+    The knee label is directly stored as 'knee' in the new JSON format.
+    knee = number of distinct RFI pulses (0 if no RFI).
+    Label 0 is reserved for clean (no RFI).
 
     Args:
         rfi_bands_json (str): JSON string with keys:
-            n_bands (int): total bands injected
-            bands (list): dicts each containing 'local_idx', 'row', 'jnr_db'
+            pulse_positions (list[int]): 1-based pulse positions of RFI bands
+            knee (int): number of RFI pulses (0 if no RFI)
+            jnr_db_list (list[int]): JNR in dB for each band
 
     Returns:
-        label (int): n_distinct_rows in [1, MAX_BANDS].
+        label (int): knee value, 0 for clean, [1, MAX_BANDS] for RFI.
     """
-    payload       = json.loads(rfi_bands_json)
-    local_indices = {b['local_idx'] for b in payload['bands']}
-    return len(local_indices)
+    payload = json.loads(rfi_bands_json)
+    knee = payload['knee']
+    # knee is already the number of distinct pulse positions
+    # For the new format, we need to count distinct positions
+    if knee == 0:
+        return 0  # No RFI
+    else:
+        # Count distinct pulse positions (convert to 0-based, then count unique)
+        pulse_positions = payload['pulse_positions']
+        n_distinct = len(set(pulse_positions))
+        return n_distinct
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +220,7 @@ def load_rfi_dataset(folder):
 
     Returns:
         eigen   (np.ndarray): shape (N, M, 2)
-        global_ (np.ndarray): shape (N, 6)
+        global_ (np.ndarray): shape (N, 5)
         labels  (np.ndarray): shape (N,)  int32 knee indices
     """
     eigen_list, global_list, label_list = [], [], []
@@ -227,34 +247,42 @@ def load_rfi_dataset(folder):
     )
 
 
-def load_clean_dataset():
+def load_clean_dataset(snr_levels=[6, 7, 8, 9, 10], n_images_per_snr=5):
     """
     Generate clean CPI samples on-the-fly (no RFI, label = 0 = clean sentinel).
 
-    Uses seeds 0..N_SEEDS-1 and BLOCK_WIDTH range tiles per block to match
-    the tile geometry used by generate_nisar_image.py.
+    Generates clean images across multiple SNR levels to match the training data
+    distribution. Uses the same SNR levels as the RFI dataset.
+
+    Args:
+        snr_levels (list): SNR values in dB to generate clean data for.
+        n_images_per_snr (int): Number of images per SNR level.
 
     Returns:
         eigen   (np.ndarray): shape (N, M, 2)
-        global_ (np.ndarray): shape (N, 6)
+        global_ (np.ndarray): shape (N, 5)
         labels  (np.ndarray): shape (N,)  all equal to 0
     """
     eigen_list, global_list, label_list = [], [], []
     n_range_tiles = RANGE_BINS // BLOCK_WIDTH
 
-    for seed in range(N_SEEDS):
-        clean_image = generate_clean_image(seed=seed)   # (TOTAL_PULSES, RANGE_BINS)
+    seed = 10000  # Start from a different seed range to avoid collision with RFI data
+    for snr_db in snr_levels:
+        for _ in range(n_images_per_snr):
+            clean_image = generate_clean_image(seed=seed, snr_db=snr_db)
 
-        for b in range(N_BLOCKS):
-            pulse_start = b * M
-            for j in range(n_range_tiles):
-                col_start   = j * BLOCK_WIDTH
-                cpi         = clean_image[pulse_start:pulse_start + M,
-                                          col_start:col_start + BLOCK_WIDTH]
-                eigen, glob = extract_features(cpi)
-                eigen_list.append(eigen)
-                global_list.append(glob)
-                label_list.append(0)    # clean sentinel
+            for b in range(N_BLOCKS):
+                pulse_start = b * M
+                for j in range(n_range_tiles):
+                    col_start   = j * BLOCK_WIDTH
+                    cpi         = clean_image[pulse_start:pulse_start + M,
+                                              col_start:col_start + BLOCK_WIDTH]
+                    eigen, glob = extract_features(cpi)
+                    eigen_list.append(eigen)
+                    global_list.append(glob)
+                    label_list.append(0)    # clean sentinel
+
+            seed += 1
 
     return (
         np.stack(eigen_list).astype(np.float32),
@@ -448,7 +476,7 @@ def evaluate(model, eigen_test, global_test, y_test, run_name, out_dir):
     Args:
         model       : Trained Keras model.
         eigen_test  (np.ndarray): shape (N, M, 2)
-        global_test (np.ndarray): shape (N, 6)
+        global_test (np.ndarray): shape (N, 5)
         y_test      (np.ndarray): shape (N,) integer labels
         run_name    (str): Label used in figure titles.
         out_dir     (str): Directory where outputs are written.
@@ -519,7 +547,7 @@ def train_one_run(run_name, eigen_train, eigen_val, eigen_test,
     Args:
         run_name   (str): Unique name for this run (used as folder name).
         eigen_*    (np.ndarray): shape (N, M, 2)
-        global_*   (np.ndarray): shape (N, 6)
+        global_*   (np.ndarray): shape (N, 5)
         y_*        (np.ndarray): shape (N,) integer labels
 
     Returns:
