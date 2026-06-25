@@ -246,6 +246,9 @@ def load_rfi_dataset(folder):
         fpath = os.path.join(folder, fname)
         with h5py.File(fpath, 'r') as f:
             for key in f.keys():
+                # Skip eigenvalue and diagonal datasets, only load CPI data
+                if key.endswith('_eigenvalues') or key.endswith('_diagonal'):
+                    continue
                 cpi           = f[key][:]
                 eigen, glob   = extract_features(cpi)
                 label         = label_from_rfi_bands(str(f[key].attrs['rfi_bands']))
