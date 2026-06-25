@@ -33,6 +33,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from matplotlib.collections import LineCollection
 
 DEFAULT_H5          = os.path.join('nisar_data', 'processed', 'cpi_blocks.h5')
 DEFAULT_OUT         = os.path.join('nisar_data', 'processed')
@@ -88,21 +89,31 @@ def plot_stacked(profiles, region_label, out_dir, M, pulse_offset,
         print(f'  [{region_label}] no valid profiles -- skipping stacked plot')
         return
 
-    ev_index = np.arange(M)
-    max_vals = np.array([p[1][0] for p in profiles])
-    vmin, vmax = max_vals.min(), max_vals.max()
+    ev_index = np.arange(M, dtype=float)
+
+    # Color scale spans the full dB range across all profiles and all indices
+    all_ev = np.concatenate([p[1] for p in profiles])
+    vmin, vmax = float(all_ev.min()), float(all_ev.max())
     cmap = cm.plasma
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     fig, ax = plt.subplots(figsize=(9, 5))
     for ci, ev_db in profiles:
-        ax.plot(ev_index, ev_db, color=cmap(norm(ev_db[0])),
-                linewidth=0.6, alpha=0.7)
+        # Each profile is drawn as segments colored by the local dB value
+        points   = np.array([ev_index, ev_db.astype(float)]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        lc = LineCollection(segments, cmap=cmap, norm=norm,
+                            linewidth=0.6, alpha=0.7)
+        lc.set_array(ev_db[:-1])   # segment color = value at left endpoint
+        ax.add_collection(lc)
+
+    ax.set_xlim(0, M - 1)
+    ax.set_ylim(vmin - 1, vmax + 1)
 
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cb = fig.colorbar(sm, ax=ax, pad=0.02)
-    cb.set_label('Max eigenvalue (dB)', fontsize=9)
+    cb.set_label('Eigenvalue (dB)', fontsize=9)
 
     g_start = pulse_offset + ci_start * M
     g_stop  = pulse_offset + ci_stop  * M
