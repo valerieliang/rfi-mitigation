@@ -34,7 +34,7 @@ import tensorflow as tf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from generate_nisar_image import (
+from generate_synthetic_data import (
     generate_clean_image,
     BLOCK_HEIGHT, N_BLOCKS, RANGE_BINS, BLOCK_WIDTH,
 )
