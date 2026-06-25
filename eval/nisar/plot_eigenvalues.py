@@ -1,29 +1,34 @@
 """
 plot_eigenvalues.py  --  Stage 2: Eigenvalue Profile Plots
 
-Read cpi_blocks.h5 produced by tile_cpi.py and generate eigenvalue profile
-plots for every CPI block (or a sampled subset).  Each plot is a small
-grid of subplots -- one subplot per block -- saved as a PNG named by the
-block index range it covers.
+Reads cpi_blocks.h5 and produces targeted diagnostic plots for two
+pulse regions of interest (RFI-contaminated and clean urban), sampling
+the middle range column of each CPI row in the region.
 
-Output layout
--------------
-<out_dir>/plots/
-    eigenvalues_ci0000-0031_ri0000-0009.png   (one PNG per grid page)
-    eigenvalues_ci0032-0063_ri0000-0009.png
-    ...
+For each region, two PNGs are saved:
 
-Each subplot title shows ci, ri, the dB span of the profile, and whether
-the tile was flagged as invalid.
+  1. stacked_{region}.png
+       All eigenvalue profiles overlaid on one axes, color-coded by
+       the max eigenvalue (dB) of each profile.  Gives a population
+       view of the spread and RFI lift.
+
+  2. grid_{region}.png
+       Each profile in its own subplot on a shared y-axis, arranged
+       in a grid.  Every subplot has the same dB scale so profiles
+       are directly comparable.
+
+Global pulse -> CPI row conversion:
+    ci = (global_pulse - PULSE_OFFSET) // M
+    where PULSE_OFFSET is the pulse index of the first pulse in the file
+    (stored as root attr pulse_start, or defaulting to 0 if absent).
 
 Usage
 -----
     python plot_eigenvalues.py
-    python plot_eigenvalues.py --h5   nisar_data/processed/cpi_blocks.h5
-    python plot_eigenvalues.py --out  nisar_data/processed
-    python plot_eigenvalues.py --step 8    (plot every 8th CPI row)
-    python plot_eigenvalues.py --ri   0    (only range tile 0)
-    python plot_eigenvalues.py --cols 4 --rows 4
+    python plot_eigenvalues.py --h5 nisar_data/processed/cpi_blocks.h5
+    python plot_eigenvalues.py --out nisar_data/processed
+    python plot_eigenvalues.py --rfi-start 63000 --rfi-stop 87000
+    python plot_eigenvalues.py --clean-start 106000 --clean-stop 122000
 """
 
 import os
@@ -33,87 +38,149 @@ import h5py
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
-DEFAULT_H5  = os.path.join('nisar_data', 'processed', 'cpi_blocks.h5')
-DEFAULT_OUT = os.path.join('nisar_data', 'processed')
+DEFAULT_H5          = os.path.join('nisar_data', 'processed', 'cpi_blocks.h5')
+DEFAULT_OUT         = os.path.join('nisar_data', 'processed')
+DEFAULT_RFI_START   = 63000
+DEFAULT_RFI_STOP    = 87000
+DEFAULT_CLEAN_START = 106000
+DEFAULT_CLEAN_STOP  = 122000
+# First global pulse in the L0B file (matches tile_cpi.py source)
+DEFAULT_FILE_PULSE_OFFSET = 46528
 
 
 # ---------------------------------------------------------------------------
 # HELPERS
 # ---------------------------------------------------------------------------
 
-def _load_meta(h5_path):
-    """Return root-level metadata dict from cpi_blocks.h5."""
+def load_meta(h5_path):
     with h5py.File(h5_path, 'r') as f:
         return {k: f.attrs[k] for k in f.attrs}
 
 
-def _load_tile(f, ci, ri):
-    """
-    Load eigen_input, valid flag from an open HDF5 file handle.
+def pulse_to_ci(global_pulse, pulse_offset, M):
+    """Convert a global pulse index to a CPI row index."""
+    return (global_pulse - pulse_offset) // M
 
-    Returns:
-        ev_db  : float32 array (M,)   -- eigenvalues in dB, descending
-        valid  : bool
+
+def load_region(h5_path, ci_start, ci_stop, ri_mid, M):
     """
-    key = f'cpi_{ci}_{ri}'
-    if key not in f:
-        return None, False
-    grp   = f[key]
-    valid = bool(grp['valid'][()])
-    if not valid:
-        return None, False
-    ev_db = grp['eigen_input'][:, 0]   # column 0 = eigenvalues in dB
-    return ev_db, True
+    Load eigenvalue profiles for every CPI row in [ci_start, ci_stop)
+    at range column ri_mid.
+
+    Returns list of (ci, ev_db) for valid tiles only.
+    """
+    profiles = []
+    with h5py.File(h5_path, 'r') as f:
+        for ci in range(ci_start, ci_stop):
+            key = f'cpi_{ci}_{ri_mid}'
+            if key not in f:
+                continue
+            grp = f[key]
+            if not bool(grp['valid'][()]):
+                continue
+            ev_db = grp['eigen_input'][:, 0].astype(np.float32)
+            profiles.append((ci, ev_db))
+    return profiles
 
 
 # ---------------------------------------------------------------------------
-# PLOT ONE PAGE
+# PLOT 1: STACKED (all profiles overlaid, color = max eigenvalue)
 # ---------------------------------------------------------------------------
 
-def _plot_page(tiles, page_label, out_dir, M, n_cols, n_rows):
-    """
-    Render a grid of eigenvalue profiles for a list of (ci, ri, ev_db, valid)
-    tuples.  Saves one PNG per call.
+def plot_stacked(profiles, region_label, out_dir, M,
+                 pulse_offset, ci_start, ci_stop):
+    if not profiles:
+        print(f'  [{region_label}] no valid profiles -- skipping stacked plot')
+        return
 
-    Args:
-        tiles      : list of (ci, ri, ev_db_or_None, is_valid)
-        page_label : str used in filename and suptitle
-        out_dir    : destination directory (already exists)
-        M          : CPI size (x-axis length)
-        n_cols     : subplot grid columns
-        n_rows     : subplot grid rows
-    """
     ev_index = np.arange(M)
-    fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(n_cols * 3.5, n_rows * 2.8),
-                             sharey=False)
-    fig.suptitle(f'Eigenvalue Profiles  --  {page_label}', fontsize=10)
+    max_vals = np.array([p[1][0] for p in profiles])   # first EV = max in dB
+    vmin, vmax = max_vals.min(), max_vals.max()
+    norm  = plt.Normalize(vmin=vmin, vmax=vmax)
+    cmap  = cm.plasma
 
-    for ax, (ci, ri, ev_db, is_valid) in zip(axes.flat, tiles):
-        if not is_valid or ev_db is None:
-            ax.set_title(f'ci={ci} ri={ri}\nINVALID', fontsize=7, color='red')
-            ax.axis('off')
-            continue
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for ci, ev_db in profiles:
+        color = cmap(norm(ev_db[0]))
+        ax.plot(ev_index, ev_db, color=color, linewidth=0.6, alpha=0.7)
+
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cb = fig.colorbar(sm, ax=ax, pad=0.02)
+    cb.set_label('Max eigenvalue (dB)', fontsize=9)
+
+    g_start = pulse_offset + ci_start * M
+    g_stop  = pulse_offset + ci_stop  * M
+    ax.set_title(
+        f'{region_label}  --  stacked eigenvalue profiles\n'
+        f'global pulses {g_start}--{g_stop}  '
+        f'({len(profiles)} valid CPI rows  ri=mid)',
+        fontsize=10,
+    )
+    ax.set_xlabel('Eigenvalue index', fontsize=9)
+    ax.set_ylabel('Eigenvalue (dB)', fontsize=9)
+    ax.grid(True, linestyle='--', linewidth=0.4, alpha=0.5)
+    fig.tight_layout()
+
+    out_path = os.path.join(out_dir, f'stacked_{region_label}.png')
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  Saved {os.path.basename(out_path)}')
+
+
+# ---------------------------------------------------------------------------
+# PLOT 2: GRID (individual subplots, shared y-axis scale)
+# ---------------------------------------------------------------------------
+
+def plot_grid(profiles, region_label, out_dir, M,
+              pulse_offset, ci_start, ci_stop, n_cols=6):
+    if not profiles:
+        print(f'  [{region_label}] no valid profiles -- skipping grid plot')
+        return
+
+    n       = len(profiles)
+    n_rows  = int(np.ceil(n / n_cols))
+    ev_index = np.arange(M)
+
+    # Shared y-axis limits across all profiles
+    all_ev = np.stack([p[1] for p in profiles])
+    y_min  = float(all_ev.min()) - 1.0
+    y_max  = float(all_ev.max()) + 1.0
+
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(n_cols * 2.4, n_rows * 2.0),
+        sharey=True,
+    )
+
+    g_start = pulse_offset + ci_start * M
+    g_stop  = pulse_offset + ci_stop  * M
+    fig.suptitle(
+        f'{region_label}  --  individual eigenvalue profiles  '
+        f'(shared y-axis)\n'
+        f'global pulses {g_start}--{g_stop}  ri=mid',
+        fontsize=10,
+    )
+
+    for ax, (ci, ev_db) in zip(axes.flat, profiles):
         span = float(ev_db[0] - ev_db[-1])
-        ax.plot(ev_index, ev_db, linewidth=1.0, color='steelblue')
-        ax.set_title(f'ci={ci} ri={ri}  span={span:.1f}dB', fontsize=7)
-        ax.set_xlabel('EV index', fontsize=6)
-        ax.set_ylabel('dB', fontsize=6)
+        g    = pulse_offset + ci * M
+        ax.plot(ev_index, ev_db, linewidth=0.9, color='steelblue')
+        ax.set_title(f'g={g}\nspan={span:.1f}dB', fontsize=6)
+        ax.set_ylim(y_min, y_max)
         ax.tick_params(labelsize=5)
-        ax.grid(True, linestyle='--', linewidth=0.4, alpha=0.5)
+        ax.grid(True, linestyle='--', linewidth=0.3, alpha=0.5)
 
-    # Hide unused subplots
-    for ax in axes.flat[len(tiles):]:
+    for ax in axes.flat[n:]:
         ax.axis('off')
 
     fig.tight_layout()
-
-    fname    = f'eigenvalues_{page_label}.png'
-    out_path = os.path.join(out_dir, fname)
-    fig.savefig(out_path, dpi=120, bbox_inches='tight')
+    out_path = os.path.join(out_dir, f'grid_{region_label}.png')
+    fig.savefig(out_path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    return out_path
+    print(f'  Saved {os.path.basename(out_path)}')
 
 
 # ---------------------------------------------------------------------------
@@ -122,22 +189,24 @@ def _plot_page(tiles, page_label, out_dir, M, n_cols, n_rows):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Stage 2: plot eigenvalue profiles from cpi_blocks.h5.'
+        description='Stage 2: targeted eigenvalue profile plots for RFI '
+                    'and clean regions.'
     )
-    parser.add_argument('--h5',   default=DEFAULT_H5,
-                        help='Path to cpi_blocks.h5 (output of tile_cpi.py).')
-    parser.add_argument('--out',  default=DEFAULT_OUT,
-                        help='Root output directory.  A plots/ subfolder '
-                             'is created automatically.')
-    parser.add_argument('--step', type=int, default=1,
-                        help='Plot every Nth CPI row (default 1 = all rows).')
-    parser.add_argument('--ri',   type=int, default=None,
-                        help='Restrict to a single range tile index.  '
-                             'Default: all range tiles.')
-    parser.add_argument('--cols', type=int, default=5,
-                        help='Subplot grid columns per page (default 5).')
-    parser.add_argument('--rows', type=int, default=4,
-                        help='Subplot grid rows per page (default 4).')
+    parser.add_argument('--h5',           default=DEFAULT_H5)
+    parser.add_argument('--out',          default=DEFAULT_OUT)
+    parser.add_argument('--rfi-start',    type=int, default=DEFAULT_RFI_START,
+                        help='Global pulse start of RFI region (default 63000).')
+    parser.add_argument('--rfi-stop',     type=int, default=DEFAULT_RFI_STOP,
+                        help='Global pulse stop  of RFI region (default 87000).')
+    parser.add_argument('--clean-start',  type=int, default=DEFAULT_CLEAN_START,
+                        help='Global pulse start of clean region (default 106000).')
+    parser.add_argument('--clean-stop',   type=int, default=DEFAULT_CLEAN_STOP,
+                        help='Global pulse stop  of clean region (default 122000).')
+    parser.add_argument('--pulse-offset', type=int, default=DEFAULT_FILE_PULSE_OFFSET,
+                        help='Global pulse index of the first pulse in the file '
+                             '(default 46528).')
+    parser.add_argument('--cols',         type=int, default=6,
+                        help='Columns in the grid plot (default 6).')
     args = parser.parse_args()
 
     if not os.path.exists(args.h5):
@@ -146,70 +215,44 @@ def main():
     plots_dir = os.path.join(args.out, 'plots')
     os.makedirs(plots_dir, exist_ok=True)
 
-    meta         = _load_meta(args.h5)
+    meta         = load_meta(args.h5)
     M            = int(meta['M'])
     n_cpi_rows   = int(meta['n_cpi_rows'])
     n_range_cols = int(meta['n_range_cols'])
+    ri_mid       = n_range_cols // 2
 
-    ci_list = list(range(0, n_cpi_rows, args.step))
-    ri_list = [args.ri] if args.ri is not None else list(range(n_range_cols))
-
-    per_page = args.cols * args.rows
-    total    = len(ci_list) * len(ri_list)
-    print(f'Source      : {args.h5}')
-    print(f'M           : {M}')
-    print(f'Grid        : {n_cpi_rows} CPI rows x {n_range_cols} range cols')
-    print(f'Selected    : {len(ci_list)} CPI rows x {len(ri_list)} range cols '
-          f'= {total} tiles')
-    print(f'Per page    : {per_page}  ({args.rows} rows x {args.cols} cols)')
-    print(f'Plots dir   : {plots_dir}')
+    print(f'Source       : {args.h5}')
+    print(f'M            : {M}')
+    print(f'Grid         : {n_cpi_rows} CPI rows x {n_range_cols} range cols')
+    print(f'Middle ri    : {ri_mid}')
+    print(f'Pulse offset : {args.pulse_offset}')
     print()
 
-    page_tiles  = []
-    page_ci_min = page_ri_min = None
-    page_ci_max = page_ri_max = None
-    n_pages     = 0
+    regions = [
+        ('rfi',   args.rfi_start,   args.rfi_stop),
+        ('clean', args.clean_start, args.clean_stop),
+    ]
 
-    def _flush_page(tiles, ci_min, ci_max, ri_min, ri_max):
-        nonlocal n_pages
-        label    = (f'ci{ci_min:04d}-{ci_max:04d}'
-                    f'_ri{ri_min:04d}-{ri_max:04d}')
-        out_path = _plot_page(tiles, label, plots_dir, M,
-                              args.cols, args.rows)
-        n_pages += 1
-        print(f'  Saved {os.path.basename(out_path)}  ({len(tiles)} tiles)')
+    for label, g_start, g_stop in regions:
+        ci_start = pulse_to_ci(g_start, args.pulse_offset, M)
+        ci_stop  = pulse_to_ci(g_stop,  args.pulse_offset, M)
+        ci_start = max(0, ci_start)
+        ci_stop  = min(n_cpi_rows, ci_stop)
 
-    with h5py.File(args.h5, 'r') as f:
-        for ci in ci_list:
-            for ri in ri_list:
-                ev_db, valid = _load_tile(f, ci, ri)
-                page_tiles.append((ci, ri, ev_db, valid))
+        print(f'--- {label}  g=[{g_start}, {g_stop})  '
+              f'ci=[{ci_start}, {ci_stop})  '
+              f'({ci_stop - ci_start} rows) ---')
 
-                if page_ci_min is None:
-                    page_ci_min = page_ci_max = ci
-                    page_ri_min = page_ri_max = ri
-                else:
-                    page_ci_min = min(page_ci_min, ci)
-                    page_ci_max = max(page_ci_max, ci)
-                    page_ri_min = min(page_ri_min, ri)
-                    page_ri_max = max(page_ri_max, ri)
+        profiles = load_region(args.h5, ci_start, ci_stop, ri_mid, M)
+        print(f'  Valid profiles loaded : {len(profiles)}')
 
-                if len(page_tiles) == per_page:
-                    _flush_page(page_tiles,
-                                page_ci_min, page_ci_max,
-                                page_ri_min, page_ri_max)
-                    page_tiles  = []
-                    page_ci_min = page_ri_min = None
-                    page_ci_max = page_ri_max = None
+        plot_stacked(profiles, label, plots_dir, M,
+                     args.pulse_offset, ci_start, ci_stop)
+        plot_grid(profiles, label, plots_dir, M,
+                  args.pulse_offset, ci_start, ci_stop, n_cols=args.cols)
+        print()
 
-        # Flush remaining tiles
-        if page_tiles:
-            _flush_page(page_tiles,
-                        page_ci_min, page_ci_max,
-                        page_ri_min, page_ri_max)
-
-    print()
-    print(f'Done.  {n_pages} PNG(s) written to {plots_dir}')
+    print(f'Done.  Plots in {plots_dir}')
 
 
 if __name__ == '__main__':
