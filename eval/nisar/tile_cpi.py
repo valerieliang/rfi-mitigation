@@ -242,12 +242,12 @@ def main():
     data = data[:n_pulses_used, :n_range_used]
 
     # --- Write output HDF5 ---
+    # Features are extracted for every tile including gap/fill zones so that
+    # eval_knee.py can observe how the model responds to degenerate SCMs.
+    # The valid flag is stored for reference but does not gate extraction.
     print('Extracting features and writing HDF5 ...')
     n_valid   = 0
     n_invalid = 0
-
-    _zero_eigen  = np.zeros((M, 2), dtype=np.float32)
-    _zero_global = np.zeros((6,),   dtype=np.float32)
 
     with h5py.File(args.out, 'w') as f:
         # Root attributes
@@ -266,6 +266,14 @@ def main():
                 r0  = ri * BLOCK_WIDTH
                 cpi = data[p0:p0 + M, r0:r0 + BLOCK_WIDTH]
 
+                is_valid = _is_valid_tile(cpi)
+                if is_valid:
+                    n_valid += 1
+                else:
+                    n_invalid += 1
+
+                eigen_in, global_in = extract_features(cpi)
+
                 grp = f.create_group(f'cpi_{ci}_{ri}')
                 grp.attrs['ci'] = ci
                 grp.attrs['ri'] = ri
@@ -274,17 +282,9 @@ def main():
                 grp.attrs['range_start']  = r0
                 grp.attrs['range_end']    = r0 + BLOCK_WIDTH
 
-                if _is_valid_tile(cpi):
-                    eigen_in, global_in = extract_features(cpi)
-                    grp.create_dataset('eigen_input',  data=eigen_in)
-                    grp.create_dataset('global_input', data=global_in)
-                    grp.create_dataset('valid', data=np.bool_(True))
-                    n_valid += 1
-                else:
-                    grp.create_dataset('eigen_input',  data=_zero_eigen)
-                    grp.create_dataset('global_input', data=_zero_global)
-                    grp.create_dataset('valid', data=np.bool_(False))
-                    n_invalid += 1
+                grp.create_dataset('eigen_input',  data=eigen_in)
+                grp.create_dataset('global_input', data=global_in)
+                grp.create_dataset('valid', data=np.bool_(is_valid))
 
             if (ci + 1) % 100 == 0 or ci == n_cpi_rows - 1:
                 print(f'  CPI row {ci + 1:5d} / {n_cpi_rows}  '
