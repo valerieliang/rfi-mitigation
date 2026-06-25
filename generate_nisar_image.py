@@ -46,10 +46,10 @@ from typing import List
 # CONSTANTS
 # ---------------------------------------------------------------------------
 
-NOISE_DB = 3
-SNR_DB   = 6        # signal power = noise power * 10^(SNR_DB/10)
+NOISE_DB = 3        # fixed noise power in dB
+SNR_RANGE_DB = (6, 10)   # SNR range in dB: [6, 7, 8, 9, 10]
 
-JNR_RANGE_DB = (6, 30)   # per-band JNR range, both ends inclusive
+JNR_RANGE_DB = (10, 30)  # per-band JNR range, both ends inclusive
 
 TOTAL_PULSES = 1600     # rows  (slow-time / azimuth)
 RANGE_BINS   = 10000    # cols  (fast-time / range)
@@ -134,21 +134,22 @@ def verify_matrix_power(matrix, expected_power_db, label="matrix"):
 # CLEAN IMAGE
 # ---------------------------------------------------------------------------
 
-def generate_clean_image(seed=0):
+def generate_clean_image(seed=0, snr_db=6):
     """
     Generate a complex-valued clean image: spatially white noise + signal.
 
     Noise power : NOISE_DB dB
-    Signal power: NOISE_DB + SNR_DB dB
+    Signal power: NOISE_DB + snr_db dB
 
     Args:
         seed (int): Base seed. Child seeds are seed+NOISE_SEED, seed+SIGNAL_SEED.
+        snr_db (float): Signal-to-noise ratio in dB.
 
     Returns:
         clean_image (np.ndarray): Complex64 array of shape (TOTAL_PULSES, RANGE_BINS).
     """
     noise_power_linear  = 10.0 ** (NOISE_DB / 10.0)
-    signal_power_linear = noise_power_linear * (10.0 ** (SNR_DB / 10.0))
+    signal_power_linear = noise_power_linear * (10.0 ** (snr_db / 10.0))
 
     # Complex Gaussian: real and imag each carry half the power.
     rng_noise = np.random.default_rng(seed + NOISE_SEED)
@@ -170,7 +171,7 @@ def generate_clean_image(seed=0):
 # RFI IMAGE
 # ---------------------------------------------------------------------------
 
-def generate_rfi_image(seed=0):
+def generate_rfi_image(seed=0, snr_db=6):
     """
     Generate a complex-valued image with additive multi-band RFI injected into
     a clean frame.
@@ -184,12 +185,13 @@ def generate_rfi_image(seed=0):
     Args:
         seed (int): Base seed. JNR draws use seed+JNR_SEED; RFI uses
                     seed+RFI_SEED.
+        snr_db (float): Signal-to-noise ratio in dB for this image.
 
     Returns:
         rfi_image (np.ndarray): Complex64 array of shape (TOTAL_PULSES, RANGE_BINS).
         meta      (RfiMeta)   : Per-block band descriptors.
     """
-    clean_image = generate_clean_image(seed)
+    clean_image = generate_clean_image(seed, snr_db)
     rfi_signal, meta = _generate_multi_band_rfi(seed)
     rfi_image = (clean_image + rfi_signal).astype(np.complex64)
     return rfi_image, meta
@@ -292,6 +294,7 @@ def divide_cpi_and_save(
     matrix,
     meta,
     seed,
+    snr_db,
     cpi_height=BLOCK_HEIGHT,
     cpi_width=BLOCK_WIDTH,
     output_path=None,
@@ -309,7 +312,7 @@ def divide_cpi_and_save(
         block_height   (int)   : pulse rows per RFI injection block
         n_blocks       (int)   : number of RFI injection blocks
         noise_db       (float) : noise floor in dB
-        snr_db         (float) : signal-to-noise ratio in dB
+        snr_db         (float) : signal-to-noise ratio in dB for this file
         jnr_range_low  (int)   : lower bound of per-band JNR sampling range
         jnr_range_high (int)   : upper bound of per-band JNR sampling range
         min_bands      (int)   : minimum bands per block
@@ -319,16 +322,18 @@ def divide_cpi_and_save(
     Dataset per CPI tile, name "cpi_{i}_{j}":
         Data: complex64 array of shape (cpi_height, cpi_width).
         Attribute 'rfi_bands' (str): JSON object with keys:
-            n_bands (int): number of RFI bands injected in this block
-            bands (list): per-band dicts, each with:
-                local_idx (int): pulse index within the block [0, BLOCK_HEIGHT)
-                row       (int): absolute pulse row in the full image
-                jnr_db    (int): JNR of this band in dB
+            pulse_positions (list[int]): 1-based pulse positions of RFI bands
+            knee (int): number of RFI pulses (0 if no RFI)
+            jnr_db_list (list[int]): JNR in dB for each band
+        Additional datasets for eigenvalue analysis:
+            "cpi_{i}_{j}_eigenvalues": sorted eigenvalues (largest to smallest)
+            "cpi_{i}_{j}_diagonal": diagonal values of SCM
 
     Args:
         matrix     (np.ndarray): Complex64 array of shape (TOTAL_PULSES, RANGE_BINS).
         meta       (RfiMeta)   : RFI injection metadata from generate_rfi_image.
         seed       (int)       : Base seed used to generate the image.
+        snr_db     (float)     : SNR in dB for this image.
         cpi_height (int)       : Pulse rows per CPI tile. Must divide TOTAL_PULSES.
         cpi_width  (int)       : Range columns per CPI tile. Must divide RANGE_BINS.
         output_path(str|None)  : Path for the HDF5 file. No file is written if None.
@@ -353,7 +358,7 @@ def divide_cpi_and_save(
         f.attrs['block_height']    = BLOCK_HEIGHT
         f.attrs['n_blocks']        = N_BLOCKS
         f.attrs['noise_db']        = NOISE_DB
-        f.attrs['snr_db']          = SNR_DB
+        f.attrs['snr_db']          = snr_db
         f.attrs['jnr_range_low']   = JNR_RANGE_DB[0]
         f.attrs['jnr_range_high']  = JNR_RANGE_DB[1]
         f.attrs['min_bands']       = MIN_BANDS
@@ -367,26 +372,46 @@ def divide_cpi_and_save(
             block_idx = i // BLOCK_HEIGHT
             bands     = meta.bands_per_block[block_idx]
 
-            # Serialise to JSON: include band count and per-band local indices.
+            # Convert to 1-based pulse positions and extract JNR values
+            pulse_positions = [b.local_idx + 1 for b in bands]  # 1-based indexing
+            jnr_db_list = [b.jnr_db for b in bands]
+            knee = len(bands)  # Number of RFI pulses, 0 if no RFI
+
+            # Serialise to JSON with new format
             bands_json = json.dumps({
-                'n_bands': len(bands),
-                'bands': [
-                    {'local_idx': b.local_idx, 'row': b.row, 'jnr_db': b.jnr_db}
-                    for b in bands
-                ],
+                'pulse_positions': pulse_positions,
+                'knee': knee,
+                'jnr_db_list': jnr_db_list,
             })
 
             for j in range(0, RANGE_BINS, cpi_width):
                 cpi  = matrix[i:i + cpi_height, j:j + cpi_width]
+
+                # Compute SCM: M * M^H / cpi_width
+                M = cpi
+                SCM = (M @ M.conj().T) / cpi_width
+
+                # Extract diagonal and eigenvalues
+                diagonal = np.diag(SCM).real
+                eigvals = np.linalg.eigvalsh(SCM)
+                eigvals_sorted = np.sort(eigvals)[::-1]  # Largest to smallest
+
+                # Save CPI data
                 dset = f.create_dataset(f"cpi_{i}_{j}", data=cpi)
                 dset.attrs['rfi_bands'] = bands_json
+
+                # Save eigenvalue analysis
+                f.create_dataset(f"cpi_{i}_{j}_eigenvalues", data=eigvals_sorted)
+                f.create_dataset(f"cpi_{i}_{j}_diagonal", data=diagonal)
 
 
 # ---------------------------------------------------------------------------
 # PIPELINE CONFIGURATION
 # ---------------------------------------------------------------------------
 
-N_IMAGES   = 10     # number of raw images (seeds 0..N_IMAGES-1)
+N_IMAGES_PER_SNR = 10          # number of images per SNR level
+SNR_LEVELS = [6, 7, 8, 9, 10]  # SNR levels in dB
+N_IMAGES = N_IMAGES_PER_SNR * len(SNR_LEVELS)  # total = 25 images
 DATA_ROOT  = 'data' # root output directory
 
 
@@ -394,26 +419,29 @@ DATA_ROOT  = 'data' # root output directory
 # MAIN
 # ---------------------------------------------------------------------------
 
-def _compute_eigenvalues_db(cpi):
+def _compute_eigenvalues_normalized(cpi):
     """
-    Compute sorted descending eigenvalues in dB from a complex CPI tile.
+    Compute sorted descending eigenvalues normalized to [0, 1] from a complex CPI tile.
 
-    Forms the sample covariance matrix R = CPI @ CPI^H / K where K is the
+    Forms the sample covariance matrix SCM = M @ M^H / K where K is the
     number of range bins (columns), then returns eigenvalues sorted descending
-    converted to dB via 10 * log10.
+    normalized by the largest eigenvalue.
 
     Args:
         cpi (np.ndarray): Complex array of shape (M, K) where M = BLOCK_HEIGHT.
 
     Returns:
-        eigvals_db (np.ndarray): Shape (M,), eigenvalues in dB descending order.
+        eigvals_normalized (np.ndarray): Shape (M,), eigenvalues normalized to [0,1].
+        max_eigval_db (float): Largest eigenvalue in dB (10*log10).
     """
     M, K  = cpi.shape
-    R     = (cpi @ cpi.conj().T) / K           # (M, M) sample covariance
-    eigvals = np.linalg.eigvalsh(R)             # ascending real eigenvalues
-    eigvals = np.sort(eigvals)[::-1]            # descending
-    eigvals_db = 10.0 * np.log10(np.maximum(eigvals, 1e-12))
-    return eigvals_db
+    SCM   = (cpi @ cpi.conj().T) / K            # (M, M) sample covariance
+    eigvals = np.linalg.eigvalsh(SCM)            # ascending real eigenvalues
+    eigvals = np.sort(eigvals)[::-1]             # descending
+    max_eigval = eigvals[0]
+    max_eigval_db = 10.0 * np.log10(max(max_eigval, 1e-12))
+    eigvals_normalized = eigvals / max(max_eigval, 1e-12)
+    return eigvals_normalized, max_eigval_db
 
 
 def plot_eigenvalue_profiles(h5_path, out_dir):
@@ -423,12 +451,12 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     Plot 1 -- All-blocks overlay (color-coded by max JNR across bands)
         All N_BLOCKS pulse-blocks from range tile j=0 are overlaid on one axes.
         Lines are drawn in a colormap keyed to the max JNR of that block's
-        bands. Colormap range is fixed to JNR_RANGE_DB for cross-file
-        comparability.
+        bands. Y-axis is normalized to [0, 1]. X-axis uses 1-based indexing.
 
     Plot 2 -- Grid of 10 individual block profiles
         10 evenly-spaced pulse-blocks (indices 0, 10, 20, ..., 90) from range
-        tile j=0 are shown in a 2x5 subplot grid.
+        tile j=0 are shown in a 2x5 subplot grid. Shows true largest eigenvalue,
+        SNR, and JNR in title.
 
     Args:
         h5_path (str): Path to the source HDF5 file.
@@ -443,18 +471,26 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     jnr_min_global, jnr_max_global = JNR_RANGE_DB
 
     block_pulse_offsets = [b * BLOCK_HEIGHT for b in range(N_BLOCKS)]
-    ev_index            = np.arange(BLOCK_HEIGHT)
+    ev_index_1based = np.arange(1, BLOCK_HEIGHT + 1)  # 1-based indexing
 
     with h5py.File(h5_path, 'r') as f:
+        snr_db = f.attrs['snr_db']
         all_profiles = []
+        all_max_eigval_db = []
         all_max_jnr  = []
+
         for pulse_offset in block_pulse_offsets:
             dset      = f[f"cpi_{pulse_offset}_0"]
             cpi       = dset[:]
-            ev_db     = _compute_eigenvalues_db(cpi)
-            all_profiles.append(ev_db)
+            ev_normalized, max_eigval_db = _compute_eigenvalues_normalized(cpi)
+            all_profiles.append(ev_normalized)
+            all_max_eigval_db.append(max_eigval_db)
+
             payload  = json.loads(str(dset.attrs['rfi_bands']))
-            max_jnr  = float(np.max([b['jnr_db'] for b in payload['bands']]))
+            if payload['knee'] > 0:
+                max_jnr  = float(np.max(payload['jnr_db_list']))
+            else:
+                max_jnr = 0.0
             all_max_jnr.append(max_jnr)
 
     norm = mcolors.Normalize(vmin=jnr_min_global, vmax=jnr_max_global)
@@ -465,8 +501,8 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     # ------------------------------------------------------------------
     fig1, ax1 = plt.subplots(figsize=(9, 5))
 
-    for ev_db, max_jnr in zip(all_profiles, all_max_jnr):
-        ax1.plot(ev_index, ev_db, color=cmap(norm(max_jnr)), alpha=0.45,
+    for ev_norm, max_jnr in zip(all_profiles, all_max_jnr):
+        ax1.plot(ev_index_1based, ev_norm, color=cmap(norm(max_jnr)), alpha=0.45,
                  linewidth=0.8)
 
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
@@ -474,12 +510,13 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     cbar = fig1.colorbar(sm, ax=ax1)
     cbar.set_label('Max Band JNR (dB)', fontsize=11)
 
-    ax1.set_xlabel('Eigenvalue Index', fontsize=11)
-    ax1.set_ylabel('Eigenvalue Power (dB)', fontsize=11)
+    ax1.set_xlabel('Eigenvalue Index (1-based)', fontsize=11)
+    ax1.set_ylabel('Normalized Eigenvalue (0-1)', fontsize=11)
+    ax1.set_ylim([0, 1.05])
     ax1.set_title(
         f'Eigenvalue Profiles -- All Blocks  (color = max JNR per block)\n'
-        f'JNR range {jnr_min_global}-{jnr_max_global} dB  |  bands 1-{MAX_BANDS}  |  '
-        f'{os.path.basename(h5_path)}',
+        f'SNR={snr_db:.1f} dB  |  JNR range {jnr_min_global}-{jnr_max_global} dB  |  '
+        f'bands 1-{MAX_BANDS}  |  {os.path.basename(h5_path)}',
         fontsize=11,
     )
     ax1.grid(True, linestyle='--', alpha=0.4)
@@ -498,17 +535,23 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     fig2, axes = plt.subplots(n_rows, n_cols, figsize=(16, 6), sharey=True)
 
     for ax, block_idx in zip(axes.flat, selected_block_indices):
-        ev_db   = all_profiles[block_idx]
+        ev_norm   = all_profiles[block_idx]
+        max_eigval_db = all_max_eigval_db[block_idx]
         max_jnr = all_max_jnr[block_idx]
-        ax.plot(ev_index, ev_db, color=cmap(norm(max_jnr)), linewidth=1.4)
-        ax.set_title(f'Block {block_idx}  |  {max_jnr:.0f} dB max', fontsize=9)
+        ax.plot(ev_index_1based, ev_norm, color=cmap(norm(max_jnr)), linewidth=1.4)
+        ax.set_title(
+            f'Block {block_idx}\n'
+            f'λ_max={max_eigval_db:.1f} dB, JNR={max_jnr:.0f} dB',
+            fontsize=8
+        )
         ax.set_xlabel('EV Index', fontsize=8)
-        ax.set_ylabel('dB', fontsize=8)
+        ax.set_ylabel('Normalized', fontsize=8)
+        ax.set_ylim([0, 1.05])
         ax.tick_params(labelsize=7)
         ax.grid(True, linestyle='--', alpha=0.4)
 
     fig2.suptitle(
-        f'Eigenvalue Profiles -- Selected Blocks  (color = max JNR per block)\n'
+        f'Eigenvalue Profiles -- Selected Blocks  (SNR={snr_db:.1f} dB)\n'
         f'{os.path.basename(h5_path)}',
         fontsize=11,
     )
@@ -527,35 +570,49 @@ def main():
 
     Steps
     -----
-    1. For each of N_IMAGES base seeds, inject multi-band RFI into a clean
-       image and save it as an HDF5 file under:
-           data/multi_band/image_<seed>.h5
-    2. Generate eigenvalue profile plots for each saved file.
+    1. Generate 25 images total: 5 images for each of 5 SNR levels (6-10 dB).
+       - Images 0-4: SNR = 6 dB (seeds 0-4)
+       - Images 5-9: SNR = 7 dB (seeds 5-9)
+       - Images 10-14: SNR = 8 dB (seeds 10-14)
+       - Images 15-19: SNR = 9 dB (seeds 15-19)
+       - Images 20-24: SNR = 10 dB (seeds 20-24)
+    2. For each image:
+       - Generate 16 signal pulses per CPI block
+       - Generate 1-6 random RFI pulses per CPI block (random enabled)
+       - Each RFI pulse has random JNR in range [10, 30] dB
+    3. Save as HDF5 under data/multi_band/image_<seed>_snr_<snr>.h5
+    4. Generate eigenvalue profile plots.
 
-    Seeds are used directly as the image index (0 to N_IMAGES-1) so that
-    each image is fully reproducible from its filename alone.
+    All random generations (noise, signal, RFI placement, JNR) are uncorrelated.
     """
-    seeds   = list(range(N_IMAGES))
     out_dir = os.path.join(DATA_ROOT, 'multi_band')
     os.makedirs(out_dir, exist_ok=True)
 
-    print(f"\n[multi_band]  JNR range: {JNR_RANGE_DB} dB  "
-          f"bands per block: {MIN_BANDS}-{MAX_BANDS}")
+    print(f"\n[multi_band]  Generating {N_IMAGES} images")
+    print(f"  SNR range: {SNR_RANGE_DB[0]}-{SNR_RANGE_DB[1]} dB  ({N_IMAGES_PER_SNR} images per level)")
+    print(f"  JNR range: {JNR_RANGE_DB} dB  bands per block: {MIN_BANDS}-{MAX_BANDS}")
+    print(f"  Noise: {NOISE_DB} dB (fixed)")
 
-    for seed in seeds:
-        out_path = os.path.join(out_dir, f"image_{seed}.h5")
+    seed = 0
+    for snr_db in SNR_LEVELS:
+        print(f"\n  Generating SNR = {snr_db} dB:")
+        for img_idx in range(N_IMAGES_PER_SNR):
+            out_path = os.path.join(out_dir, f"image_{seed}_snr_{snr_db}.h5")
 
-        rfi_image, meta = generate_rfi_image(seed=seed)
+            rfi_image, meta = generate_rfi_image(seed=seed, snr_db=snr_db)
 
-        divide_cpi_and_save(
-            matrix      = rfi_image,
-            meta        = meta,
-            seed        = seed,
-            output_path = out_path,
-        )
+            divide_cpi_and_save(
+                matrix      = rfi_image,
+                meta        = meta,
+                seed        = seed,
+                snr_db      = snr_db,
+                output_path = out_path,
+            )
 
-        print(f"  seed={seed:02d}  -> {out_path}")
-        plot_eigenvalue_profiles(h5_path=out_path, out_dir=out_dir)
+            print(f"    seed={seed:02d}  -> {os.path.basename(out_path)}")
+            plot_eigenvalue_profiles(h5_path=out_path, out_dir=out_dir)
+
+            seed += 1
 
     print("\nDone.")
 
