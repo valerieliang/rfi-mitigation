@@ -9,26 +9,19 @@ For each region, two PNGs are saved:
 
   1. stacked_{region}.png
        All eigenvalue profiles overlaid on one axes, color-coded by
-       the max eigenvalue (dB) of each profile.  Gives a population
-       view of the spread and RFI lift.
+       the max eigenvalue (dB) of each profile.
 
   2. grid_{region}.png
-       Each profile in its own subplot on a shared y-axis, arranged
-       in a grid.  Every subplot has the same dB scale so profiles
-       are directly comparable.
-
-Global pulse -> CPI row conversion:
-    ci = (global_pulse - PULSE_OFFSET) // M
-    where PULSE_OFFSET is the pulse index of the first pulse in the file
-    (stored as root attr pulse_start, or defaulting to 0 if absent).
+       One subplot per CPI row sampled every GRID_STEP rows, shared
+       y-axis so all profiles are directly comparable.
 
 Usage
 -----
     python plot_eigenvalues.py
     python plot_eigenvalues.py --h5 nisar_data/processed/cpi_blocks.h5
-    python plot_eigenvalues.py --out nisar_data/processed
     python plot_eigenvalues.py --rfi-start 63000 --rfi-stop 87000
     python plot_eigenvalues.py --clean-start 106000 --clean-stop 122000
+    python plot_eigenvalues.py --grid-step 50
 """
 
 import os
@@ -39,6 +32,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 
 DEFAULT_H5          = os.path.join('nisar_data', 'processed', 'cpi_blocks.h5')
 DEFAULT_OUT         = os.path.join('nisar_data', 'processed')
@@ -46,8 +40,8 @@ DEFAULT_RFI_START   = 63000
 DEFAULT_RFI_STOP    = 87000
 DEFAULT_CLEAN_START = 106000
 DEFAULT_CLEAN_STOP  = 122000
-# First global pulse in the L0B file (matches tile_cpi.py source)
 DEFAULT_FILE_PULSE_OFFSET = 46528
+DEFAULT_GRID_STEP   = 100   # plot every Nth valid CPI in the grid figure
 
 
 # ---------------------------------------------------------------------------
@@ -60,16 +54,15 @@ def load_meta(h5_path):
 
 
 def pulse_to_ci(global_pulse, pulse_offset, M):
-    """Convert a global pulse index to a CPI row index."""
     return (global_pulse - pulse_offset) // M
 
 
 def load_region(h5_path, ci_start, ci_stop, ri_mid, M):
     """
-    Load eigenvalue profiles for every CPI row in [ci_start, ci_stop)
+    Load eigenvalue profiles for every valid CPI row in [ci_start, ci_stop)
     at range column ri_mid.
 
-    Returns list of (ci, ev_db) for valid tiles only.
+    Returns list of (ci, ev_db) sorted by ci.
     """
     profiles = []
     with h5py.File(h5_path, 'r') as f:
@@ -86,25 +79,25 @@ def load_region(h5_path, ci_start, ci_stop, ri_mid, M):
 
 
 # ---------------------------------------------------------------------------
-# PLOT 1: STACKED (all profiles overlaid, color = max eigenvalue)
+# PLOT 1: STACKED -- color legend by max eigenvalue in dB
 # ---------------------------------------------------------------------------
 
-def plot_stacked(profiles, region_label, out_dir, M,
-                 pulse_offset, ci_start, ci_stop):
+def plot_stacked(profiles, region_label, out_dir, M, pulse_offset,
+                 ci_start, ci_stop):
     if not profiles:
         print(f'  [{region_label}] no valid profiles -- skipping stacked plot')
         return
 
     ev_index = np.arange(M)
-    max_vals = np.array([p[1][0] for p in profiles])   # first EV = max in dB
+    max_vals = np.array([p[1][0] for p in profiles])
     vmin, vmax = max_vals.min(), max_vals.max()
-    norm  = plt.Normalize(vmin=vmin, vmax=vmax)
-    cmap  = cm.plasma
+    cmap = cm.plasma
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
     fig, ax = plt.subplots(figsize=(9, 5))
     for ci, ev_db in profiles:
-        color = cmap(norm(ev_db[0]))
-        ax.plot(ev_index, ev_db, color=color, linewidth=0.6, alpha=0.7)
+        ax.plot(ev_index, ev_db, color=cmap(norm(ev_db[0])),
+                linewidth=0.6, alpha=0.7)
 
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
@@ -131,21 +124,23 @@ def plot_stacked(profiles, region_label, out_dir, M,
 
 
 # ---------------------------------------------------------------------------
-# PLOT 2: GRID (individual subplots, shared y-axis scale)
+# PLOT 2: GRID -- one subplot per sampled CPI, shared y-axis
 # ---------------------------------------------------------------------------
 
-def plot_grid(profiles, region_label, out_dir, M,
-              pulse_offset, ci_start, ci_stop, n_cols=6):
+def plot_grid(profiles, region_label, out_dir, M, pulse_offset,
+              ci_start, ci_stop, grid_step, n_cols=6):
     if not profiles:
         print(f'  [{region_label}] no valid profiles -- skipping grid plot')
         return
 
-    n       = len(profiles)
+    # Sample every grid_step valid profiles
+    sampled = profiles[::grid_step]
+    n       = len(sampled)
     n_rows  = int(np.ceil(n / n_cols))
     ev_index = np.arange(M)
 
     # Shared y-axis limits across all profiles
-    all_ev = np.stack([p[1] for p in profiles])
+    all_ev = np.stack([p[1] for p in sampled])
     y_min  = float(all_ev.min()) - 1.0
     y_max  = float(all_ev.max()) + 1.0
 
@@ -154,17 +149,20 @@ def plot_grid(profiles, region_label, out_dir, M,
         figsize=(n_cols * 2.4, n_rows * 2.0),
         sharey=True,
     )
+    # Ensure axes is always 2D
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]
 
     g_start = pulse_offset + ci_start * M
     g_stop  = pulse_offset + ci_stop  * M
     fig.suptitle(
-        f'{region_label}  --  individual eigenvalue profiles  '
-        f'(shared y-axis)\n'
-        f'global pulses {g_start}--{g_stop}  ri=mid',
+        f'{region_label}  --  eigenvalue profiles (every {grid_step} CPI rows, shared y-axis)\n'
+        f'global pulses {g_start}--{g_stop}  ri=mid  '
+        f'({n} shown of {len(profiles)} valid)',
         fontsize=10,
     )
 
-    for ax, (ci, ev_db) in zip(axes.flat, profiles):
+    for ax, (ci, ev_db) in zip(axes.flat, sampled):
         span = float(ev_db[0] - ev_db[-1])
         g    = pulse_offset + ci * M
         ax.plot(ev_index, ev_db, linewidth=0.9, color='steelblue')
@@ -180,7 +178,7 @@ def plot_grid(profiles, region_label, out_dir, M,
     out_path = os.path.join(out_dir, f'grid_{region_label}.png')
     fig.savefig(out_path, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f'  Saved {os.path.basename(out_path)}')
+    print(f'  Saved {os.path.basename(out_path)}  ({n} subplots)')
 
 
 # ---------------------------------------------------------------------------
@@ -194,17 +192,14 @@ def main():
     )
     parser.add_argument('--h5',           default=DEFAULT_H5)
     parser.add_argument('--out',          default=DEFAULT_OUT)
-    parser.add_argument('--rfi-start',    type=int, default=DEFAULT_RFI_START,
-                        help='Global pulse start of RFI region (default 63000).')
-    parser.add_argument('--rfi-stop',     type=int, default=DEFAULT_RFI_STOP,
-                        help='Global pulse stop  of RFI region (default 87000).')
-    parser.add_argument('--clean-start',  type=int, default=DEFAULT_CLEAN_START,
-                        help='Global pulse start of clean region (default 106000).')
-    parser.add_argument('--clean-stop',   type=int, default=DEFAULT_CLEAN_STOP,
-                        help='Global pulse stop  of clean region (default 122000).')
-    parser.add_argument('--pulse-offset', type=int, default=DEFAULT_FILE_PULSE_OFFSET,
-                        help='Global pulse index of the first pulse in the file '
-                             '(default 46528).')
+    parser.add_argument('--rfi-start',    type=int, default=DEFAULT_RFI_START)
+    parser.add_argument('--rfi-stop',     type=int, default=DEFAULT_RFI_STOP)
+    parser.add_argument('--clean-start',  type=int, default=DEFAULT_CLEAN_START)
+    parser.add_argument('--clean-stop',   type=int, default=DEFAULT_CLEAN_STOP)
+    parser.add_argument('--pulse-offset', type=int, default=DEFAULT_FILE_PULSE_OFFSET)
+    parser.add_argument('--grid-step',    type=int, default=DEFAULT_GRID_STEP,
+                        help='Plot every Nth valid CPI row in the grid figure '
+                             '(default 100).')
     parser.add_argument('--cols',         type=int, default=6,
                         help='Columns in the grid plot (default 6).')
     args = parser.parse_args()
@@ -226,6 +221,7 @@ def main():
     print(f'Grid         : {n_cpi_rows} CPI rows x {n_range_cols} range cols')
     print(f'Middle ri    : {ri_mid}')
     print(f'Pulse offset : {args.pulse_offset}')
+    print(f'Grid step    : every {args.grid_step} valid CPI rows')
     print()
 
     regions = [
@@ -234,22 +230,21 @@ def main():
     ]
 
     for label, g_start, g_stop in regions:
-        ci_start = pulse_to_ci(g_start, args.pulse_offset, M)
-        ci_stop  = pulse_to_ci(g_stop,  args.pulse_offset, M)
-        ci_start = max(0, ci_start)
-        ci_stop  = min(n_cpi_rows, ci_stop)
+        ci_start = max(0,          pulse_to_ci(g_start, args.pulse_offset, M))
+        ci_stop  = min(n_cpi_rows, pulse_to_ci(g_stop,  args.pulse_offset, M))
 
         print(f'--- {label}  g=[{g_start}, {g_stop})  '
               f'ci=[{ci_start}, {ci_stop})  '
               f'({ci_stop - ci_start} rows) ---')
 
         profiles = load_region(args.h5, ci_start, ci_stop, ri_mid, M)
-        print(f'  Valid profiles loaded : {len(profiles)}')
+        print(f'  Valid profiles : {len(profiles)}')
 
         plot_stacked(profiles, label, plots_dir, M,
                      args.pulse_offset, ci_start, ci_stop)
         plot_grid(profiles, label, plots_dir, M,
-                  args.pulse_offset, ci_start, ci_stop, n_cols=args.cols)
+                  args.pulse_offset, ci_start, ci_stop,
+                  grid_step=args.grid_step, n_cols=args.cols)
         print()
 
     print(f'Done.  Plots in {plots_dir}')
