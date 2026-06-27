@@ -1,5 +1,5 @@
 """
-generate_nisar_image.py
+generate_synthetic_data.py
 
 Generates synthetic complex-valued NISAR-like raw data frames for use in
 RFI CNN training and evaluation pipelines.
