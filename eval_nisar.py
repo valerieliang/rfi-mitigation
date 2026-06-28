@@ -162,15 +162,17 @@ def save_predictions_h5(h5_path, tile_names, predictions, probabilities):
     print(f"  Saved predictions for {len(tile_names)} tiles")
 
 
-def analyze_predictions(predictions, tile_indices, n_pulse_tiles, n_range_tiles):
+def analyze_predictions(predictions, tile_indices, n_pulse_tiles, n_range_tiles, cpi_height=16, cpi_width=250):
     """
     Analyze prediction statistics and spatial distribution.
 
     Args:
         predictions (np.ndarray): Predicted knee indices
         tile_indices (list[tuple]): (pulse_idx, range_idx) for each tile
-        n_pulse_tiles (int): Number of pulse tiles
-        n_range_tiles (int): Number of range tiles
+        n_pulse_tiles (int): Number of pulse tiles (from HDF5 metadata)
+        n_range_tiles (int): Number of range tiles (from HDF5 metadata)
+        cpi_height (int): CPI tile height in pixels
+        cpi_width (int): CPI tile width in pixels
 
     Returns:
         stats (dict): Statistics dictionary
@@ -199,12 +201,21 @@ def analyze_predictions(predictions, tile_indices, n_pulse_tiles, n_range_tiles)
     print(f"  RFI tiles: {rfi_tiles:,} ({100*rfi_rate:.2f}%)")
     print(f"  Clean tiles: {total - rfi_tiles:,} ({100*(1-rfi_rate):.2f}%)")
 
-    # Spatial map
-    pred_map = np.full((n_pulse_tiles, n_range_tiles), -1, dtype=np.int32)
+    # Spatial map - normalize absolute indices to 0-based tile grid
+    pulse_indices = [pi for pi, ri in tile_indices]
+    range_indices = [ri for pi, ri in tile_indices]
+    min_pulse, max_pulse = min(pulse_indices), max(pulse_indices)
+    min_range, max_range = min(range_indices), max(range_indices)
+
+    # Calculate actual grid size from the data
+    n_pulse_tiles_actual = (max_pulse - min_pulse) // cpi_height + 1
+    n_range_tiles_actual = (max_range - min_range) // cpi_width + 1
+
+    pred_map = np.full((n_pulse_tiles_actual, n_range_tiles_actual), -1, dtype=np.int32)
     for pred, (pi, ri) in zip(predictions, tile_indices):
-        # Convert absolute indices to tile indices
-        pulse_tile_idx = pi // 16
-        range_tile_idx = ri // 250
+        # Convert absolute indices to normalized tile indices
+        pulse_tile_idx = (pi - min_pulse) // cpi_height
+        range_tile_idx = (ri - min_range) // cpi_width
         pred_map[pulse_tile_idx, range_tile_idx] = pred
 
     stats = {
@@ -316,6 +327,8 @@ def main():
     with h5py.File(args.nisar_h5, 'r') as f:
         n_pulse_tiles = f.attrs['n_pulse_tiles']
         n_range_tiles = f.attrs['n_range_tiles']
+        cpi_height = f.attrs['cpi_height']
+        cpi_width = f.attrs['cpi_width']
 
     # Run inference
     predictions, probabilities = predict_nisar(
@@ -326,7 +339,8 @@ def main():
     # Analyze results
     stats, pred_map = analyze_predictions(
         predictions, tile_indices,
-        n_pulse_tiles, n_range_tiles
+        n_pulse_tiles, n_range_tiles,
+        cpi_height, cpi_width
     )
 
     # Save results
