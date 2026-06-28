@@ -162,7 +162,9 @@ def process_nisar_to_cpi(
     input_shape=None,
     cpi_height=CPI_HEIGHT,
     cpi_width=CPI_WIDTH,
-    max_range_lines=None
+    max_range_lines=None,
+    range_start=None,
+    range_end=None
 ):
     """
     Process NISAR data into CPI tiles and save as HDF5.
@@ -175,6 +177,8 @@ def process_nisar_to_cpi(
         cpi_height (int): Pulses per CPI tile (default 16)
         cpi_width (int): Range samples per CPI tile (default 250)
         max_range_lines (int|None): Limit processing to first N range lines (for testing)
+        range_start (int|None): Start at this range line (must be multiple of cpi_height)
+        range_end (int|None): End at this range line (must be multiple of cpi_height)
     """
 
     print("="*70)
@@ -188,11 +192,30 @@ def process_nisar_to_cpi(
     total_pulses = hv_data.shape[0]
     total_range = hv_data.shape[1]
 
-    if max_range_lines is not None:
+    # Handle range selection
+    pulse_start = 0
+    pulse_end = total_pulses
+
+    if range_start is not None or range_end is not None:
+        if range_start is not None:
+            if range_start % cpi_height != 0:
+                raise ValueError(f"range_start ({range_start}) must be multiple of cpi_height ({cpi_height})")
+            pulse_start = range_start
+        if range_end is not None:
+            if range_end % cpi_height != 0:
+                raise ValueError(f"range_end ({range_end}) must be multiple of cpi_height ({cpi_height})")
+            pulse_end = range_end
+
+        total_pulses = pulse_end - pulse_start
+        print(f"  Processing range: lines {pulse_start} to {pulse_end} ({total_pulses} lines)")
+
+    elif max_range_lines is not None:
         total_pulses = min(max_range_lines, total_pulses)
+        pulse_end = pulse_start + total_pulses
         print(f"  Limiting to first {total_pulses} range lines")
 
-    print(f"  Shape: ({total_pulses}, {total_range})")
+    print(f"  Full shape: {hv_data.shape}")
+    print(f"  Processing: ({total_pulses}, {total_range})")
     print(f"  Dtype: {hv_data.dtype}")
 
     # Calculate number of tiles
@@ -234,7 +257,7 @@ def process_nisar_to_cpi(
 
         print(f"\nProcessing CPI tiles...")
 
-        for i in range(0, total_pulses_used, cpi_height):
+        for i in range(pulse_start, pulse_start + total_pulses_used, cpi_height):
             for j in range(0, total_range_used, cpi_width):
 
                 # Extract CPI tile
@@ -360,6 +383,10 @@ Examples:
                         help='CPI width in samples (default: 250)')
     parser.add_argument('--max-range-lines', type=int, default=None,
                         help='Limit processing to first N range lines (for testing)')
+    parser.add_argument('--range-start', type=int, default=None,
+                        help='Start at this range line index (must be multiple of cpi_height)')
+    parser.add_argument('--range-end', type=int, default=None,
+                        help='End at this range line index (must be multiple of cpi_height)')
 
     args = parser.parse_args()
 
@@ -389,6 +416,18 @@ Examples:
         print(f"Supported: .npy, .h5, .hdf5")
         sys.exit(1)
 
+    # Validate range arguments
+    if args.range_start is not None or args.range_end is not None:
+        if args.max_range_lines is not None:
+            print("ERROR: Cannot use --max-range-lines with --range-start/--range-end")
+            sys.exit(1)
+        if args.range_start is not None and args.range_start % args.cpi_height != 0:
+            print(f"ERROR: --range-start ({args.range_start}) must be multiple of --cpi-height ({args.cpi_height})")
+            sys.exit(1)
+        if args.range_end is not None and args.range_end % args.cpi_height != 0:
+            print(f"ERROR: --range-end ({args.range_end}) must be multiple of --cpi-height ({args.cpi_height})")
+            sys.exit(1)
+
     # Process
     process_nisar_to_cpi(
         input_path=args.input,
@@ -397,7 +436,9 @@ Examples:
         input_shape=input_shape,
         cpi_height=args.cpi_height,
         cpi_width=args.cpi_width,
-        max_range_lines=args.max_range_lines
+        max_range_lines=args.max_range_lines,
+        range_start=args.range_start,
+        range_end=args.range_end
     )
 
     # Verify
