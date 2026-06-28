@@ -443,18 +443,3 @@ Examples:
 
     # Verify
     verify_h5_file(args.output, n_samples=5)
-
-    print(f"\nNext Steps:")
-    print(f"="*70)
-    print(f"""
-1. Load the CPI tiles:
-   import h5py
-   with h5py.File('{args.output}', 'r') as f:
-       cpi = f['cpi_0_0'][:]
-       eigvals_norm = f['cpi_0_0_eigenvalues_normalized'][:]
-
-2. Run your trained model:
-   predictions = model.predict(eigvals_norm)
-
-3. Analyze results across the full image
-""")
