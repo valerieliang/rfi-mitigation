@@ -95,7 +95,7 @@ def plot_histogram(predictions, stats, output_path):
     print(f"  Saved: {output_path}")
 
 
-def plot_spatial_map(pred_map, stats, output_path, cmap_name='viridis', vmax=None):
+def plot_spatial_map(pred_map, stats, output_path, cmap_name='turbo', vmax=None):
     """
     Plot spatial map of knee predictions with sequential colormap.
 
@@ -200,7 +200,7 @@ def plot_bounded_spatial_map(pred_map, stats, output_path, max_knee=4, cmap_name
     print(f"    Effective RFI rate: {100*n_rfi_bounded/stats['total_cpis']:.2f}%")
 
 
-def plot_comparison_maps(pred_map, stats, output_path, max_knee=4, cmap_name='viridis'):
+def plot_comparison_maps(pred_map, stats, output_path, max_knee=4, cmap_name='turbo'):
     """
     Plot side-by-side comparison of original vs bounded maps.
 
@@ -258,8 +258,8 @@ def main():
                         help='Path to results directory (output of predict_nisar.py)')
     parser.add_argument('--max-knee', type=int, default=4,
                         help='Maximum knee value for bounded map (default: 4)')
-    parser.add_argument('--cmap', default='viridis',
-                        help='Matplotlib colormap name (default: viridis). '
+    parser.add_argument('--cmap', default='turbo',
+                        help='Matplotlib colormap name (default: turbo). '
                              'Try: viridis, plasma, inferno, magma, cividis, turbo, jet')
     parser.add_argument('--no-histogram', action='store_true',
                         help='Skip histogram plot')
