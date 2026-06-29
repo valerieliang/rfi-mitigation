@@ -13,6 +13,15 @@ Conventions:
   - Noise floor: NOISE_DB = 3 dB
   - Signal SNR above noise: SNR_DB = 6 dB
 
+Labeling convention:
+  - knee = 0: CLEAN (no RFI contamination)
+  - knee = 1-16: CONTAMINATED (knee indicates number of RFI signals present)
+
+Training set structure:
+  - data/multi_band/clean/: clean samples (knee=0)
+  - data/multi_band/contaminated/: RFI-contaminated samples (knee=1-16)
+  - Equal number of clean and contaminated samples across SNR levels
+
 RFI block structure:
   - The pulse axis is divided into non-overlapping blocks of BLOCK_HEIGHT pulses.
   - TOTAL_PULSES must be divisible by BLOCK_HEIGHT.
@@ -23,16 +32,14 @@ RFI block structure:
     band descriptors (see RfiMeta for format details).
 
 HDF5 layout:
-  Root attributes  : file-level config (dimensions, seed, JNR range, etc.)
+  Root attributes  : file-level config (dimensions, seed, JNR range, is_clean flag, etc.)
   Dataset per CPI  : name "cpi_{i}_{j}", complex64 array of shape
                      (cpi_height, cpi_width).
   Dataset attributes: per-CPI RFI metadata serialised as JSON string under
                       the key 'rfi_bands'. Top-level keys:
-                          n_bands (int): number of injected bands in this block
-                          bands (list): per-band dicts with keys:
-                              local_idx (int): pulse index within the block [0, BLOCK_HEIGHT)
-                              row       (int): absolute pulse row in the full image
-                              jnr_db    (int): JNR of this band in dB
+                          pulse_positions (list[int]): 1-based pulse positions of RFI bands
+                          knee (int): RFI count (0=clean, 1-16=contaminated)
+                          jnr_db_list (list[int]): JNR in dB for each band
 """
 
 import os
@@ -298,6 +305,7 @@ def divide_cpi_and_save(
     cpi_height=BLOCK_HEIGHT,
     cpi_width=BLOCK_WIDTH,
     output_path=None,
+    is_clean=False,
 ):
     """
     Divide a complex-valued matrix into non-overlapping CPI tiles and save to HDF5.
@@ -318,6 +326,7 @@ def divide_cpi_and_save(
         min_bands      (int)   : minimum bands per block
         max_bands      (int)   : maximum bands per block
         seed           (int)   : base seed used for generation
+        is_clean       (bool)  : True if this is a clean (no RFI) sample
 
     Dataset per CPI tile, name "cpi_{i}_{j}":
         Data: complex64 array of shape (cpi_height, cpi_width).
@@ -331,12 +340,13 @@ def divide_cpi_and_save(
 
     Args:
         matrix     (np.ndarray): Complex64 array of shape (TOTAL_PULSES, RANGE_BINS).
-        meta       (RfiMeta)   : RFI injection metadata from generate_rfi_image.
+        meta       (RfiMeta|None): RFI injection metadata from generate_rfi_image (None for clean).
         seed       (int)       : Base seed used to generate the image.
         snr_db     (float)     : SNR in dB for this image.
         cpi_height (int)       : Pulse rows per CPI tile. Must divide TOTAL_PULSES.
         cpi_width  (int)       : Range columns per CPI tile. Must divide RANGE_BINS.
         output_path(str|None)  : Path for the HDF5 file. No file is written if None.
+        is_clean   (bool)      : True if this is a clean (no RFI) sample.
     """
     if output_path is None:
         return
@@ -364,18 +374,25 @@ def divide_cpi_and_save(
         f.attrs['min_bands']       = MIN_BANDS
         f.attrs['max_bands']       = MAX_BANDS
         f.attrs['seed']            = seed
+        f.attrs['is_clean']        = is_clean
 
         # --- CPI datasets ---------------------------------------------------
         for i in range(0, TOTAL_PULSES, cpi_height):
-            # Each tile's pulse band maps 1-to-1 to one injection block when
-            # cpi_height == BLOCK_HEIGHT (the standard configuration).
-            block_idx = i // BLOCK_HEIGHT
-            bands     = meta.bands_per_block[block_idx]
+            # For clean samples, use empty RFI metadata
+            if is_clean:
+                pulse_positions = []
+                jnr_db_list = []
+                knee = 0
+            else:
+                # Each tile's pulse band maps 1-to-1 to one injection block when
+                # cpi_height == BLOCK_HEIGHT (the standard configuration).
+                block_idx = i // BLOCK_HEIGHT
+                bands     = meta.bands_per_block[block_idx]
 
-            # Convert to 1-based pulse positions and extract JNR values
-            pulse_positions = [b.local_idx + 1 for b in bands]  # 1-based indexing
-            jnr_db_list = [b.jnr_db for b in bands]
-            knee = len(bands)  # Number of RFI pulses, 0 if no RFI
+                # Convert to 1-based pulse positions and extract JNR values
+                pulse_positions = [b.local_idx + 1 for b in bands]  # 1-based indexing
+                jnr_db_list = [b.jnr_db for b in bands]
+                knee = len(bands)  # Number of RFI pulses, 0 if no RFI
 
             # Serialise to JSON with new format
             bands_json = json.dumps({
@@ -409,9 +426,10 @@ def divide_cpi_and_save(
 # PIPELINE CONFIGURATION
 # ---------------------------------------------------------------------------
 
-N_IMAGES_PER_SNR = 10          # number of images per SNR level
+N_IMAGES_PER_SNR = 10          # number of images per SNR level (for each type: clean & contaminated)
 SNR_LEVELS = [6, 7, 8, 9, 10]  # SNR levels in dB
-N_IMAGES = N_IMAGES_PER_SNR * len(SNR_LEVELS)  # total = 25 images
+N_IMAGES_CLEAN = N_IMAGES_PER_SNR * len(SNR_LEVELS)  # total clean images
+N_IMAGES_RFI = N_IMAGES_PER_SNR * len(SNR_LEVELS)    # total contaminated images
 DATA_ROOT  = 'data' # root output directory
 
 
@@ -448,15 +466,16 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     """
     Generate two eigenvalue profile plots for a single HDF5 file and save as PNG.
 
-    Plot 1 -- All-blocks overlay (color-coded by max JNR across bands)
+    Plot 1 -- All-blocks overlay (color-coded by RFI count or clean)
         All N_BLOCKS pulse-blocks from range tile j=0 are overlaid on one axes.
-        Lines are drawn in a colormap keyed to the max JNR of that block's
-        bands. Y-axis is normalized to [0, 1]. X-axis uses 1-based indexing.
+        Lines are drawn in a colormap keyed to the RFI count (knee) of that block.
+        For clean samples, all blocks show knee=0.
+        Y-axis is normalized to [0, 1]. X-axis uses 1-based indexing.
 
     Plot 2 -- Grid of 10 individual block profiles
         10 evenly-spaced pulse-blocks (indices 0, 10, 20, ..., 90) from range
         tile j=0 are shown in a 2x5 subplot grid. Shows true largest eigenvalue,
-        SNR, and JNR in title.
+        SNR, and RFI count (knee: 0=clean, 1-16=contaminated) in title.
 
     Args:
         h5_path (str): Path to the source HDF5 file.
@@ -475,6 +494,7 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
 
     with h5py.File(h5_path, 'r') as f:
         snr_db = f.attrs['snr_db']
+        is_clean = f.attrs.get('is_clean', False)
         all_profiles = []
         all_max_eigval_db = []
         all_max_jnr  = []
@@ -495,37 +515,40 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
                 knee = n_distinct  # Knee index in 1-based indexing
             else:
                 max_jnr = 0.0
-                knee = 0  # No RFI
+                knee = 0  # No RFI (clean)
             all_max_jnr.append(max_jnr)
             all_knees.append(knee)
 
-    norm = mcolors.Normalize(vmin=jnr_min_global, vmax=jnr_max_global)
+    # Color mapping: use knee count (0=clean, 1-16=RFI contaminated)
+    norm_knee = mcolors.Normalize(vmin=0, vmax=MAX_BANDS)
     cmap = cm.plasma
 
     # ------------------------------------------------------------------
-    # Plot 1: all blocks overlaid, each line colored by max band JNR
+    # Plot 1: all blocks overlaid, each line colored by RFI count (knee)
     # ------------------------------------------------------------------
-    fig1, ax1 = plt.subplots(figsize=(9, 5))
+    fig1, ax1 = plt.subplots(figsize=(10, 5))
 
     for ev_norm, max_jnr, knee in zip(all_profiles, all_max_jnr, all_knees):
-        ax1.plot(ev_index_1based, ev_norm, color=cmap(norm(max_jnr)), alpha=0.45,
-                 linewidth=0.8)
+        ax1.plot(ev_index_1based, ev_norm, color=cmap(norm_knee(knee)), alpha=0.5,
+                 linewidth=0.9)
         # Mark knee position if RFI is present
         if knee > 0:
-            ax1.plot(knee, ev_norm[knee-1], 'rx', markersize=4, alpha=0.3)
+            ax1.plot(knee, ev_norm[knee-1], 'rx', markersize=5, alpha=0.4)
 
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm_knee)
     sm.set_array([])
     cbar = fig1.colorbar(sm, ax=ax1)
-    cbar.set_label('Max Band JNR (dB)', fontsize=11)
+    cbar.set_label('RFI Count (knee: 0=clean, 1-16=contaminated)', fontsize=11)
 
     ax1.set_xlabel('Eigenvalue Index (1-based)', fontsize=11)
     ax1.set_ylabel('Normalized Eigenvalue (0-1)', fontsize=11)
     ax1.set_ylim([0, 1.05])
+
+    # Descriptive title indicating clean vs contaminated
+    sample_type = "CLEAN (No RFI)" if is_clean else f"CONTAMINATED (RFI: {MIN_BANDS}-{MAX_BANDS} bands, JNR {jnr_min_global}-{jnr_max_global} dB)"
     ax1.set_title(
-        f'Eigenvalue Profiles -- All Blocks  (color = max JNR per block, red x = knee)\n'
-        f'SNR={snr_db:.1f} dB  |  JNR range {jnr_min_global}-{jnr_max_global} dB  |  '
-        f'bands 1-{MAX_BANDS}  |  {os.path.basename(h5_path)}',
+        f'Eigenvalue Profiles -- All Blocks -- {sample_type}\n'
+        f'SNR={snr_db:.1f} dB  |  red x = knee position  |  {os.path.basename(h5_path)}',
         fontsize=11,
     )
     ax1.grid(True, linestyle='--', alpha=0.4)
@@ -549,16 +572,18 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
         max_jnr = all_max_jnr[block_idx]
         knee = all_knees[block_idx]
 
-        ax.plot(ev_index_1based, ev_norm, color=cmap(norm(max_jnr)), linewidth=1.4)
+        ax.plot(ev_index_1based, ev_norm, color=cmap(norm_knee(knee)), linewidth=1.4)
 
         # Mark knee position if RFI is present
         if knee > 0:
             ax.plot(knee, ev_norm[knee-1], 'rx', markersize=8, markeredgewidth=2)
             ax.axvline(x=knee, color='red', linestyle='--', alpha=0.3, linewidth=1)
 
+        # Clear labeling: knee 0=clean, 1-16=contaminated
+        status_label = "CLEAN" if knee == 0 else f"RFI={knee}"
         ax.set_title(
-            f'Block {block_idx}\n'
-            f'λ_max={max_eigval_db:.1f} dB, JNR={max_jnr:.0f} dB, knee={knee}',
+            f'Block {block_idx} [{status_label}]\n'
+            f'λ_max={max_eigval_db:.1f} dB, JNR={max_jnr:.0f} dB',
             fontsize=8
         )
         ax.set_xlabel('EV Index', fontsize=8)
@@ -567,9 +592,10 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
         ax.tick_params(labelsize=7)
         ax.grid(True, linestyle='--', alpha=0.4)
 
+    # Clear suptitle indicating clean vs contaminated
     fig2.suptitle(
-        f'Eigenvalue Profiles -- Selected Blocks  (SNR={snr_db:.1f} dB)\n'
-        f'{os.path.basename(h5_path)}',
+        f'Eigenvalue Profiles -- Selected Blocks -- {sample_type}\n'
+        f'SNR={snr_db:.1f} dB  |  {os.path.basename(h5_path)}',
         fontsize=11,
     )
     fig2.tight_layout()
@@ -587,34 +613,67 @@ def main():
 
     Steps
     -----
-    1. Generate 25 images total: 5 images for each of 5 SNR levels (6-10 dB).
-       - Images 0-4: SNR = 6 dB (seeds 0-4)
-       - Images 5-9: SNR = 7 dB (seeds 5-9)
-       - Images 10-14: SNR = 8 dB (seeds 10-14)
-       - Images 15-19: SNR = 9 dB (seeds 15-19)
-       - Images 20-24: SNR = 10 dB (seeds 20-24)
-    2. For each image:
+    1. Generate 50 images total:
+       - 25 CLEAN images: 10 images per SNR level (6-10 dB)
+       - 25 CONTAMINATED images: 10 images per SNR level (6-10 dB)
+    2. For clean images:
        - Generate 16 signal pulses per CPI block
-       - Generate 1-6 random RFI pulses per CPI block (random enabled)
+       - NO RFI injection
+    3. For contaminated images:
+       - Generate 16 signal pulses per CPI block
+       - Generate 1-6 random RFI pulses per CPI block
        - Each RFI pulse has random JNR in range [10, 30] dB
-    3. Save as HDF5 under data/multi_band/image_<seed>_snr_<snr>.h5
-    4. Generate eigenvalue profile plots.
+    4. Save clean as HDF5 under data/multi_band/clean/image_<seed>_snr_<snr>.h5
+    5. Save contaminated as HDF5 under data/multi_band/contaminated/image_<seed>_snr_<snr>.h5
+    6. Generate eigenvalue profile plots for both types.
 
     All random generations (noise, signal, RFI placement, JNR) are uncorrelated.
     """
-    out_dir = os.path.join(DATA_ROOT, 'multi_band')
-    os.makedirs(out_dir, exist_ok=True)
+    base_dir = os.path.join(DATA_ROOT, 'multi_band')
+    clean_dir = os.path.join(base_dir, 'clean')
+    contaminated_dir = os.path.join(base_dir, 'contaminated')
 
-    print(f"\n[multi_band]  Generating {N_IMAGES} images")
-    print(f"  SNR range: {SNR_RANGE_DB[0]}-{SNR_RANGE_DB[1]} dB  ({N_IMAGES_PER_SNR} images per level)")
+    os.makedirs(clean_dir, exist_ok=True)
+    os.makedirs(contaminated_dir, exist_ok=True)
+
+    print(f"\n[multi_band]  Generating training data")
+    print(f"  CLEAN images: {N_IMAGES_CLEAN}")
+    print(f"  CONTAMINATED images: {N_IMAGES_RFI}")
+    print(f"  SNR range: {SNR_RANGE_DB[0]}-{SNR_RANGE_DB[1]} dB  ({N_IMAGES_PER_SNR} images per level per type)")
     print(f"  JNR range: {JNR_RANGE_DB} dB  bands per block: {MIN_BANDS}-{MAX_BANDS}")
     print(f"  Noise: {NOISE_DB} dB (fixed)")
 
+    # Generate CLEAN samples
+    print(f"\n[CLEAN SAMPLES]")
     seed = 0
     for snr_db in SNR_LEVELS:
-        print(f"\n  Generating SNR = {snr_db} dB:")
+        print(f"\n  Generating CLEAN SNR = {snr_db} dB:")
         for img_idx in range(N_IMAGES_PER_SNR):
-            out_path = os.path.join(out_dir, f"image_{seed}_snr_{snr_db}.h5")
+            out_path = os.path.join(clean_dir, f"image_{seed}_snr_{snr_db}.h5")
+
+            clean_image = generate_clean_image(seed=seed, snr_db=snr_db)
+
+            divide_cpi_and_save(
+                matrix      = clean_image,
+                meta        = None,
+                seed        = seed,
+                snr_db      = snr_db,
+                output_path = out_path,
+                is_clean    = True,
+            )
+
+            print(f"    seed={seed:02d}  -> {os.path.basename(out_path)}")
+            plot_eigenvalue_profiles(h5_path=out_path, out_dir=clean_dir)
+
+            seed += 1
+
+    # Generate CONTAMINATED samples
+    print(f"\n[CONTAMINATED SAMPLES]")
+    seed = 0
+    for snr_db in SNR_LEVELS:
+        print(f"\n  Generating CONTAMINATED SNR = {snr_db} dB:")
+        for img_idx in range(N_IMAGES_PER_SNR):
+            out_path = os.path.join(contaminated_dir, f"image_{seed}_snr_{snr_db}.h5")
 
             rfi_image, meta = generate_rfi_image(seed=seed, snr_db=snr_db)
 
@@ -624,14 +683,18 @@ def main():
                 seed        = seed,
                 snr_db      = snr_db,
                 output_path = out_path,
+                is_clean    = False,
             )
 
             print(f"    seed={seed:02d}  -> {os.path.basename(out_path)}")
-            plot_eigenvalue_profiles(h5_path=out_path, out_dir=out_dir)
+            plot_eigenvalue_profiles(h5_path=out_path, out_dir=contaminated_dir)
 
             seed += 1
 
     print("\nDone.")
+    print(f"\nTotal samples generated:")
+    print(f"  Clean: {N_IMAGES_CLEAN} in {clean_dir}")
+    print(f"  Contaminated: {N_IMAGES_RFI} in {contaminated_dir}")
 
 
 if __name__ == '__main__':
