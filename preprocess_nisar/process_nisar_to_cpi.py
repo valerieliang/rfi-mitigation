@@ -274,8 +274,10 @@ def process_nisar_to_cpi(
     print(f"  Total CPI tiles: {n_pulse_tiles * n_range_tiles:,}")
     print(f"  Coverage: {total_pulses_used}/{total_pulses} pulses, {total_range_used}/{total_range} samples")
 
-    # Create output directory
-    os.makedirs(os.path.dirname(output_h5_path), exist_ok=True)
+    # Create output directory if path includes a directory component
+    output_dir = os.path.dirname(output_h5_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
 
     # Create HDF5 file
     print(f"\nCreating: {output_h5_path}")
