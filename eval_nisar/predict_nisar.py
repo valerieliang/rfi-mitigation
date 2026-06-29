@@ -28,49 +28,19 @@ import numpy as np
 import h5py
 import tensorflow as tf
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 
 # Add parent directory to path to import train.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train import extract_features, M, N_CLASSES
 
 
-def process_cpi_batch(h5_path, cpi_keys_batch):
+def load_nisar_dataset(h5_path, max_tiles=None):
     """
-    Process a batch of CPIs in parallel.
-
-    Args:
-        h5_path (str): Path to HDF5 file
-        cpi_keys_batch (list): List of CPI keys to process
-
-    Returns:
-        list: List of (eigen, global_, tile_name, tile_indices) tuples
-    """
-    results = []
-    with h5py.File(h5_path, 'r') as f:
-        for key in cpi_keys_batch:
-            cpi = f[key][:]
-            eigen, glob = extract_features(cpi)
-
-            # Parse tile indices
-            parts = key.split('_')
-            pulse_idx = int(parts[1])
-            range_idx = int(parts[2])
-
-            results.append((eigen, glob, key, (pulse_idx, range_idx)))
-
-    return results
-
-
-def load_nisar_dataset(h5_path, max_tiles=None, n_workers=8):
-    """
-    Load NISAR CPI tiles and extract features for evaluation (parallel).
+    Load NISAR CPI tiles and extract features for evaluation.
 
     Args:
         h5_path (str): Path to processed NISAR HDF5 file
         max_tiles (int|None): Limit to first N tiles (for testing)
-        n_workers (int): Number of parallel workers (default: 8)
 
     Returns:
         eigen (np.ndarray): shape (N, M, 2) - eigenvalue features
@@ -82,8 +52,8 @@ def load_nisar_dataset(h5_path, max_tiles=None, n_workers=8):
 
     print(f"Loading NISAR data from: {h5_path}")
 
-    # Get metadata and CPI keys
     with h5py.File(h5_path, 'r') as f:
+        # Get metadata
         n_pulse_tiles = f.attrs['n_pulse_tiles']
         n_range_tiles = f.attrs['n_range_tiles']
         cpi_height = f.attrs['cpi_height']
@@ -101,55 +71,47 @@ def load_nisar_dataset(h5_path, max_tiles=None, n_workers=8):
                     if k.startswith('cpi_')
                     and not k.endswith('_eigenvalues')
                     and not k.endswith('_eigenvalues_normalized')
-                    and not k.endswith('_diagonal')
-                    and not k.endswith('_probabilities')]
+                    and not k.endswith('_diagonal')]
 
         if max_tiles is not None:
             cpi_keys = cpi_keys[:max_tiles]
             print(f"  Limited to first {max_tiles} CPIs")
 
-    print(f"\nExtracting features from {len(cpi_keys)} CPIs (parallel with {n_workers} workers)...")
+        print(f"\nExtracting features from {len(cpi_keys)} CPIs...")
 
-    # Split keys into batches for parallel processing
-    batch_size = max(len(cpi_keys) // (n_workers * 10), 50)  # Smaller batches = more frequent updates
-    batches = [cpi_keys[i:i+batch_size] for i in range(0, len(cpi_keys), batch_size)]
+        eigen_list = []
+        global_list = []
+        tile_names = []
+        tile_indices = []
 
-    eigen_list = []
-    global_list = []
-    tile_names = []
-    tile_indices = []
-    processed = 0
+        for idx, key in enumerate(cpi_keys):
+            # Extract CPI data
+            cpi = f[key][:]
 
-    # Process batches in parallel
-    print(f"  Batch size: {batch_size} CPIs per batch")
-    print(f"  Total batches: {len(batches)}")
-    print(f"  Processing...")
+            # Extract features (same as training)
+            eigen, glob = extract_features(cpi)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(process_cpi_batch, h5_path, batch): batch
-                   for batch in batches}
+            eigen_list.append(eigen)
+            global_list.append(glob)
+            tile_names.append(key)
 
-        for future in as_completed(futures):
-            batch_results = future.result()
+            # Parse tile indices from key (e.g., 'cpi_0_250')
+            parts = key.split('_')
+            pulse_idx = int(parts[1])
+            range_idx = int(parts[2])
+            tile_indices.append((pulse_idx, range_idx))
 
-            for eigen, glob, tile_name, tile_idx in batch_results:
-                eigen_list.append(eigen)
-                global_list.append(glob)
-                tile_names.append(tile_name)
-                tile_indices.append(tile_idx)
+            # Progress
+            if (idx + 1) % 10000 == 0 or (idx + 1) == len(cpi_keys):
+                print(f"  [{100*(idx+1)/len(cpi_keys):5.1f}%] Processed {idx+1:,}/{len(cpi_keys):,} CPIs")
 
-            processed += len(batch_results)
-            # Print progress more frequently (every 5000 CPIs or every batch if small)
-            if processed % 5000 < batch_size or processed == len(cpi_keys):
-                print(f"  [{100*processed/len(cpi_keys):5.1f}%] Processed {processed:,}/{len(cpi_keys):,} CPIs")
-
-    metadata = {
-        'polarization': polarization,
-        'n_pulse_tiles': int(n_pulse_tiles),
-        'n_range_tiles': int(n_range_tiles),
-        'cpi_height': int(cpi_height),
-        'cpi_width': int(cpi_width),
-    }
+        metadata = {
+            'polarization': polarization,
+            'n_pulse_tiles': int(n_pulse_tiles),
+            'n_range_tiles': int(n_range_tiles),
+            'cpi_height': int(cpi_height),
+            'cpi_width': int(cpi_width),
+        }
 
     eigen = np.stack(eigen_list).astype(np.float32)
     global_ = np.stack(global_list).astype(np.float32)
@@ -300,8 +262,6 @@ def main():
                         help='Limit to first N CPIs (for testing)')
     parser.add_argument('--batch-size', type=int, default=512,
                         help='Batch size for inference')
-    parser.add_argument('--n-workers', type=int, default=8,
-                        help='Number of parallel workers for feature extraction (default: 8)')
     parser.add_argument('--save-to-h5', action='store_true',
                         help='Save predictions back to HDF5 file as attributes')
 
@@ -323,11 +283,10 @@ def main():
     model = tf.keras.models.load_model(args.model)
     print(f"  Model loaded successfully")
 
-    # Load NISAR data (parallel feature extraction)
+    # Load NISAR data
     eigen, global_, tile_names, tile_indices, metadata = load_nisar_dataset(
         args.nisar_h5,
-        max_tiles=args.max_tiles,
-        n_workers=args.n_workers
+        max_tiles=args.max_tiles
     )
 
     # Auto-set output directory if not provided

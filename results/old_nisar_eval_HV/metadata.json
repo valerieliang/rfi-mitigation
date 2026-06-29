@@ -1,0 +1,9 @@
+{
+  "polarization": "HV",
+  "cpi_height": 16,
+  "cpi_width": 250,
+  "n_pulse_tiles": 1375,
+  "n_range_tiles": 211,
+  "total_cpis": 290125,
+  "tile_indices_shape": [290125, 2]
+}
