@@ -290,8 +290,8 @@ def main():
                         help='Path to processed NISAR HDF5 file')
     parser.add_argument('--model', default='models/multi_band/best_model.keras',
                         help='Path to trained model')
-    parser.add_argument('--output-dir', default='results/nisar_eval',
-                        help='Output directory for results')
+    parser.add_argument('--output-dir', default=None,
+                        help='Output directory for results (auto-detects from polarization if not provided)')
     parser.add_argument('--max-tiles', type=int, default=None,
                         help='Limit to first N tiles (for testing)')
     parser.add_argument('--batch-size', type=int, default=512,
@@ -311,6 +311,17 @@ def main():
         print(f"ERROR: NISAR HDF5 not found: {args.nisar_h5}")
         print(f"Process NISAR data first: python preprocess_nisar/process_nisar_to_cpi.py")
         sys.exit(1)
+
+    # Auto-detect polarization from HDF5 file
+    with h5py.File(args.nisar_h5, 'r') as f:
+        polarization = f.attrs.get('polarization', 'UNKNOWN')
+
+    print(f"Detected polarization: {polarization}")
+
+    # Auto-set output directory if not provided
+    if args.output_dir is None:
+        args.output_dir = f'results/nisar_eval_{polarization}'
+        print(f"Auto-detected output directory: {args.output_dir}")
 
     # Load model
     print(f"Loading model: {args.model}")

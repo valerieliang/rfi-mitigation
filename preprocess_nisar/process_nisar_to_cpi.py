@@ -1,7 +1,9 @@
 """
 process_nisar_to_cpi.py
 
-Process NISAR data into CPI blocks matching the synthetic data format.
+Process NISAR data (HH or HV polarization) into CPI blocks matching the synthetic data format.
+
+Automatically detects polarization from the dataset path.
 
 Supports two input modes:
   1. Decoded .npy file (memory-mapped complex64 array)
@@ -20,11 +22,17 @@ Output format matches generate_synthetic_data.py HDF5 structure for consistency
 with the trained model pipeline.
 
 Usage:
-  # From decoded .npy file:
-  python process_nisar_to_cpi.py hv_decoded.npy output.h5
+  # From raw NISAR HDF5 (HV polarization):
+  python process_nisar_to_cpi.py nisar.h5 output_hv.h5 \\
+    --dataset /science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV
 
-  # From raw NISAR HDF5:
-  python process_nisar_to_cpi.py nisar.h5 output.h5 --dataset /science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV
+  # From raw NISAR HDF5 (HH polarization):
+  python process_nisar_to_cpi.py nisar.h5 output_hh.h5 \\
+    --dataset /science/LSAR/RRSD/swaths/frequencyA/txH/rxH/HH
+
+  # From decoded .npy file:
+  python process_nisar_to_cpi.py hv_decoded.npy output_hv.h5 \\
+    --shape 182760 52866 --polarization HV
 """
 
 import os
@@ -33,11 +41,38 @@ import numpy as np
 import h5py
 from pathlib import Path
 import argparse
+import re
 
 
 # CPI tile dimensions (must match training data)
 CPI_HEIGHT = 16   # pulses per CPI block
 CPI_WIDTH = 250   # range samples per CPI tile
+
+
+def detect_polarization(dataset_path=None, polarization_arg=None):
+    """
+    Detect polarization from dataset path or explicit argument.
+
+    Args:
+        dataset_path (str|None): HDF5 dataset path (e.g., '/science/.../HV')
+        polarization_arg (str|None): Explicit polarization ('HH', 'HV', etc.)
+
+    Returns:
+        str: Polarization string ('HH', 'HV', 'VH', 'VV')
+    """
+    if polarization_arg:
+        pol = polarization_arg.upper()
+        if pol not in ['HH', 'HV', 'VH', 'VV']:
+            raise ValueError(f"Invalid polarization: {pol}. Must be HH, HV, VH, or VV")
+        return pol
+
+    if dataset_path:
+        # Extract from path like: /science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV
+        match = re.search(r'/(HH|HV|VH|VV)$', dataset_path)
+        if match:
+            return match.group(1)
+
+    raise ValueError("Could not detect polarization. Provide --polarization or use dataset path ending in HH/HV/VH/VV")
 
 
 def compute_eigenvalues_normalized(cpi):
@@ -160,6 +195,7 @@ def process_nisar_to_cpi(
     output_h5_path,
     dataset_path=None,
     input_shape=None,
+    polarization=None,
     cpi_height=CPI_HEIGHT,
     cpi_width=CPI_WIDTH,
     max_range_lines=None,
@@ -174,6 +210,7 @@ def process_nisar_to_cpi(
         output_h5_path (str): Output HDF5 file path
         dataset_path (str|None): HDF5 dataset path (required for .h5 input)
         input_shape (tuple|None): Shape for .npy memmap (required for .npy input)
+        polarization (str|None): Polarization ('HH', 'HV', etc.) - auto-detected from dataset_path if not provided
         cpi_height (int): Pulses per CPI tile (default 16)
         cpi_width (int): Range samples per CPI tile (default 250)
         max_range_lines (int|None): Limit processing to first N range lines (for testing)
@@ -181,16 +218,19 @@ def process_nisar_to_cpi(
         range_end (int|None): End at this range line (must be multiple of cpi_height)
     """
 
+    # Detect polarization
+    pol = detect_polarization(dataset_path, polarization)
+
     print("="*70)
-    print("Processing NISAR Data to CPI Tiles")
+    print(f"Processing NISAR {pol} Data to CPI Tiles")
     print("="*70)
 
     # Load data source
     print(f"\nLoading: {input_path}")
-    hv_data, _ = load_data_source(input_path, dataset_path, input_shape)
+    data, _ = load_data_source(input_path, dataset_path, input_shape)
 
-    total_pulses = hv_data.shape[0]
-    total_range = hv_data.shape[1]
+    total_pulses = data.shape[0]
+    total_range = data.shape[1]
 
     # Handle range selection
     pulse_start = 0
@@ -214,9 +254,10 @@ def process_nisar_to_cpi(
         pulse_end = pulse_start + total_pulses
         print(f"  Limiting to first {total_pulses} range lines")
 
-    print(f"  Full shape: {hv_data.shape}")
+    print(f"  Full shape: {data.shape}")
     print(f"  Processing: ({total_pulses}, {total_range})")
-    print(f"  Dtype: {hv_data.dtype}")
+    print(f"  Dtype: {data.dtype}")
+    print(f"  Polarization: {pol}")
 
     # Calculate number of tiles
     n_pulse_tiles = total_pulses // cpi_height
@@ -243,6 +284,7 @@ def process_nisar_to_cpi(
 
         # Root attributes
         f.attrs['source'] = 'NISAR_L0_PR_RRSD'
+        f.attrs['polarization'] = pol
         f.attrs['total_pulses'] = total_pulses_used
         f.attrs['range_bins'] = total_range_used
         f.attrs['cpi_height'] = cpi_height
@@ -261,7 +303,7 @@ def process_nisar_to_cpi(
             for j in range(0, total_range_used, cpi_width):
 
                 # Extract CPI tile
-                cpi = hv_data[i:i+cpi_height, j:j+cpi_width].copy()  # Copy to get actual data
+                cpi = data[i:i+cpi_height, j:j+cpi_width].copy()  # Copy to get actual data
 
                 # Compute SCM: M * M^H / cpi_width
                 M = cpi
@@ -296,6 +338,7 @@ def process_nisar_to_cpi(
     print("Processing Complete!")
     print(f"{'='*70}")
     print(f"Output: {output_h5_path}")
+    print(f"Polarization: {pol}")
     print(f"Size: {Path(output_h5_path).stat().st_size / (1024**3):.2f} GB")
     print(f"Total CPI tiles: {tile_count:,}")
 
@@ -354,21 +397,25 @@ def verify_h5_file(h5_path, n_samples=5):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Process NISAR data into CPI tiles',
+        description='Process NISAR data (any polarization) into CPI tiles',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # From decoded .npy file (must specify shape):
-  python process_nisar_to_cpi.py hv_decoded.npy output.h5 --shape 182760 52866
-
-  # From raw NISAR HDF5 (auto-detects shape, decodes on-the-fly):
-  python process_nisar_to_cpi.py nisar.h5 output.h5 \\
+  # From raw NISAR HDF5 (polarization auto-detected from dataset path):
+  python process_nisar_to_cpi.py nisar.h5 output_hv.h5 \\
     --dataset /science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV
 
+  python process_nisar_to_cpi.py nisar.h5 output_hh.h5 \\
+    --dataset /science/LSAR/RRSD/swaths/frequencyA/txH/rxH/HH
+
+  # From decoded .npy file (must specify shape and polarization):
+  python process_nisar_to_cpi.py hv_decoded.npy output_hv.h5 \\
+    --shape 182760 52866 --polarization HV
+
   # With range line limit for testing:
-  python process_nisar_to_cpi.py nisar.h5 output.h5 \\
+  python process_nisar_to_cpi.py nisar.h5 output_hv.h5 \\
     --dataset /science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV \\
-    --max-range-lines 1600
+    --range-start 0 --range-end 1600
         """
     )
 
@@ -377,6 +424,8 @@ Examples:
     parser.add_argument('--dataset', help='HDF5 dataset path (required for .h5 input)')
     parser.add_argument('--shape', nargs=2, type=int, metavar=('ROWS', 'COLS'),
                         help='Shape for .npy memmap (required for .npy input)')
+    parser.add_argument('--polarization', choices=['HH', 'HV', 'VH', 'VV'],
+                        help='Polarization (auto-detected from dataset path if not provided)')
     parser.add_argument('--cpi-height', type=int, default=16,
                         help='CPI height in pulses (default: 16)')
     parser.add_argument('--cpi-width', type=int, default=250,
@@ -400,7 +449,7 @@ Examples:
     if input_path.suffix == '.npy':
         if args.shape is None:
             print(f"ERROR: --shape required for .npy input")
-            print(f"Usage: python process_nisar_to_cpi.py {args.input} {args.output} --shape ROWS COLS")
+            print(f"Usage: python process_nisar_to_cpi.py {args.input} {args.output} --shape ROWS COLS --polarization HV")
             sys.exit(1)
         input_shape = tuple(args.shape)
         dataset_path = None
@@ -434,6 +483,7 @@ Examples:
         output_h5_path=args.output,
         dataset_path=dataset_path,
         input_shape=input_shape,
+        polarization=args.polarization,
         cpi_height=args.cpi_height,
         cpi_width=args.cpi_width,
         max_range_lines=args.max_range_lines,

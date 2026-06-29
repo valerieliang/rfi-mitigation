@@ -112,7 +112,8 @@ def decode_polarization(h5_file_path: str,
                         pol: str = 'HV',
                         frequency: str = 'A',
                         range_lines: Tuple[int, int] = None,
-                        range_samples: Tuple[int, int] = None) -> np.ndarray:
+                        range_samples: Tuple[int, int] = None,
+                        dataset_path: str = None) -> np.ndarray:
     """
     Decode a polarization channel from NISAR L0 RRSD data.
 
@@ -121,32 +122,56 @@ def decode_polarization(h5_file_path: str,
     h5_file_path : str
         Path to NISAR L0 RRSD HDF5 file
     pol : str
-        Polarization channel: 'HH', 'HV', 'VH', or 'VV'
+        Polarization channel: 'HH', 'HV', 'VH', or 'VV' (ignored if dataset_path provided)
     frequency : str
-        Frequency band: 'A' or 'B', default 'A'
+        Frequency band: 'A' or 'B', default 'A' (ignored if dataset_path provided)
     range_lines : tuple of (start, end), optional
         Subset of range lines to read (azimuth dimension)
     range_samples : tuple of (start, end), optional
         Subset of range samples to read (range dimension)
+    dataset_path : str, optional
+        Full dataset path (e.g., '/science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV')
+        If provided, overrides pol and frequency parameters
 
     Returns:
     --------
     np.ndarray : Decoded complex-valued radar data
     """
 
-    if len(pol) != 2 or pol[0] not in 'HV' or pol[1] not in 'HV':
-        raise ValueError(f"Invalid polarization: {pol}. Must be HH, HV, VH, or VV")
+    if dataset_path is None:
+        # Use pol and frequency to construct path
+        if len(pol) != 2 or pol[0] not in 'HV' or pol[1] not in 'HV':
+            raise ValueError(f"Invalid polarization: {pol}. Must be HH, HV, VH, or VV")
 
-    tx_pol = pol[0]
-    rx_pol = pol[1]
+        tx_pol = pol[0]
+        rx_pol = pol[1]
+    else:
+        # Extract pol from dataset path
+        import re
+        match = re.search(r'/tx([HV])/rx([HV])/([HV]{2})$', dataset_path)
+        if not match:
+            raise ValueError(f"Could not extract polarization from dataset path: {dataset_path}")
+        tx_pol = match.group(1)
+        rx_pol = match.group(2)
+        pol = match.group(3)
+        # Extract frequency from path
+        freq_match = re.search(r'/frequency([AB])/', dataset_path)
+        if freq_match:
+            frequency = freq_match.group(1)
 
     with h5py.File(h5_file_path, 'r') as f:
+        # Construct paths
+        if dataset_path is None:
+            data_path = f'/science/LSAR/RRSD/swaths/frequency{frequency}/tx{tx_pol}/rx{rx_pol}/{pol}'
+        else:
+            data_path = dataset_path
+
         # Get the BFPQLUT (same for all polarizations and frequencies)
-        lut_path = f'/science/LSAR/RRSD/swaths/frequency{frequency}/tx{tx_pol}/rx{rx_pol}/BFPQLUT'
+        parent_path = '/'.join(data_path.split('/')[:-1])
+        lut_path = f'{parent_path}/BFPQLUT'
         bfpqlut = f[lut_path][:]
 
         # Get the quantized data
-        data_path = f'/science/LSAR/RRSD/swaths/frequency{frequency}/tx{tx_pol}/rx{rx_pol}/{pol}'
         dataset = f[data_path]
 
         print(f"Reading {pol} data from: {data_path}")
