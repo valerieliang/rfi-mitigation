@@ -190,18 +190,30 @@ def stream_process_nisar_batched(
     pulse_start = range_start if range_start is not None else 0
     pulse_end = range_end if range_end is not None else total_pulses
 
+    # Calculate complete tiles (drop remainder)
     n_pulses = pulse_end - pulse_start
-    if n_pulses % cpi_height != 0:
-        raise ValueError(
-            f"Pulse range ({n_pulses}) must be divisible by cpi_height ({cpi_height})"
-        )
-
     n_pulse_tiles = n_pulses // cpi_height
     n_range_tiles = total_range // cpi_width
+
+    # Truncate to complete tiles
+    n_pulses_used = n_pulse_tiles * cpi_height
+    n_range_used = n_range_tiles * cpi_width
+    pulse_end = pulse_start + n_pulses_used
+
+    # Log dropped data if any
+    dropped_pulses = n_pulses - n_pulses_used
+    dropped_range = total_range - n_range_used
+    if dropped_pulses > 0 or dropped_range > 0:
+        print(f"\nNote: Dropping incomplete tiles:")
+        if dropped_pulses > 0:
+            print(f"  Dropped {dropped_pulses} pulses ({dropped_pulses/n_pulses*100:.2f}%)")
+        if dropped_range > 0:
+            print(f"  Dropped {dropped_range} range samples ({dropped_range/total_range*100:.2f}%)")
+
     total_tiles = n_pulse_tiles * n_range_tiles
 
     print(f"\nProcessing configuration:")
-    print(f"  Pulse range: {pulse_start} to {pulse_end} ({n_pulses} pulses)")
+    print(f"  Pulse range: {pulse_start} to {pulse_end} ({n_pulses_used} pulses)")
     print(f"  CPI size: {cpi_height} × {cpi_width}")
     print(f"  Pulse tiles: {n_pulse_tiles}")
     print(f"  Range tiles: {n_range_tiles}")
