@@ -39,34 +39,57 @@ python preprocess_nisar/process_nisar_to_cpi.py \
 - BFPQLUT automatically extracted from correct parent path
 - Single script for all polarizations
 
-## 2. Evaluate with Model
+## 2. Evaluate with Model (Two-Step Process)
 
-Use `eval_nisar.py` which now auto-detects polarization and saves to the correct directory:
+### Step 2a: Run Predictions
 
-### Evaluate HV data:
+Use `predict_nisar.py` to run the model and save predictions:
+
 ```bash
-python eval_nisar.py --nisar-h5 nisar_cpi_hv.h5
+# HV data
+python predict_nisar.py --nisar-h5 nisar_cpi_hv.h5
 ```
 - **Auto-detects**: Polarization = HV
 - **Auto-saves to**: `results/nisar_eval_HV/`
+- **Outputs**: predictions.npy, probabilities.npy, prediction_map.npy, nisar_stats.json, metadata.json
 
-### Evaluate HH data:
 ```bash
-python eval_nisar.py --nisar-h5 nisar_cpi_hh.h5
+# HH data
+python predict_nisar.py --nisar-h5 nisar_cpi_hh.h5
 ```
 - **Auto-detects**: Polarization = HH
 - **Auto-saves to**: `results/nisar_eval_HH/`
 
-### Manual output directory (optional):
+### Step 2b: Generate Plots
+
+Use `plot_nisar_predictions.py` to visualize results:
+
 ```bash
-python eval_nisar.py --nisar-h5 nisar_cpi_hh.h5 --output-dir results/my_custom_dir
+# Generate all plots (histogram, spatial map, bounded map)
+python plot_nisar_predictions.py --results-dir results/nisar_eval_HV
+
+# With custom max_knee threshold for bounded map
+python plot_nisar_predictions.py --results-dir results/nisar_eval_HV --max-knee 4
+
+# Use different colormap (viridis, plasma, inferno, magma, turbo, jet)
+python plot_nisar_predictions.py --results-dir results/nisar_eval_HV --cmap plasma
+
+# Generate comparison plot (original vs bounded)
+python plot_nisar_predictions.py --results-dir results/nisar_eval_HV --comparison
 ```
+
+**Plot Types:**
+- **Histogram**: Distribution of knee predictions across all CPIs
+- **Spatial Map**: Geographic distribution of knee positions (sequential colormap)
+- **Bounded Map**: "Recovered" CPIs with knee > max_knee set to 0 (preserves data with weak RFI)
+- **Comparison**: Side-by-side original vs bounded
 
 **Features:**
 - Reads `polarization` attribute from input HDF5
 - Auto-creates output directory: `results/nisar_eval_{POLARIZATION}/`
-- No manual directory specification needed
-- Prevents accidental overwrites between polarizations
+- Terminology changed from "tiles" to "CPIs" for clarity
+- Sequential colormaps (viridis, plasma, etc.) instead of random tab20
+- Bounded map allows data preservation for weakly contaminated CPIs
 
 ## 3. Decode Raw Data (Optional)
 
@@ -105,19 +128,17 @@ hh_data = decode_polarization('nisar.h5', pol='HH', frequency='A')
 ```
 results/
 ├── nisar_eval_HV/          # HV polarization results
-│   ├── nisar_stats.json
-│   ├── predictions.npy
-│   ├── probabilities.npy
-│   ├── prediction_map.npy
-│   ├── nisar_predictions_spatial.png
-│   └── nisar_predictions_histogram.png
+│   ├── nisar_stats.json                      # Statistics (RFI rate, distribution)
+│   ├── metadata.json                         # CPI dimensions, tile indices
+│   ├── predictions.npy                       # Predicted knee indices (N,)
+│   ├── probabilities.npy                     # Class probabilities (N, M+1)
+│   ├── prediction_map.npy                    # 2D spatial map
+│   ├── nisar_predictions_histogram.png       # Distribution histogram
+│   ├── nisar_predictions_spatial.png         # Spatial map (sequential colormap)
+│   ├── nisar_predictions_bounded.png         # Bounded map (max_knee threshold)
+│   └── nisar_predictions_comparison.png      # Side-by-side comparison (optional)
 └── nisar_eval_HH/          # HH polarization results
-    ├── nisar_stats.json
-    ├── predictions.npy
-    ├── probabilities.npy
-    ├── prediction_map.npy
-    ├── nisar_predictions_spatial.png
-    └── nisar_predictions_histogram.png
+    └── (same structure as HV)
 ```
 
 ## Key Changes

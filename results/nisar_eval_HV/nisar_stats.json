@@ -1,7 +1,7 @@
 {
-  "total_tiles": 290125,
-  "rfi_tiles": 290014,
-  "clean_tiles": 111,
+  "total_cpis": 290125,
+  "rfi_cpis": 290014,
+  "clean_cpis": 111,
   "rfi_rate": 0.9996174062903921,
   "distribution": {
     "0": 111,
