@@ -1,4 +1,4 @@
-# NISAR Processing Workflow - Updated
+# NISAR Processing Workflow
 
 All scripts now automatically detect polarization (HH/HV/VH/VV) and handle paths appropriately.
 
@@ -155,8 +155,3 @@ ls results/
 # Should show: nisar_eval_HV/ and nisar_eval_HH/
 ```
 
-## Notes
-
-- The old separate scripts (`process_nisar_to_cpi_hv.py`, `process_nisar_to_cpi_hh.py`) have been removed
-- All functionality is now in the unified `process_nisar_to_cpi.py` script
-- Output format is identical with polarization stored as HDF5 attribute
