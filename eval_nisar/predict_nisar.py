@@ -29,7 +29,8 @@ import h5py
 import tensorflow as tf
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add parent directory to path to import train.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from train import extract_features, M, N_CLASSES
 
 
