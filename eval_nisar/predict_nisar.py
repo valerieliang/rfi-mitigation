@@ -111,7 +111,7 @@ def load_nisar_dataset(h5_path, max_tiles=None, n_workers=8):
     print(f"\nExtracting features from {len(cpi_keys)} CPIs (parallel with {n_workers} workers)...")
 
     # Split keys into batches for parallel processing
-    batch_size = max(len(cpi_keys) // (n_workers * 4), 100)  # At least 100 per batch
+    batch_size = max(len(cpi_keys) // (n_workers * 10), 50)  # Smaller batches = more frequent updates
     batches = [cpi_keys[i:i+batch_size] for i in range(0, len(cpi_keys), batch_size)]
 
     eigen_list = []
@@ -121,6 +121,10 @@ def load_nisar_dataset(h5_path, max_tiles=None, n_workers=8):
     processed = 0
 
     # Process batches in parallel
+    print(f"  Batch size: {batch_size} CPIs per batch")
+    print(f"  Total batches: {len(batches)}")
+    print(f"  Processing...")
+
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {executor.submit(process_cpi_batch, h5_path, batch): batch
                    for batch in batches}
@@ -135,7 +139,8 @@ def load_nisar_dataset(h5_path, max_tiles=None, n_workers=8):
                 tile_indices.append(tile_idx)
 
             processed += len(batch_results)
-            if processed % 10000 < batch_size or processed == len(cpi_keys):
+            # Print progress more frequently (every 5000 CPIs or every batch if small)
+            if processed % 5000 < batch_size or processed == len(cpi_keys):
                 print(f"  [{100*processed/len(cpi_keys):5.1f}%] Processed {processed:,}/{len(cpi_keys):,} CPIs")
 
     metadata = {
