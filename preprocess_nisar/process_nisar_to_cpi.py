@@ -214,8 +214,8 @@ def process_nisar_to_cpi(
         cpi_height (int): Pulses per CPI tile (default 16)
         cpi_width (int): Range samples per CPI tile (default 250)
         max_range_lines (int|None): Limit processing to first N range lines (for testing)
-        range_start (int|None): Start at this range line (must be multiple of cpi_height)
-        range_end (int|None): End at this range line (must be multiple of cpi_height)
+        range_start (int|None): Start at this range line
+        range_end (int|None): End at this range line (range_end - range_start must be divisible by cpi_height)
     """
 
     # Detect polarization
@@ -238,15 +238,17 @@ def process_nisar_to_cpi(
 
     if range_start is not None or range_end is not None:
         if range_start is not None:
-            if range_start % cpi_height != 0:
-                raise ValueError(f"range_start ({range_start}) must be multiple of cpi_height ({cpi_height})")
             pulse_start = range_start
         if range_end is not None:
-            if range_end % cpi_height != 0:
-                raise ValueError(f"range_end ({range_end}) must be multiple of cpi_height ({cpi_height})")
             pulse_end = range_end
 
         total_pulses = pulse_end - pulse_start
+
+        # Validate that the number of rows is divisible by cpi_height
+        if total_pulses % cpi_height != 0:
+            raise ValueError(f"Range length ({total_pulses}) must be divisible by cpi_height ({cpi_height}). "
+                           f"Adjust range_start or range_end so that (range_end - range_start) % {cpi_height} == 0")
+
         print(f"  Processing range: lines {pulse_start} to {pulse_end} ({total_pulses} lines)")
 
     elif max_range_lines is not None:
@@ -435,9 +437,9 @@ Examples:
     parser.add_argument('--max-range-lines', type=int, default=None,
                         help='Limit processing to first N range lines (for testing)')
     parser.add_argument('--range-start', type=int, default=None,
-                        help='Start at this range line index (must be multiple of cpi_height)')
+                        help='Start at this range line index')
     parser.add_argument('--range-end', type=int, default=None,
-                        help='End at this range line index (must be multiple of cpi_height)')
+                        help='End at this range line index (range_end - range_start must be divisible by cpi_height)')
 
     args = parser.parse_args()
 
@@ -472,12 +474,15 @@ Examples:
         if args.max_range_lines is not None:
             print("ERROR: Cannot use --max-range-lines with --range-start/--range-end")
             sys.exit(1)
-        if args.range_start is not None and args.range_start % args.cpi_height != 0:
-            print(f"ERROR: --range-start ({args.range_start}) must be multiple of --cpi-height ({args.cpi_height})")
-            sys.exit(1)
-        if args.range_end is not None and args.range_end % args.cpi_height != 0:
-            print(f"ERROR: --range-end ({args.range_end}) must be multiple of --cpi-height ({args.cpi_height})")
-            sys.exit(1)
+        # Validate that the range length is divisible by cpi_height
+        range_start = args.range_start if args.range_start is not None else 0
+        range_end = args.range_end
+        if range_end is not None:
+            range_length = range_end - range_start
+            if range_length % args.cpi_height != 0:
+                print(f"ERROR: Range length ({range_length}) must be divisible by --cpi-height ({args.cpi_height})")
+                print(f"  Adjust --range-start or --range-end so that (range_end - range_start) % {args.cpi_height} == 0")
+                sys.exit(1)
 
     # Process
     process_nisar_to_cpi(
