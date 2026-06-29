@@ -51,10 +51,9 @@ global_input shape (5,):
 Directory layout expected on disk
 -----------------------------------
     data/
-        multi_band/    image_0.h5 .. image_9.h5
-
-    Clean baseline is synthesised on-the-fly from generate_nisar_image.py
-    using seeds 0..N_SEEDS-1.
+        multi_band/
+            clean/          image_*.h5 (clean samples, knee=0)
+            contaminated/   image_*.h5 (RFI samples, knee=1-16)
 
 Outputs
 -------
@@ -80,10 +79,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from generate_synthetic_data import (
-    generate_clean_image,
-    BLOCK_HEIGHT, N_BLOCKS, RANGE_BINS, BLOCK_WIDTH,
-)
+from generate_synthetic_data import BLOCK_HEIGHT
 from model import build_model
 
 # ---------------------------------------------------------------------------
@@ -93,9 +89,8 @@ from model import build_model
 DATA_ROOT   = 'data'
 MODELS_ROOT = 'models'
 M           = BLOCK_HEIGHT      # pulses per CPI = number of eigenvalues
-N_CLASSES   = M + 1             # labels 0..M-1 are RFI knee indices; M = no RFI
+N_CLASSES   = M + 1             # labels 0..M (0=clean, 1-16=RFI knee position)
 N_GLOBAL    = 5                 # global features: cond_number, sigma_min, sigma_max, mu_min, f_factor
-N_SEEDS     = 10                # image_0.h5 .. image_9.h5
 
 EPOCHS      = 50
 BATCH_SIZE  = 64
@@ -221,15 +216,16 @@ def label_from_rfi_bands(rfi_bands_json):
 # DATASET LOADING
 # ---------------------------------------------------------------------------
 
-def load_rfi_dataset(folder):
+def load_dataset_from_folder(folder, expected_is_clean=None):
     """
-    Load all CPI samples from all HDF5 files in the multi_band folder.
+    Load all CPI samples from all HDF5 files in a folder.
 
     The knee label is derived per-tile from the 'rfi_bands' attribute
     (see label_from_rfi_bands).
 
     Args:
         folder (str): Path to directory containing image_*.h5 files.
+        expected_is_clean (bool|None): If provided, verify that loaded files match this flag.
 
     Returns:
         eigen   (np.ndarray): shape (N, M, 2)
@@ -245,6 +241,12 @@ def load_rfi_dataset(folder):
     for fname in h5_files:
         fpath = os.path.join(folder, fname)
         with h5py.File(fpath, 'r') as f:
+            # Verify is_clean flag if expected
+            if expected_is_clean is not None:
+                file_is_clean = f.attrs.get('is_clean', False)
+                if file_is_clean != expected_is_clean:
+                    print(f"Warning: {fname} has is_clean={file_is_clean}, expected {expected_is_clean}")
+
             for key in f.keys():
                 # Skip eigenvalue and diagonal datasets, only load CPI data
                 if key.endswith('_eigenvalues') or key.endswith('_diagonal'):
@@ -263,48 +265,6 @@ def load_rfi_dataset(folder):
     )
 
 
-def load_clean_dataset(snr_levels=[6, 7, 8, 9, 10], n_images_per_snr=5):
-    """
-    Generate clean CPI samples on-the-fly (no RFI, label = 0 = clean sentinel).
-
-    Generates clean images across multiple SNR levels to match the training data
-    distribution. Uses the same SNR levels as the RFI dataset.
-
-    Args:
-        snr_levels (list): SNR values in dB to generate clean data for.
-        n_images_per_snr (int): Number of images per SNR level.
-
-    Returns:
-        eigen   (np.ndarray): shape (N, M, 2)
-        global_ (np.ndarray): shape (N, 5)
-        labels  (np.ndarray): shape (N,)  all equal to 0
-    """
-    eigen_list, global_list, label_list = [], [], []
-    n_range_tiles = RANGE_BINS // BLOCK_WIDTH
-
-    seed = 10000  # Start from a different seed range to avoid collision with RFI data
-    for snr_db in snr_levels:
-        for _ in range(n_images_per_snr):
-            clean_image = generate_clean_image(seed=seed, snr_db=snr_db)
-
-            for b in range(N_BLOCKS):
-                pulse_start = b * M
-                for j in range(n_range_tiles):
-                    col_start   = j * BLOCK_WIDTH
-                    cpi         = clean_image[pulse_start:pulse_start + M,
-                                              col_start:col_start + BLOCK_WIDTH]
-                    eigen, glob = extract_features(cpi)
-                    eigen_list.append(eigen)
-                    global_list.append(glob)
-                    label_list.append(0)    # clean sentinel
-
-            seed += 1
-
-    return (
-        np.stack(eigen_list).astype(np.float32),
-        np.stack(global_list).astype(np.float32),
-        np.array(label_list, dtype=np.int32),
-    )
 
 
 def split_dataset(eigen, global_, labels):
@@ -637,41 +597,47 @@ def main():
     """
     Full training pipeline.
 
-    Step 1: Load the multi_band RFI dataset and derive per-tile knee labels.
-    Step 2: Generate the clean baseline dataset (label = M).
+    Step 1: Load clean samples from data/multi_band/clean/ (label = 0).
+    Step 2: Load contaminated samples from data/multi_band/contaminated/ (label = 1-16).
     Step 3: Merge, split 80/10/10, train, and evaluate a single combined model.
     Step 4: Print summary metrics and knee confusion matrix.
     """
     os.makedirs(MODELS_ROOT, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Step 1: RFI dataset
+    # Step 1: Load clean dataset
     # ------------------------------------------------------------------
-    rfi_folder = os.path.join(DATA_ROOT, 'multi_band')
-    print(f"\nLoading RFI dataset from {rfi_folder} ...")
-    e_rfi, g_rfi, y_rfi = load_rfi_dataset(rfi_folder)
+    clean_folder = os.path.join(DATA_ROOT, 'multi_band', 'clean')
+    print(f"\nLoading CLEAN dataset from {clean_folder} ...")
+    e_clean, g_clean, y_clean = load_dataset_from_folder(clean_folder, expected_is_clean=True)
+    print(f"  Clean samples: {len(y_clean)}")
+    unique, counts = np.unique(y_clean, return_counts=True)
+    for u, c in zip(unique.tolist(), counts.tolist()):
+        print(f"    label {u} (clean): {c}")
+
+    # ------------------------------------------------------------------
+    # Step 2: Load contaminated (RFI) dataset
+    # ------------------------------------------------------------------
+    rfi_folder = os.path.join(DATA_ROOT, 'multi_band', 'contaminated')
+    print(f"\nLoading CONTAMINATED dataset from {rfi_folder} ...")
+    e_rfi, g_rfi, y_rfi = load_dataset_from_folder(rfi_folder, expected_is_clean=False)
     print(f"  RFI samples  : {len(y_rfi)}")
     unique, counts = np.unique(y_rfi, return_counts=True)
     for u, c in zip(unique.tolist(), counts.tolist()):
         if u == 0:
-            print(f"    label {u} (clean): {c}")
+            print(f"    label {u} (clean - unexpected in contaminated folder): {c}")
         else:
             print(f"    label {u} (knee at position {u}): {c}")
 
     # ------------------------------------------------------------------
-    # Step 2: Clean baseline
-    # ------------------------------------------------------------------
-    print("\nGenerating clean baseline dataset ...")
-    e_clean, g_clean, y_clean = load_clean_dataset()
-    print(f"  Clean samples: {len(y_clean)}")
-
-    # ------------------------------------------------------------------
     # Step 3: Merge + split + train
     # ------------------------------------------------------------------
-    eigen  = np.concatenate([e_rfi,  e_clean],  axis=0)
-    global_ = np.concatenate([g_rfi,  g_clean],  axis=0)
-    labels  = np.concatenate([y_rfi,  y_clean],  axis=0)
+    eigen  = np.concatenate([e_clean, e_rfi],  axis=0)
+    global_ = np.concatenate([g_clean, g_rfi],  axis=0)
+    labels  = np.concatenate([y_clean, y_rfi],  axis=0)
     print(f"\nTotal samples: {len(labels)}")
+    print(f"  Clean (label 0): {np.sum(labels == 0)}")
+    print(f"  RFI (label 1-{M}): {np.sum(labels > 0)}")
 
     (e_tr, e_va, e_te,
      g_tr, g_va, g_te,
