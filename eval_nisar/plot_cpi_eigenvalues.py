@@ -78,12 +78,12 @@ def detect_hdf5_format(h5_path):
 
         first_cpi = cpi_keys[0]
 
-        # tile_cpi.py format has groups with 'eigen_input' dataset
-        if isinstance(f[first_cpi], h5py.Group) and 'eigen_input' in f[first_cpi]:
-            return 'tile_cpi'
-        # process_nisar_to_cpi.py format has direct datasets
-        elif f'{first_cpi}_eigenvalues' in f or f'{first_cpi}_eigenvalues_normalized' in f:
+        # process_nisar_to_cpi.py format has companion _eigenvalues datasets
+        if f'{first_cpi}_eigenvalues' in f or f'{first_cpi}_eigenvalues_normalized' in f:
             return 'process_nisar'
+        # tile_cpi.py format has groups with 'eigen_input' dataset
+        elif isinstance(f[first_cpi], h5py.Group) and 'eigen_input' in f[first_cpi]:
+            return 'tile_cpi'
         else:
             raise ValueError(f"Unknown HDF5 format in {h5_path}")
 
@@ -168,10 +168,10 @@ def load_cpi_eigenvalues(h5_path, ci, ri):
             }
 
         else:  # process_nisar format
-            # Calculate pulse and range indices from ci, ri
+            # For process_nisar format, ci and ri ARE the pulse/range indices
             cpi_width = int(f.attrs.get('cpi_width', 250))
-            pulse_start = ci * M
-            range_start = ri * cpi_width
+            pulse_start = ci
+            range_start = ri
 
             key = f'cpi_{pulse_start}_{range_start}'
             if key not in f:
