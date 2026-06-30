@@ -376,7 +376,7 @@ def stream_process_nisar(
         )
         probabilities_array = output_file.create_dataset(
             'probabilities',
-            shape=(n_pulse_tiles, n_range_tiles, 16),
+            shape=(n_pulse_tiles, n_range_tiles, 17),
             dtype=np.float32,
             chunks=True,
             compression='gzip'
@@ -535,9 +535,9 @@ def stream_process_nisar(
                             'description': 'Prediction confidence (max probability) for each CPI'
                         },
                         'probabilities': {
-                            'shape': [int(n_pulse_tiles), int(n_range_tiles), 16],
+                            'shape': [int(n_pulse_tiles), int(n_range_tiles), 17],
                             'dtype': 'float32',
-                            'description': 'Full probability distribution across 16 classes for each CPI'
+                            'description': 'Full probability distribution across 17 classes for each CPI (0=clean, 1-16=RFI knee positions)'
                         }
                     }
                 }

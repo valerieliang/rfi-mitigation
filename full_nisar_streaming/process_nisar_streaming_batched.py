@@ -57,7 +57,7 @@ def process_row_cpis_batched(data, pulse_idx, range_indices, cpi_height, cpi_wid
         cpi_width (int): CPI width
 
     Returns:
-        list: List of (pulse_idx, range_idx, cpi, features, scm_results) tuples
+        list: List of (pulse_idx, range_idx, eigen, global_, scm_results) tuples
     """
     results = []
 
@@ -257,7 +257,7 @@ def stream_process_nisar_batched(
         )
         probabilities_array = output_file.create_dataset(
             'probabilities',
-            shape=(n_pulse_tiles, n_range_tiles, 16),
+            shape=(n_pulse_tiles, n_range_tiles, 17),
             dtype=np.float32,
             chunks=True,
             compression='gzip'
@@ -300,11 +300,14 @@ def stream_process_nisar_batched(
                 # Add to batch queue
                 batch_queue.extend(row_results)
 
-                # Process batch if full or last row
-                if len(batch_queue) >= batch_size or tile_count + len(row_results) >= total_tiles:
+                # Process batch when we have enough samples OR when done
+                should_process = len(batch_queue) >= batch_size
+                is_last_batch = tile_count + len(batch_queue) >= total_tiles
+
+                if should_process or is_last_batch:
                     # Extract features for batch prediction
                     if model is not None:
-                        feature_batch = [(item[3], item[4]) for item in batch_queue]
+                        feature_batch = [(item[2], item[3]) for item in batch_queue]
                         predictions = batch_predict(model, feature_batch, batch_size)
                     else:
                         predictions = [None] * len(batch_queue)
@@ -433,9 +436,9 @@ def stream_process_nisar_batched(
                             'description': 'Prediction confidence (max probability) for each CPI'
                         },
                         'probabilities': {
-                            'shape': [int(n_pulse_tiles), int(n_range_tiles), 16],
+                            'shape': [int(n_pulse_tiles), int(n_range_tiles), 17],
                             'dtype': 'float32',
-                            'description': 'Full probability distribution across 16 classes for each CPI'
+                            'description': 'Full probability distribution across 17 classes for each CPI (0=clean, 1-16=RFI knee positions)'
                         }
                     }
                 }
