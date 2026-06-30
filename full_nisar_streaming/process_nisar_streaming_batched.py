@@ -29,9 +29,9 @@ import h5py
 from pathlib import Path
 import argparse
 import re
+import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 from collections import deque
 
 # Import from process_nisar_streaming
@@ -79,7 +79,7 @@ def process_row_cpis_batched(data, pulse_idx, range_indices, cpi_height, cpi_wid
             'max_eigval_db': max_eigval_db,
         }
 
-        results.append((pulse_idx, range_idx, cpi, eigen, global_, scm_results))
+        results.append((pulse_idx, range_idx, eigen, global_, scm_results))
 
     return results
 
@@ -225,24 +225,43 @@ def stream_process_nisar_batched(
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-    # Initialize output file
+    # Initialize output file and arrays
     output_file = None
+    predictions_array = None
+    probabilities_array = None
+    confidence_array = None
+
     if not log_only:
         output_file = h5py.File(output_h5_path, 'w')
 
-        # Store metadata
-        output_file.attrs['source'] = str(input_path)
-        output_file.attrs['dataset_path'] = dataset_path
-        output_file.attrs['polarization'] = pol
-        output_file.attrs['cpi_height'] = cpi_height
-        output_file.attrs['cpi_width'] = cpi_width
+        # Store minimal HDF5 attributes for self-documentation
         output_file.attrs['n_pulse_tiles'] = n_pulse_tiles
         output_file.attrs['n_range_tiles'] = n_range_tiles
-        output_file.attrs['n_cpi_tiles'] = total_tiles
-        output_file.attrs['pulse_start'] = pulse_start
-        output_file.attrs['pulse_end'] = pulse_end
-        output_file.attrs['processing_date'] = datetime.now().isoformat()
-        output_file.attrs['has_predictions'] = model is not None
+        output_file.attrs['cpi_height'] = cpi_height
+        output_file.attrs['cpi_width'] = cpi_width
+
+        # Pre-allocate arrays for predictions (indexed by pulse_tile, range_tile)
+        predictions_array = output_file.create_dataset(
+            'predictions',
+            shape=(n_pulse_tiles, n_range_tiles),
+            dtype=np.int8,
+            chunks=True,
+            compression='gzip'
+        )
+        confidence_array = output_file.create_dataset(
+            'confidence',
+            shape=(n_pulse_tiles, n_range_tiles),
+            dtype=np.float32,
+            chunks=True,
+            compression='gzip'
+        )
+        probabilities_array = output_file.create_dataset(
+            'probabilities',
+            shape=(n_pulse_tiles, n_range_tiles, 16),
+            dtype=np.float32,
+            chunks=True,
+            compression='gzip'
+        )
 
     print(f"\n{'='*70}")
     print("Processing CPI tiles...")
@@ -254,7 +273,6 @@ def stream_process_nisar_batched(
 
     tile_count = 0
     rfi_count = 0
-    write_lock = Lock()
 
     # Accumulator for batched predictions
     batch_queue = []
@@ -292,7 +310,7 @@ def stream_process_nisar_batched(
                         predictions = [None] * len(batch_queue)
 
                     # Save results
-                    for idx, (pulse_idx, range_idx, cpi, eigen, global_, scm_results) in enumerate(batch_queue):
+                    for idx, (pulse_idx, range_idx, _, _, scm_results) in enumerate(batch_queue):
                         prediction = predictions[idx]
 
                         # Log
@@ -312,41 +330,14 @@ def stream_process_nisar_batched(
                         if prediction and prediction['knee_index'] > 0:
                             rfi_count += 1
 
-                        # Save to HDF5
-                        if not log_only and output_file is not None:
-                            with write_lock:
-                                tile_key = f"cpi_{pulse_idx}_{range_idx}"
+                        # Save predictions to arrays (no lock needed, different indices)
+                        if not log_only and prediction:
+                            pulse_tile_idx = (pulse_idx - pulse_start) // cpi_height
+                            range_tile_idx = range_idx // cpi_width
 
-                                # Save CPI data
-                                dset = output_file.create_dataset(tile_key, data=cpi)
-                                dset.attrs['max_eigval_db'] = scm_results['max_eigval_db']
-                                dset.attrs['pulse_idx'] = pulse_idx
-                                dset.attrs['range_idx'] = range_idx
-
-                                # Save eigenvalues
-                                output_file.create_dataset(
-                                    f"{tile_key}_eigenvalues",
-                                    data=scm_results['eigenvalues']
-                                )
-                                output_file.create_dataset(
-                                    f"{tile_key}_eigenvalues_normalized",
-                                    data=scm_results['eigenvalues_normalized']
-                                )
-                                output_file.create_dataset(
-                                    f"{tile_key}_diagonal",
-                                    data=scm_results['scm_diagonal']
-                                )
-
-                                # Save predictions
-                                if prediction:
-                                    dset.attrs['predicted_knee'] = prediction['knee_index']
-                                    dset.attrs['prediction_confidence'] = prediction['confidence']
-                                    dset.attrs['prediction_entropy'] = prediction['entropy']
-
-                                    output_file.create_dataset(
-                                        f"{tile_key}_probabilities",
-                                        data=prediction['probabilities']
-                                    )
+                            predictions_array[pulse_tile_idx, range_tile_idx] = prediction['knee_index']
+                            confidence_array[pulse_tile_idx, range_tile_idx] = prediction['confidence']
+                            probabilities_array[pulse_tile_idx, range_tile_idx, :] = prediction['probabilities']
 
                         tile_count += 1
 
@@ -359,20 +350,101 @@ def stream_process_nisar_batched(
         print(f"{'='*70}")
         print(f"Total tiles processed: {tile_count:,}")
 
-        if model is not None:
-            rfi_rate = rfi_count / tile_count if tile_count > 0 else 0
-            print(f"RFI detections: {rfi_count:,} ({100*rfi_rate:.2f}%)")
-            print(f"Clean CPIs: {tile_count - rfi_count:,} ({100*(1-rfi_rate):.2f}%)")
+        rfi_rate = rfi_count / tile_count if tile_count > 0 else 0
+        print(f"RFI detections: {rfi_count:,} ({100*rfi_rate:.2f}%)")
+        print(f"Clean CPIs: {tile_count - rfi_count:,} ({100*(1-rfi_rate):.2f}%)")
 
         if not log_only:
             print(f"\nOutput saved to: {output_h5_path}")
             file_size = Path(output_h5_path).stat().st_size / (1024**3)
             print(f"File size: {file_size:.2f} GB")
 
-            if model is not None:
-                output_file.attrs['rfi_detections'] = rfi_count
-                output_file.attrs['clean_cpis'] = tile_count - rfi_count
-                output_file.attrs['rfi_rate'] = rfi_rate
+            # Save comprehensive metadata as JSON
+            metadata_path = output_h5_path.replace('.h5', '.json')
+            metadata = {
+                'processing': {
+                    'date': datetime.now().isoformat(),
+                    'script': 'process_nisar_streaming_batched.py',
+                    'batch_size': int(batch_size),
+                    'n_workers': int(n_workers),
+                },
+                'input': {
+                    'source_file': str(input_path),
+                    'dataset_path': dataset_path,
+                    'polarization': pol,
+                },
+                'dimensions': {
+                    'total_pulses': int(total_pulses),
+                    'total_range': int(total_range),
+                    'cpi_height': int(cpi_height),
+                    'cpi_width': int(cpi_width),
+                },
+                'region': {
+                    'pulse_start': int(pulse_start),
+                    'pulse_end': int(pulse_end),
+                    'n_pulses_used': int(n_pulses_used),
+                    'n_pulse_tiles': int(n_pulse_tiles),
+                    'n_range_tiles': int(n_range_tiles),
+                    'n_range_used': int(n_range_used),
+                    'total_tiles': int(total_tiles),
+                },
+                'coverage': {
+                    'pulses_used': int(n_pulses_used),
+                    'pulses_total': int(total_pulses),
+                    'pulses_percent': float(n_pulses_used/total_pulses*100) if total_pulses > 0 else 0,
+                    'range_used': int(n_range_used),
+                    'range_total': int(total_range),
+                    'range_percent': float(n_range_used/total_range*100) if total_range > 0 else 0,
+                    'dropped_pulses': int(dropped_pulses),
+                    'dropped_range': int(dropped_range),
+                },
+                'coordinate_mapping': {
+                    'description': 'Array index [i, j] maps to pulse and range coordinates',
+                    'pulse': {
+                        'start': int(pulse_start),
+                        'step': int(cpi_height),
+                        'formula': f'{pulse_start} + i*{cpi_height}',
+                    },
+                    'range': {
+                        'start': 0,
+                        'step': int(cpi_width),
+                        'formula': f'j*{cpi_width}',
+                    }
+                },
+                'results': {
+                    'total_cpis': int(tile_count),
+                    'rfi_detections': int(rfi_count),
+                    'clean_cpis': int(tile_count - rfi_count),
+                    'rfi_rate': float(rfi_rate),
+                    'rfi_percent': float(rfi_rate * 100),
+                },
+                'output': {
+                    'hdf5_file': str(output_h5_path),
+                    'file_size_gb': float(file_size),
+                    'arrays': {
+                        'predictions': {
+                            'shape': [int(n_pulse_tiles), int(n_range_tiles)],
+                            'dtype': 'int8',
+                            'description': 'Predicted knee index (0-15) for each CPI'
+                        },
+                        'confidence': {
+                            'shape': [int(n_pulse_tiles), int(n_range_tiles)],
+                            'dtype': 'float32',
+                            'description': 'Prediction confidence (max probability) for each CPI'
+                        },
+                        'probabilities': {
+                            'shape': [int(n_pulse_tiles), int(n_range_tiles), 16],
+                            'dtype': 'float32',
+                            'description': 'Full probability distribution across 16 classes for each CPI'
+                        }
+                    }
+                }
+            }
+
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            print(f"Metadata saved to: {metadata_path}")
 
     finally:
         if output_file is not None:
@@ -389,7 +461,7 @@ def main():
     parser.add_argument('output', help='Output HDF5 file')
     parser.add_argument('--dataset', required=True, help='HDF5 dataset path')
     parser.add_argument('--polarization', choices=['HH', 'HV', 'VH', 'VV'])
-    parser.add_argument('--model', default=None, help='Path to trained model')
+    parser.add_argument('--model', required=True, help='Path to trained model')
     parser.add_argument('--cpi-height', type=int, default=16)
     parser.add_argument('--cpi-width', type=int, default=250)
     parser.add_argument('--range-start', type=int, default=None)
@@ -410,17 +482,15 @@ def main():
         sys.exit(1)
 
     # Load model
-    model = None
-    if args.model:
-        model_path = Path(args.model)
-        if not model_path.exists():
-            print(f"ERROR: Model not found: {args.model}")
-            sys.exit(1)
+    model_path = Path(args.model)
+    if not model_path.exists():
+        print(f"ERROR: Model not found: {args.model}")
+        sys.exit(1)
 
-        print(f"Loading model: {args.model}")
-        import tensorflow as tf
-        model = tf.keras.models.load_model(args.model)
-        print(f"  Model loaded successfully\n")
+    print(f"Loading model: {args.model}")
+    import tensorflow as tf
+    model = tf.keras.models.load_model(args.model)
+    print(f"  Model loaded successfully\n")
 
     # Process
     stream_process_nisar_batched(
