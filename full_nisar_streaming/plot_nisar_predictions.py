@@ -17,6 +17,7 @@ Usage:
     python plot_nisar_predictions.py hv_outputs.h5 --knee-bound 4
     python plot_nisar_predictions.py hv_outputs.h5 --knee-bound 4 --output-dir plots/
     python plot_nisar_predictions.py hv_outputs.h5 --knee-bound 6 --no-individual
+    python plot_nisar_predictions.py hv_outputs.h5 --knee-bound 4 --la-only  # Zoom to LA region only
 """
 
 import os
@@ -32,12 +33,13 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm
 
 
-def load_predictions(h5_path):
+def load_predictions(h5_path, la_only=False):
     """
     Load predictions and metadata from HDF5 file.
 
     Args:
         h5_path (str): Path to HDF5 file from process_nisar_streaming_batched.py
+        la_only (bool): If True, extract only the Los Angeles region
 
     Returns:
         predictions (np.ndarray): 2D array of predicted knee indices (n_pulse_tiles, n_range_tiles)
@@ -50,7 +52,7 @@ def load_predictions(h5_path):
         predictions = f['predictions'][:]
         confidence = f['confidence'][:]
 
-        print(f"  Predictions shape: {predictions.shape}")
+        print(f"  Full predictions shape: {predictions.shape}")
         print(f"  Dtype: {predictions.dtype}")
 
     # Load metadata
@@ -61,6 +63,35 @@ def load_predictions(h5_path):
     else:
         print(f"  Warning: Metadata file not found: {json_path}")
         metadata = {}
+
+    # Extract LA region if requested
+    if la_only:
+        # LA region: pulses 46528 to 124580
+        LA_PULSE_START = 46528
+        LA_PULSE_END = 124580
+        cpi_height = metadata.get('dimensions', {}).get('cpi_height', 16)
+
+        # Calculate tile indices
+        la_tile_start = LA_PULSE_START // cpi_height
+        la_tile_end = LA_PULSE_END // cpi_height
+
+        print(f"\n  Extracting Los Angeles region:")
+        print(f"    Pulse range: {LA_PULSE_START:,} to {LA_PULSE_END:,}")
+        print(f"    Tile indices: {la_tile_start:,} to {la_tile_end:,}")
+        print(f"    LA region shape: [{la_tile_end - la_tile_start}, {predictions.shape[1]}]")
+
+        # Slice arrays
+        predictions = predictions[la_tile_start:la_tile_end, :]
+        confidence = confidence[la_tile_start:la_tile_end, :]
+
+        # Update metadata to reflect LA region
+        metadata['la_region'] = {
+            'pulse_start': LA_PULSE_START,
+            'pulse_end': LA_PULSE_END,
+            'tile_start': la_tile_start,
+            'tile_end': la_tile_end,
+            'extracted': True
+        }
 
     return predictions, confidence, metadata
 
@@ -208,9 +239,14 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None):
 
     ax1.set_xlabel('Range Tile Index', fontsize=14, fontweight='bold')
     ax1.set_ylabel('Pulse Tile Index', fontsize=14, fontweight='bold')
-    ax1.set_title(f'Original Predictions\n'
-                  f'RFI CPIs: {stats["original_rfi"]:,} ({100*stats["original_rfi_rate"]:.2f}%)',
-                  fontsize=14, fontweight='bold')
+
+    # Add region info to title if LA-only
+    title1 = f'Original Predictions\n'
+    if metadata and 'la_region' in metadata and metadata['la_region'].get('extracted'):
+        la = metadata['la_region']
+        title1 += f'LA Region (pulses {la["pulse_start"]:,}-{la["pulse_end"]:,})\n'
+    title1 += f'RFI CPIs: {stats["original_rfi"]:,} ({100*stats["original_rfi_rate"]:.2f}%)'
+    ax1.set_title(title1, fontsize=14, fontweight='bold')
     ax1.grid(True, which='both', color='white', linewidth=0.3, alpha=0.3)
 
     # Bounded map
@@ -221,9 +257,14 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None):
 
     ax2.set_xlabel('Range Tile Index', fontsize=14, fontweight='bold')
     ax2.set_ylabel('Pulse Tile Index', fontsize=14, fontweight='bold')
-    ax2.set_title(f'Bounded Map (knee_bound={knee_bound})\n'
-                  f'Recovered: {stats["recovered"]:,} | Remaining RFI: {stats["remaining_rfi"]:,} ({100*stats["bounded_rfi_rate"]:.2f}%)',
-                  fontsize=14, fontweight='bold')
+
+    # Add region info to title if LA-only
+    title2 = f'Bounded Map (knee_bound={knee_bound})\n'
+    if metadata and 'la_region' in metadata and metadata['la_region'].get('extracted'):
+        la = metadata['la_region']
+        title2 += f'LA Region (pulses {la["pulse_start"]:,}-{la["pulse_end"]:,})\n'
+    title2 += f'Recovered: {stats["recovered"]:,} | Remaining RFI: {stats["remaining_rfi"]:,} ({100*stats["bounded_rfi_rate"]:.2f}%)'
+    ax2.set_title(title2, fontsize=14, fontweight='bold')
     ax2.grid(True, which='both', color='white', linewidth=0.3, alpha=0.3)
 
     # Main title
@@ -269,7 +310,13 @@ def plot_individual_map(pred_map, output_path, title, knee_bound=None, metadata=
 
     ax.set_xlabel('Range Tile Index', fontsize=14, fontweight='bold')
     ax.set_ylabel('Pulse Tile Index', fontsize=14, fontweight='bold')
-    ax.set_title(title, fontsize=15, fontweight='bold')
+
+    # Add region info to title if LA-only
+    plot_title = title
+    if metadata and 'la_region' in metadata and metadata['la_region'].get('extracted'):
+        la = metadata['la_region']
+        plot_title += f'\nLA Region (pulses {la["pulse_start"]:,}-{la["pulse_end"]:,})'
+    ax.set_title(plot_title, fontsize=15, fontweight='bold')
     ax.grid(True, which='both', color='white', linewidth=0.3, alpha=0.3)
 
     fig.tight_layout()
@@ -294,6 +341,8 @@ def main():
                         help='Skip individual spatial map plots (only generate comparison)')
     parser.add_argument('--prefix', default='knee',
                         help='Filename prefix for output plots (default: knee)')
+    parser.add_argument('--la-only', action='store_true',
+                        help='Extract and plot only the Los Angeles region (pulses 46528-124580)')
 
     args = parser.parse_args()
 
@@ -317,9 +366,10 @@ def main():
     print(f"Output dir:  {output_dir}")
     print(f"Knee bound:  {args.knee_bound}")
     print(f"Prefix:      {args.prefix}")
+    print(f"LA only:     {args.la_only}")
 
     # Load predictions
-    predictions, confidence, metadata = load_predictions(h5_path)
+    predictions, confidence, metadata = load_predictions(h5_path, la_only=args.la_only)
 
     print(f"\n{'='*70}")
     print("Generating Plots")
