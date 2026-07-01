@@ -28,7 +28,6 @@ import argparse
 import h5py
 from pathlib import Path
 import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm
 
@@ -130,7 +129,7 @@ def compute_bounded_map(pred_map, knee_bound, cap_at_bound=True):
     return bounded_map, stats
 
 
-def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=None, cap_at_bound=True):
+def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=None, cap_at_bound=True, show=False):
     """
     Plot histogram comparing original vs bounded knee predictions (two-bar comparison).
 
@@ -140,6 +139,7 @@ def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=Non
         output_path (str): Output file path
         metadata (dict): Optional metadata
         cap_at_bound (bool): If True, cap at knee_bound; if False, set to 0
+        show (bool): If True, display plot interactively before saving
     """
     print(f"\nGenerating histogram comparison: {output_path}")
 
@@ -211,12 +211,14 @@ def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=Non
                    f'{bound_val:,}', ha='center', va='bottom', fontsize=8)
 
     fig.tight_layout()
+    if show:
+        plt.show()
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {output_path}")
 
 
-def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None, cap_at_bound=True):
+def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None, cap_at_bound=True, show=False):
     """
     Plot side-by-side comparison of original vs bounded spatial maps.
 
@@ -226,6 +228,7 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None, cap_a
         output_path (str): Output file path
         metadata (dict): Optional metadata
         cap_at_bound (bool): If True, cap at knee_bound; if False, set to 0
+        show (bool): If True, display plot interactively before saving
     """
     print(f"\nGenerating comparison spatial maps: {output_path}")
 
@@ -277,6 +280,8 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None, cap_a
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
+
+    plt.show()
     plt.close(fig)
     print(f"  Saved: {output_path}")
 
@@ -288,7 +293,7 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None, cap_a
     print(f"    Remaining RFI CPIs:   {stats['remaining_rfi']:,} ({100*stats['bounded_rfi_rate']:.2f}%)")
 
 
-def plot_individual_map(pred_map, output_path, title, knee_bound=None, metadata=None):
+def plot_individual_map(pred_map, output_path, title, knee_bound=None, metadata=None, show=False):
     """
     Plot individual spatial map.
 
@@ -298,6 +303,7 @@ def plot_individual_map(pred_map, output_path, title, knee_bound=None, metadata=
         title (str): Plot title
         knee_bound (int|None): If provided, use as vmax
         metadata (dict): Optional metadata
+        show (bool): If True, display plot interactively before saving
     """
     print(f"\nGenerating individual map: {output_path}")
 
@@ -323,6 +329,8 @@ def plot_individual_map(pred_map, output_path, title, knee_bound=None, metadata=
     ax.grid(True, which='both', color='white', linewidth=0.3, alpha=0.3)
 
     fig.tight_layout()
+    if show:
+        plt.show()
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
     print(f"  Saved: {output_path}")
@@ -348,8 +356,14 @@ def main():
                         help='Filename prefix for output plots (default: knee)')
     parser.add_argument('--la-only', action='store_true',
                         help='Extract and plot only the Los Angeles region (pulses 46528-124580)')
+    parser.add_argument('--show', action='store_true',
+                        help='Display plots interactively before saving (default: save only)')
 
     args = parser.parse_args()
+
+    # Set matplotlib backend based on show flag
+    if not args.show:
+        matplotlib.use('Agg')  # Non-interactive backend for saving only
 
     # Validate input
     h5_path = Path(args.h5_file)
@@ -386,11 +400,11 @@ def main():
 
     # Generate histogram comparison (always)
     histogram_path = output_dir / f"{args.prefix}_histogram_comparison.png"
-    plot_histogram_comparison(predictions, args.knee_bound, histogram_path, metadata, cap_at_bound)
+    plot_histogram_comparison(predictions, args.knee_bound, histogram_path, metadata, cap_at_bound, args.show)
 
     # Generate spatial comparison (always)
     comparison_path = output_dir / f"{args.prefix}_spatial_comparison.png"
-    plot_comparison_maps(predictions, args.knee_bound, comparison_path, metadata, cap_at_bound)
+    plot_comparison_maps(predictions, args.knee_bound, comparison_path, metadata, cap_at_bound, args.show)
 
     # Generate individual maps (optional)
     if not args.no_individual:
@@ -402,7 +416,8 @@ def main():
             f'Original Eigenvalue Knee Predictions\n'
             f'Total CPIs: {metadata.get("results", {}).get("total_cpis", predictions.size):,}',
             knee_bound=None,
-            metadata=metadata
+            metadata=metadata,
+            show=args.show
         )
 
         # Bounded map
@@ -414,7 +429,8 @@ def main():
             f'Bounded Eigenvalue Knee Predictions (knee_bound={args.knee_bound})\n'
             f'Remaining RFI: {stats["remaining_rfi"]:,} ({100*stats["bounded_rfi_rate"]:.2f}%)',
             knee_bound=args.knee_bound,
-            metadata=metadata
+            metadata=metadata,
+            show=args.show
         )
 
     print(f"\n{'='*70}")
