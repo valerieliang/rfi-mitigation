@@ -1,0 +1,89 @@
+{
+  "processing": {
+    "date": "2026-07-01T02:14:52.632872",
+    "script": "process_nisar_streaming_batched.py",
+    "batch_size": 512,
+    "n_workers": 8
+  },
+  "input": {
+    "source_file": "nisar_data/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5",
+    "dataset_path": "/science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV",
+    "polarization": "HV"
+  },
+  "dimensions": {
+    "total_pulses": 182760,
+    "total_range": 52866,
+    "cpi_height": 16,
+    "cpi_width": 250
+  },
+  "region": {
+    "pulse_start": 0,
+    "pulse_end": 182752,
+    "n_pulses_used": 182752,
+    "n_pulse_tiles": 11422,
+    "n_range_tiles": 211,
+    "n_range_used": 52750,
+    "total_tiles": 2410042
+  },
+  "coverage": {
+    "pulses_used": 182752,
+    "pulses_total": 182760,
+    "pulses_percent": 99.99562267454584,
+    "range_used": 52750,
+    "range_total": 52866,
+    "range_percent": 99.78057730866719,
+    "dropped_pulses": 8,
+    "dropped_range": 116
+  },
+  "coordinate_mapping": {
+    "description": "Array index [i, j] maps to pulse and range coordinates",
+    "pulse": {
+      "start": 0,
+      "step": 16,
+      "formula": "0 + i*16"
+    },
+    "range": {
+      "start": 0,
+      "step": 250,
+      "formula": "j*250"
+    }
+  },
+  "results": {
+    "total_cpis": 2410042,
+    "rfi_detections": 2408680,
+    "clean_cpis": 1362,
+    "rfi_rate": 0.9994348646206166,
+    "rfi_percent": 99.94348646206166
+  },
+  "output": {
+    "hdf5_file": "full_file_processed/LA/hv_outputs.h5",
+    "file_size_gb": 0.12057814095169306,
+    "arrays": {
+      "predictions": {
+        "shape": [
+          11422,
+          211
+        ],
+        "dtype": "int8",
+        "description": "Predicted knee index (0-15) for each CPI"
+      },
+      "confidence": {
+        "shape": [
+          11422,
+          211
+        ],
+        "dtype": "float32",
+        "description": "Prediction confidence (max probability) for each CPI"
+      },
+      "probabilities": {
+        "shape": [
+          11422,
+          211,
+          17
+        ],
+        "dtype": "float32",
+        "description": "Full probability distribution across 17 classes for each CPI (0=clean, 1-16=RFI knee positions)"
+      }
+    }
+  }
+}
