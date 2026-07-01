@@ -96,20 +96,21 @@ def load_predictions(h5_path, la_only=False):
     return predictions, confidence, metadata
 
 
-def compute_bounded_map(pred_map, knee_bound):
+def compute_bounded_map(pred_map, knee_bound, cap_at_bound=True):
     """
-    Create bounded map where knee values > knee_bound are set to knee_bound.
+    Create bounded map where knee values > knee_bound are set to knee_bound or 0.
 
     Args:
         pred_map (np.ndarray): Original predictions
         knee_bound (int): Maximum knee value to preserve
+        cap_at_bound (bool): If True, cap at knee_bound; if False, set to 0
 
     Returns:
         bounded_map (np.ndarray): Bounded predictions
         stats (dict): Bounding statistics
     """
     bounded_map = pred_map.copy()
-    bounded_map[bounded_map > knee_bound] = knee_bound
+    bounded_map[bounded_map > knee_bound] = knee_bound if cap_at_bound else 0
 
     total_cpis = pred_map.size
     n_original_rfi = np.sum(pred_map > 0)
@@ -129,7 +130,7 @@ def compute_bounded_map(pred_map, knee_bound):
     return bounded_map, stats
 
 
-def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=None):
+def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=None, cap_at_bound=True):
     """
     Plot histogram comparing original vs bounded knee predictions (two-bar comparison).
 
@@ -138,13 +139,14 @@ def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=Non
         knee_bound (int): Maximum knee value to preserve
         output_path (str): Output file path
         metadata (dict): Optional metadata
+        cap_at_bound (bool): If True, cap at knee_bound; if False, set to 0
     """
     print(f"\nGenerating histogram comparison: {output_path}")
 
     # Flatten predictions
     pred_flat = predictions.flatten()
     bounded_flat = predictions.copy()
-    bounded_flat[bounded_flat > knee_bound] = knee_bound
+    bounded_flat[bounded_flat > knee_bound] = knee_bound if cap_at_bound else 0
     bounded_flat = bounded_flat.flatten()
 
     # Get unique knee values
@@ -214,7 +216,7 @@ def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=Non
     print(f"  Saved: {output_path}")
 
 
-def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None):
+def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None, cap_at_bound=True):
     """
     Plot side-by-side comparison of original vs bounded spatial maps.
 
@@ -223,10 +225,11 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None):
         knee_bound (int): Maximum knee value to preserve
         output_path (str): Output file path
         metadata (dict): Optional metadata
+        cap_at_bound (bool): If True, cap at knee_bound; if False, set to 0
     """
     print(f"\nGenerating comparison spatial maps: {output_path}")
 
-    bounded_map, stats = compute_bounded_map(pred_map, knee_bound)
+    bounded_map, stats = compute_bounded_map(pred_map, knee_bound, cap_at_bound)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, 9))
 
@@ -333,8 +336,10 @@ def main():
 
     parser.add_argument('h5_file', help='Input HDF5 file from process_nisar_streaming_batched.py')
     parser.add_argument('--knee-bound', type=int, default=4,
-                        help='Maximum knee value to preserve (default: 4). '
-                             'Any knee > knee_bound is capped at knee_bound (recoverable)')
+                        help='Maximum knee value to preserve (default: 4)')
+    parser.add_argument('--set-to-zero', action='store_true',
+                        help='Set knee values > knee_bound to 0 (clean). '
+                             'Default: cap at knee_bound value instead')
     parser.add_argument('--output-dir', default=None,
                         help='Output directory for plots (default: same as input file)')
     parser.add_argument('--no-individual', action='store_true',
@@ -362,11 +367,15 @@ def main():
     print("="*70)
     print("Eigenvalue Knee Plotting")
     print("="*70)
-    print(f"Input:       {h5_path}")
-    print(f"Output dir:  {output_dir}")
-    print(f"Knee bound:  {args.knee_bound}")
-    print(f"Prefix:      {args.prefix}")
-    print(f"LA only:     {args.la_only}")
+    print(f"Input:        {h5_path}")
+    print(f"Output dir:   {output_dir}")
+    print(f"Knee bound:   {args.knee_bound}")
+    print(f"Bounding mode: {'Set to 0 (clean)' if args.set_to_zero else 'Cap at knee_bound'}")
+    print(f"Prefix:       {args.prefix}")
+    print(f"LA only:      {args.la_only}")
+
+    # Determine cap_at_bound flag
+    cap_at_bound = not args.set_to_zero
 
     # Load predictions
     predictions, confidence, metadata = load_predictions(h5_path, la_only=args.la_only)
@@ -377,11 +386,11 @@ def main():
 
     # Generate histogram comparison (always)
     histogram_path = output_dir / f"{args.prefix}_histogram_comparison.png"
-    plot_histogram_comparison(predictions, args.knee_bound, histogram_path, metadata)
+    plot_histogram_comparison(predictions, args.knee_bound, histogram_path, metadata, cap_at_bound)
 
     # Generate spatial comparison (always)
     comparison_path = output_dir / f"{args.prefix}_spatial_comparison.png"
-    plot_comparison_maps(predictions, args.knee_bound, comparison_path, metadata)
+    plot_comparison_maps(predictions, args.knee_bound, comparison_path, metadata, cap_at_bound)
 
     # Generate individual maps (optional)
     if not args.no_individual:
@@ -397,7 +406,7 @@ def main():
         )
 
         # Bounded map
-        bounded_map, stats = compute_bounded_map(predictions, args.knee_bound)
+        bounded_map, stats = compute_bounded_map(predictions, args.knee_bound, cap_at_bound)
         bounded_path = output_dir / f"{args.prefix}_bounded.png"
         plot_individual_map(
             bounded_map,
