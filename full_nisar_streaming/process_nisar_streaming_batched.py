@@ -33,6 +33,7 @@ import json
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
+import time
 
 # Import from process_nisar_streaming
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -165,12 +166,17 @@ def stream_process_nisar_batched(
         batch_size (int): Model prediction batch size
     """
 
+    # Start timing
+    start_time = time.time()
+    start_datetime = datetime.now()
+
     # Detect polarization
     pol = detect_polarization(dataset_path, polarization)
 
     print("="*70)
     print(f"Batched Streaming NISAR {pol} Data Processing")
     print("="*70)
+    print(f"Started at: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Input: {input_path}")
     print(f"Dataset: {dataset_path}")
     if model is not None:
@@ -348,10 +354,22 @@ def stream_process_nisar_batched(
                     batch_queue = []
 
         # Final statistics
+        end_time = time.time()
+        end_datetime = datetime.now()
+        elapsed_seconds = end_time - start_time
+        elapsed_minutes = elapsed_seconds / 60
+        elapsed_hours = elapsed_minutes / 60
+
         print(f"\n{'='*70}")
         print("Processing Complete!")
         print(f"{'='*70}")
+        print(f"Ended at: {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Total elapsed time: {elapsed_hours:.2f} hours ({elapsed_minutes:.2f} minutes, {elapsed_seconds:.1f} seconds)")
         print(f"Total tiles processed: {tile_count:,}")
+
+        if tile_count > 0:
+            tiles_per_second = tile_count / elapsed_seconds
+            print(f"Processing rate: {tiles_per_second:.2f} tiles/second")
 
         rfi_rate = rfi_count / tile_count if tile_count > 0 else 0
         print(f"RFI detections: {rfi_count:,} ({100*rfi_rate:.2f}%)")
@@ -366,10 +384,15 @@ def stream_process_nisar_batched(
             metadata_path = output_h5_path.replace('.h5', '.json')
             metadata = {
                 'processing': {
-                    'date': datetime.now().isoformat(),
+                    'start_time': start_datetime.isoformat(),
+                    'end_time': end_datetime.isoformat(),
+                    'elapsed_seconds': float(elapsed_seconds),
+                    'elapsed_minutes': float(elapsed_minutes),
+                    'elapsed_hours': float(elapsed_hours),
                     'script': 'process_nisar_streaming_batched.py',
                     'batch_size': int(batch_size),
                     'n_workers': int(n_workers),
+                    'tiles_per_second': float(tiles_per_second) if tile_count > 0 else 0,
                 },
                 'input': {
                     'source_file': str(input_path),
@@ -491,9 +514,12 @@ def main():
         sys.exit(1)
 
     print(f"Loading model: {args.model}")
+    model_load_start = time.time()
     import tensorflow as tf
     model = tf.keras.models.load_model(args.model)
-    print(f"  Model loaded successfully\n")
+    model_load_end = time.time()
+    model_load_time = model_load_end - model_load_start
+    print(f"  Model loaded successfully in {model_load_time:.2f} seconds\n")
 
     # Process
     stream_process_nisar_batched(
