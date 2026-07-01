@@ -203,7 +203,7 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None):
     vmax_orig = int(np.max(pred_map))
     im1 = ax1.imshow(pred_map, aspect='auto', cmap='turbo',
                      vmin=0, vmax=vmax_orig, interpolation='nearest')
-    cbar1 = fig.colorbar(im1, ax=ax1, label='Knee Index', shrink=0.8)
+    cbar1 = fig.colorbar(im1, ax=ax1, label='Knee Index', shrink=0.8, ticks=np.arange(0, vmax_orig + 1, 1))
     cbar1.ax.tick_params(labelsize=11)
 
     ax1.set_xlabel('Range Tile Index', fontsize=14, fontweight='bold')
@@ -216,7 +216,7 @@ def plot_comparison_maps(pred_map, knee_bound, output_path, metadata=None):
     # Bounded map
     im2 = ax2.imshow(bounded_map, aspect='auto', cmap='turbo',
                      vmin=0, vmax=knee_bound, interpolation='nearest')
-    cbar2 = fig.colorbar(im2, ax=ax2, label=f'Bounded Knee Index (0-{knee_bound})', shrink=0.8)
+    cbar2 = fig.colorbar(im2, ax=ax2, label=f'Bounded Knee Index (0-{knee_bound})', shrink=0.8, ticks=np.arange(0, knee_bound + 1, 1))
     cbar2.ax.tick_params(labelsize=11)
 
     ax2.set_xlabel('Range Tile Index', fontsize=14, fontweight='bold')
@@ -264,7 +264,7 @@ def plot_individual_map(pred_map, output_path, title, knee_bound=None, metadata=
     im = ax.imshow(pred_map, aspect='auto', cmap='turbo',
                    vmin=0, vmax=vmax, interpolation='nearest')
 
-    cbar = fig.colorbar(im, ax=ax, label='Knee Index', shrink=0.8)
+    cbar = fig.colorbar(im, ax=ax, label='Knee Index', shrink=0.8, ticks=np.arange(0, vmax + 1, 1))
     cbar.ax.tick_params(labelsize=11)
 
     ax.set_xlabel('Range Tile Index', fontsize=14, fontweight='bold')
