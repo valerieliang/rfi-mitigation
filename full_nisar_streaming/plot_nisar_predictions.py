@@ -11,7 +11,7 @@ This script reads the HDF5 output from process_nisar_streaming_batched.py and ge
 Convention:
 - Clean: knee index = 0
 - Contaminated: knee indices 1-16 (number of pulses contaminated by RFI)
-- Bounding: Any knee > knee_bound is set to 0 (treated as clean/recoverable)
+- Bounding: Any knee > knee_bound is capped at knee_bound (treated as recoverable)
 
 Usage:
     python plot_nisar_predictions.py hv_outputs.h5 --knee-bound 4
@@ -98,7 +98,7 @@ def load_predictions(h5_path, la_only=False):
 
 def compute_bounded_map(pred_map, knee_bound):
     """
-    Create bounded map where knee values > knee_bound are set to 0.
+    Create bounded map where knee values > knee_bound are set to knee_bound.
 
     Args:
         pred_map (np.ndarray): Original predictions
@@ -109,7 +109,7 @@ def compute_bounded_map(pred_map, knee_bound):
         stats (dict): Bounding statistics
     """
     bounded_map = pred_map.copy()
-    bounded_map[bounded_map > knee_bound] = 0
+    bounded_map[bounded_map > knee_bound] = knee_bound
 
     total_cpis = pred_map.size
     n_original_rfi = np.sum(pred_map > 0)
@@ -144,7 +144,7 @@ def plot_histogram_comparison(predictions, knee_bound, output_path, metadata=Non
     # Flatten predictions
     pred_flat = predictions.flatten()
     bounded_flat = predictions.copy()
-    bounded_flat[bounded_flat > knee_bound] = 0
+    bounded_flat[bounded_flat > knee_bound] = knee_bound
     bounded_flat = bounded_flat.flatten()
 
     # Get unique knee values
@@ -334,7 +334,7 @@ def main():
     parser.add_argument('h5_file', help='Input HDF5 file from process_nisar_streaming_batched.py')
     parser.add_argument('--knee-bound', type=int, default=4,
                         help='Maximum knee value to preserve (default: 4). '
-                             'Any knee > knee_bound is set to 0 (recovered as clean)')
+                             'Any knee > knee_bound is capped at knee_bound (recoverable)')
     parser.add_argument('--output-dir', default=None,
                         help='Output directory for plots (default: same as input file)')
     parser.add_argument('--no-individual', action='store_true',
