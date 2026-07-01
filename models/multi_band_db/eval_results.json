@@ -1,0 +1,9 @@
+{
+  "run": "multi_band_db",
+  "n_test": 40000,
+  "exact_acc": 0.5,
+  "tol1_acc": 0.5882,
+  "exact_rfi": 0.0,
+  "tol1_rfi": 0.1764,
+  "exact_no_rfi": 1.0
+}
