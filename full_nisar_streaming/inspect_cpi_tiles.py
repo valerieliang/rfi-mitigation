@@ -133,7 +133,7 @@ def compute_train_global_features(cpi, eigvals_normalized, M):
     }
 
 
-def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi_width):
+def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi_width, store_cpi=False):
     """
     Inspect a single CPI tile: extract data, compute features, and prepare for plotting.
 
@@ -144,6 +144,7 @@ def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi
         range_tile_idx (int): Range tile index
         cpi_height (int): CPI height
         cpi_width (int): CPI width
+        store_cpi (bool): If True, store the CPI array in the result (for image plotting)
 
     Returns:
         dict: Dictionary with all inspection results
@@ -184,7 +185,7 @@ def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi
     # Compute eigenvalue slopes
     slopes = np.diff(eigvals_normalized)
 
-    return {
+    result = {
         'name': name,
         'tile_indices': {
             'pulse_tile': pulse_tile_idx,
@@ -209,6 +210,104 @@ def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi
         'global_features': global_features_dict,
         'scm_diagonal': diagonal.tolist(),
     }
+
+    # Optionally store CPI array (not saved to JSON, only for image plotting)
+    if store_cpi:
+        result['_cpi_array'] = cpi
+
+    return result
+
+
+def plot_cpi_image(data, result, output_dir):
+    """
+    Plot the actual CPI tile as an image showing magnitude and phase.
+
+    Creates a figure with:
+    1. Magnitude (power) image in dB
+    2. Phase image
+    3. Range profile (averaged across pulses)
+    4. Pulse profile (averaged across range)
+
+    Args:
+        data: H5DataAccessor to load the CPI
+        result (dict): Inspection result dictionary for one tile
+        output_dir (Path): Output directory for plots
+    """
+    tile_name = result['name']
+    tile_idx = result['tile_indices']
+    global_pos = result['global_position']
+    cpi_dims = result['cpi_dimensions']
+
+    # Extract CPI data
+    pulse_start = global_pos['pulse_start']
+    pulse_end = global_pos['pulse_end']
+    range_start = global_pos['range_start']
+    range_end = global_pos['range_end']
+
+    cpi = data[pulse_start:pulse_end, range_start:range_end]
+
+    # Compute magnitude and phase
+    magnitude = np.abs(cpi)
+    power_db = 10 * np.log10(magnitude**2 + 1e-12)  # Avoid log(0)
+    phase = np.angle(cpi)
+
+    # Create figure
+    fig = plt.figure(figsize=(16, 10))
+    gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+
+    # Main title
+    fig.suptitle(
+        f"CPI Tile Image: {tile_name}\n"
+        f"Tile Index: ({tile_idx['pulse_tile']}, {tile_idx['range_tile']}) | "
+        f"Global Position: Pulses {pulse_start:,}-{pulse_end:,}, Range {range_start:,}-{range_end:,}",
+        fontsize=14, fontweight='bold', y=0.98
+    )
+
+    # Plot 1: Power (magnitude) in dB
+    ax1 = fig.add_subplot(gs[0, 0])
+    im1 = ax1.imshow(power_db, aspect='auto', cmap='viridis', interpolation='nearest')
+    cbar1 = plt.colorbar(im1, ax=ax1, label='Power (dB)')
+    ax1.set_xlabel('Range Bin (within CPI)', fontsize=11, fontweight='bold')
+    ax1.set_ylabel('Pulse (within CPI)', fontsize=11, fontweight='bold')
+    ax1.set_title(f'Power (Magnitude²) in dB\nRange: [{power_db.min():.1f}, {power_db.max():.1f}] dB',
+                  fontsize=12, fontweight='bold')
+
+    # Plot 2: Phase
+    ax2 = fig.add_subplot(gs[0, 1])
+    im2 = ax2.imshow(phase, aspect='auto', cmap='hsv', vmin=-np.pi, vmax=np.pi, interpolation='nearest')
+    cbar2 = plt.colorbar(im2, ax=ax2, label='Phase (radians)', ticks=[-np.pi, -np.pi/2, 0, np.pi/2, np.pi])
+    cbar2.ax.set_yticklabels(['-π', '-π/2', '0', 'π/2', 'π'])
+    ax2.set_xlabel('Range Bin (within CPI)', fontsize=11, fontweight='bold')
+    ax2.set_ylabel('Pulse (within CPI)', fontsize=11, fontweight='bold')
+    ax2.set_title('Phase', fontsize=12, fontweight='bold')
+
+    # Plot 3: Range profile (averaged across pulses)
+    ax3 = fig.add_subplot(gs[1, 0])
+    range_profile = np.mean(magnitude, axis=0)  # Average over pulses
+    range_bins = np.arange(cpi_dims['width'])
+    ax3.plot(range_bins, range_profile, color='#2ca02c', linewidth=2)
+    ax3.set_xlabel('Range Bin (within CPI)', fontsize=11, fontweight='bold')
+    ax3.set_ylabel('Average Magnitude', fontsize=11, fontweight='bold')
+    ax3.set_title('Range Profile (Pulse-Averaged)', fontsize=12, fontweight='bold')
+    ax3.grid(True, alpha=0.3, linestyle='--')
+
+    # Plot 4: Pulse profile (averaged across range)
+    ax4 = fig.add_subplot(gs[1, 1])
+    pulse_profile = np.mean(magnitude, axis=1)  # Average over range bins
+    pulses = np.arange(cpi_dims['height'])
+    ax4.plot(pulses, pulse_profile, color='#d62728', linewidth=2, marker='o', markersize=6)
+    ax4.set_xlabel('Pulse (within CPI)', fontsize=11, fontweight='bold')
+    ax4.set_ylabel('Average Magnitude', fontsize=11, fontweight='bold')
+    ax4.set_title('Pulse Profile (Range-Averaged)', fontsize=12, fontweight='bold')
+    ax4.grid(True, alpha=0.3, linestyle='--')
+
+    # Save plot
+    output_path = output_dir / f'{tile_name}_image.png'
+    fig.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    print(f"  Saved: {output_path}")
+    return output_path
 
 
 def plot_single_tile(result, output_dir):
@@ -418,17 +517,23 @@ def main():
     data = H5DataAccessor(str(nisar_path), args.dataset)
     print(f"Dataset shape: {data.shape}")
 
-    # Inspect each tile
+    # Inspect each tile (store CPI arrays for image plotting)
     results_list = []
     for name, pulse_tile_idx, range_tile_idx in tile_specs:
         result = inspect_cpi_tile(
             data, name, pulse_tile_idx, range_tile_idx,
-            args.cpi_height, args.cpi_width
+            args.cpi_height, args.cpi_width, store_cpi=True
         )
         results_list.append(result)
 
-    # Save all results to JSON
+    # Save all results to JSON (exclude CPI arrays)
     json_path = output_dir / 'tile_inspection_results.json'
+    json_results = []
+    for result in results_list:
+        # Create a copy without the CPI array
+        json_result = {k: v for k, v in result.items() if not k.startswith('_')}
+        json_results.append(json_result)
+
     with open(json_path, 'w') as f:
         json.dump({
             'metadata': {
@@ -440,7 +545,7 @@ def main():
                 },
                 'n_tiles': len(results_list),
             },
-            'tiles': results_list,
+            'tiles': json_results,
         }, f, indent=2)
 
     print(f"\n{'='*70}")
@@ -453,6 +558,10 @@ def main():
     for result in results_list:
         plot_single_tile(result, output_dir)
 
+    print(f"\nGenerating CPI image plots...")
+    for result in results_list:
+        plot_cpi_image(data, result, output_dir)
+
     print(f"\nGenerating comparison plot...")
     plot_global_features_comparison(results_list, output_dir)
 
@@ -462,7 +571,8 @@ def main():
     print(f"Output directory: {output_dir}")
     print(f"  - tile_inspection_results.json")
     for result in results_list:
-        print(f"  - {result['name']}_profile.png")
+        print(f"  - {result['name']}_profile.png (eigenvalue analysis)")
+        print(f"  - {result['name']}_image.png (CPI visualization)")
     print(f"  - global_features_comparison.png")
 
 

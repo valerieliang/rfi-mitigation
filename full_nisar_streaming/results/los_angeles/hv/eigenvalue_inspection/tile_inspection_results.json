@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "nisar_file": "..\\nisar_data\\NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5",
+    "nisar_file": "nisar_data\\NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5",
     "dataset": "/science/LSAR/RRSD/swaths/frequencyA/txH/rxV/HV",
     "cpi_dimensions": {
       "height": 16,
