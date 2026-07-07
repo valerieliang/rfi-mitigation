@@ -508,12 +508,5 @@ def main():
         n_files = len([f for f in os.listdir(knee_dir) if f.endswith('.h5')]) if os.path.exists(knee_dir) else 0
         print(f"  knee_{n_bands}/: {n_files} HDF5 files + plots")
 
-    print("\nNext steps:")
-    print("  1. Load this test data with your trained model")
-    print("  2. Evaluate model predictions on late knee cases")
-    print("  3. Compare performance vs. typical knee positions (1-6)")
-    print("  4. Analyze eigenvalue plots to understand late knee structure")
-
-
 if __name__ == '__main__':
     main()
