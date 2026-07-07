@@ -1,11 +1,7 @@
 """
 train_db.py
 
-Training pipeline for the CNN-based RFI knee-index classifier using dB-normalized eigenvalues.
-
-This script is identical to train.py except that eigenvalues are normalized in dB scale
-rather than linear scale. The hypothesis is that dB normalization will make the "knee"
-feature more prominent by expanding the dynamic range in the noise floor region.
+Training pipeline for the CNN-based RFI knee-index classifier using dB-normalized features.
 
 Label convention
 ----------------
@@ -40,18 +36,14 @@ Model output has 17 classes (labels 0..16).
 Feature extraction (per CPI block)
 -----------------------------------
 eigen_input  shape (M, 2):
-    channel 0 -- eigenvalues in dB scale, normalized to [0, 1]
-                 Conversion: eigvals_db = 10 * log10(eigvals + eps)
-                 Then normalized by: (eigvals_db - min_db) / (max_db - min_db)
-    channel 1 -- finite differences of dB-normalized eigenvalues (slopes), length M,
+    channel 0 -- eigenvalues normalized by max eigenvalue, then converted to dB scale
+                 10*log10(eigval_normalized), from SCM = CPI @ CPI^H / K
+    channel 1 -- finite differences of dB-normalized eigenvalues (slopes in dB/index)
                  zero-padded at index M-1 so the tensor stays (M, 2)
 
-global_input shape (5,):
-    0  condition_number -- lambda_max / lambda_min (ratio, scale-invariant)
-    1  sigma_min        -- std of bottom-half SCM diagonal (in dB, normalized)
-    2  sigma_max        -- std of top-half SCM diagonal (in dB, normalized)
-    3  mu_min           -- mean of bottom-half SCM diagonal (in dB, normalized)
-    4  f_factor         -- sigma_max / (sigma_min + eps) (ratio, scale-invariant)
+global_input shape (2,):
+    0  condition_number -- lambda_max - lambda_min in dB (both normalized, then subtracted)
+    1  eff_rank         -- effective rank via Shannon entropy exp(-sum(p*log(p)))
 
 Directory layout expected on disk
 -----------------------------------
@@ -63,16 +55,16 @@ Directory layout expected on disk
 Outputs
 -------
 Model saved to:
-    models/multi_band_db/best_model.keras
+    models/multi_band/best_model.keras
 
-Evaluation PNGs saved to models/multi_band_db/:
+Evaluation PNGs saved to models/multi_band/:
     training_curves.png   -- loss and accuracy vs epoch
     confusion_matrix.png  -- knee confusion matrix (normalised by row)
     metrics.png           -- bar chart of scalar evaluation metrics
 
 JSON metrics saved to:
-    models/multi_band_db/eval_results.json
-    models/summary_db.json
+    models/multi_band/eval_results.json
+    models/summary.json
 """
 
 import os
@@ -95,7 +87,7 @@ DATA_ROOT   = 'data'
 MODELS_ROOT = 'models'
 M           = BLOCK_HEIGHT      # pulses per CPI = number of eigenvalues
 N_CLASSES   = M + 1             # labels 0..M (0=clean, 1-16=RFI knee position)
-N_GLOBAL    = 5                 # global features: cond_number, sigma_min, sigma_max, mu_min, f_factor
+N_GLOBAL    = 2                 # global features: cond_number, eff_rank
 
 EPOCHS      = 50
 BATCH_SIZE  = 64
@@ -103,98 +95,60 @@ LR          = 3e-4
 VAL_FRAC    = 0.1
 TEST_FRAC   = 0.1
 
-# dB conversion parameters
-EPS_DB      = 1e-12  # floor for log10 to avoid -inf
-DB_FLOOR    = -80    # clip dB values below this threshold
-
 
 # ---------------------------------------------------------------------------
-# FEATURE EXTRACTION (dB-normalized)
+# FEATURE EXTRACTION
 # ---------------------------------------------------------------------------
 
-def _scm_from_cpi(cpi):
+def _compute_eigenvalues(cpi):
     """
-    Compute sample covariance matrix from a complex CPI tile.
+    Compute eigenvalues from the sample covariance matrix of a CPI tile.
 
     Args:
         cpi (np.ndarray): Complex array shape (M, K).
 
     Returns:
-        R                  (np.ndarray): Complex (M, M) SCM = CPI @ CPI^H / K.
-        eigvals_db_normalized (np.ndarray): Eigenvalues in dB scale, normalized to [0,1], shape (M,).
+        eigvals (np.ndarray): Real eigenvalues, descending, shape (M,).
     """
     M, K = cpi.shape
     R = (cpi @ cpi.conj().T) / K
-    eigvals = np.linalg.eigvalsh(R)             # ascending
-    eigvals = np.sort(np.real(eigvals))[::-1]   # descending
-
-    # Convert to dB scale
-    eigvals_db = 10 * np.log10(eigvals + EPS_DB)
-    eigvals_db = np.maximum(eigvals_db, DB_FLOOR)  # floor at -80 dB
-
-    # Normalize dB values to [0, 1]
-    min_db = np.min(eigvals_db)
-    max_db = np.max(eigvals_db)
-    if max_db > min_db:
-        eigvals_db_normalized = (eigvals_db - min_db) / (max_db - min_db)
-    else:
-        eigvals_db_normalized = np.zeros_like(eigvals_db)
-
-    return R, eigvals_db_normalized
+    eigvals = np.linalg.eigvalsh(R)
+    eigvals = np.sort(np.real(eigvals))[::-1]
+    return eigvals
 
 
 def extract_features(cpi):
     """
     Extract eigen_input and global_input feature vectors from one CPI tile.
-    Uses dB-normalized eigenvalues for enhanced dynamic range in the noise floor.
+    Eigenvalues are normalized by max eigenvalue then converted to dB scale.
 
     Args:
         cpi (np.ndarray): Complex array shape (M, K).
 
     Returns:
-        eigen   (np.ndarray): shape (M, 2)  -- [eigvals_db_normalized, slopes_db_normalized]
-        global_ (np.ndarray): shape (5,)    -- scalar context features
+        eigen   (np.ndarray): shape (M, 2)  -- [eigvals_db, slopes_db]
+        global_ (np.ndarray): shape (2,)    -- [condition_number_db, eff_rank]
     """
-    M, K = cpi.shape
-    R, eigvals_db_normalized = _scm_from_cpi(cpi)
+    eigvals = _compute_eigenvalues(cpi)
 
-    # --- Eigenvalue branch features ----------------------------------------
-    # Compute slopes from dB-normalized eigenvalues
-    slopes        = np.diff(eigvals_db_normalized)     # length M-1
-    slopes_padded = np.append(slopes, 0.0)             # length M, zero at end
-    eigen = np.stack([eigvals_db_normalized, slopes_padded], axis=-1).astype(np.float32)
+    # Normalize by max eigenvalue, then convert to dB
+    eigvals_db = 10 * np.log10(eigvals / max(eigvals[0], 1e-12) + 1e-12)
 
-    # --- Global branch features --------------------------------------------
-    # For global features, we use dB-normalized diagonal statistics
-    # First get the diagonal in linear scale
-    diag = np.real(np.diag(R))
+    # Eigenvalue branch: dB eigenvalues and their slopes
+    slopes = np.diff(eigvals_db)
+    slopes_padded = np.append(slopes, 0.0)
+    eigen = np.stack([eigvals_db, slopes_padded], axis=-1).astype(np.float32)
 
-    # Convert to dB and normalize
-    diag_db = 10 * np.log10(diag + EPS_DB)
-    diag_db = np.maximum(diag_db, DB_FLOOR)
-    min_diag_db = np.min(diag_db)
-    max_diag_db = np.max(diag_db)
-    if max_diag_db > min_diag_db:
-        diag_db_normalized = (diag_db - min_diag_db) / (max_diag_db - min_diag_db)
-    else:
-        diag_db_normalized = np.zeros_like(diag_db)
+    # Condition number: difference in dB space (equivalent to ratio in linear space)
+    cond_number_db = eigvals_db[0] - max(eigvals_db[-1], -100)
 
-    half     = max(M // 2, 1)
-    sigma_max = float(np.std(diag_db_normalized[:half]))
-    sigma_min = float(np.std(diag_db_normalized[half:]))
-    mu_min    = float(np.mean(diag_db_normalized[half:]))
+    # Effective rank via Shannon entropy of eigenvalue distribution
+    p = np.maximum(eigvals, 1e-12)
+    p = p / np.sum(p)
+    p = p[p > 0]
+    eff_rank = np.exp(-np.sum(p * np.log(p)))
 
-    # Condition number (ratio, scale-invariant) - still use normalized eigenvalues
-    cond_number = eigvals_db_normalized[0] / max(eigvals_db_normalized[-1], 1e-12)
-
-    # F-factor (ratio, scale-invariant)
-    eps       = 1e-6
-    f_factor  = sigma_max / (sigma_min + eps)
-
-    global_ = np.array(
-        [cond_number, sigma_min, sigma_max, mu_min, f_factor],
-        dtype=np.float32,
-    )
+    global_ = np.array([cond_number_db, eff_rank], dtype=np.float32)
     return eigen, global_
 
 
@@ -255,7 +209,7 @@ def load_dataset_from_folder(folder, expected_is_clean=None):
 
     Returns:
         eigen   (np.ndarray): shape (N, M, 2)
-        global_ (np.ndarray): shape (N, 5)
+        global_ (np.ndarray): shape (N, 2)
         labels  (np.ndarray): shape (N,)  int32 knee indices
     """
     eigen_list, global_list, label_list = [], [], []
@@ -290,16 +244,13 @@ def load_dataset_from_folder(folder, expected_is_clean=None):
         np.array(label_list, dtype=np.int32),
     )
 
-
-
-
 def split_dataset(eigen, global_, labels):
     """
     Split into train / val / test sets (80 / 10 / 10), stratified on labels.
 
     Args:
         eigen   (np.ndarray): shape (N, M, 2)
-        global_ (np.ndarray): shape (N, 6)
+        global_ (np.ndarray): shape (N, 2)
         labels  (np.ndarray): shape (N,)
 
     Returns:
@@ -407,7 +358,7 @@ def save_confusion_matrix_png(y_true, y_pred, class_labels, out_dir):
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xlabel('Predicted')
     ax.set_ylabel('True')
-    ax.set_title('Knee Confusion Matrix (dB-normalized)')
+    ax.set_title('Knee Confusion Matrix')
 
     thresh = 0.5
     for ri in range(n):
@@ -451,7 +402,7 @@ def save_metrics_png(results, out_dir):
     bars = ax.barh(metric_names, values, color='steelblue')
     ax.set_xlim(0, 1.05)
     ax.set_xlabel('Value')
-    ax.set_title(f"Evaluation Metrics (dB-normalized)  --  {results['run']}\n"
+    ax.set_title(f"Evaluation Metrics  --  {results['run']}\n"
                  f"N test = {results['n_test']}")
     ax.grid(True, axis='x', linestyle='--', alpha=0.5)
 
@@ -478,7 +429,7 @@ def evaluate(model, eigen_test, global_test, y_test, run_name, out_dir):
     Args:
         model       : Trained Keras model.
         eigen_test  (np.ndarray): shape (N, M, 2)
-        global_test (np.ndarray): shape (N, 5)
+        global_test (np.ndarray): shape (N, 2)
         y_test      (np.ndarray): shape (N,) integer labels
         run_name    (str): Label used in figure titles.
         out_dir     (str): Directory where outputs are written.
@@ -550,7 +501,7 @@ def train_one_run(run_name, eigen_train, eigen_val, eigen_test,
     Args:
         run_name   (str): Unique name for this run (used as folder name).
         eigen_*    (np.ndarray): shape (N, M, 2)
-        global_*   (np.ndarray): shape (N, 5)
+        global_*   (np.ndarray): shape (N, 2)
         y_*        (np.ndarray): shape (N,) integer labels
 
     Returns:
@@ -621,7 +572,7 @@ def train_one_run(run_name, eigen_train, eigen_val, eigen_test,
 
 def main():
     """
-    Full training pipeline using dB-normalized eigenvalues.
+    Full training pipeline.
 
     Step 1: Load clean samples from data/multi_band/clean/ (label = 0).
     Step 2: Load contaminated samples from data/multi_band/contaminated/ (label = 1-16).
@@ -670,7 +621,7 @@ def main():
      y_tr, y_va, y_te) = split_dataset(eigen, global_, labels)
 
     results = train_one_run(
-        'multi_band_db',
+        'multi_band',
         e_tr, e_va, e_te,
         g_tr, g_va, g_te,
         y_tr, y_va, y_te,
@@ -679,13 +630,13 @@ def main():
     # ------------------------------------------------------------------
     # Step 4: Summary
     # ------------------------------------------------------------------
-    summary_path = os.path.join(MODELS_ROOT, 'summary_db.json')
+    summary_path = os.path.join(MODELS_ROOT, 'summary.json')
     with open(summary_path, 'w') as fh:
         json.dump(results, fh, indent=2)
     print(f"\nSummary saved to {summary_path}")
-    print(f"Training plots : models/multi_band_db/training_curves.png")
-    print(f"Confusion matrix: models/multi_band_db/confusion_matrix.png")
-    print(f"Metrics bar chart: models/multi_band_db/metrics.png")
+    print(f"Training plots : models/multi_band/training_curves.png")
+    print(f"Confusion matrix: models/multi_band/confusion_matrix.png")
+    print(f"Metrics bar chart: models/multi_band/metrics.png")
 
 
 if __name__ == '__main__':

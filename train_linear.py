@@ -1,7 +1,7 @@
 """
-train.py
+train_linear.py
 
-Training pipeline for the CNN-based RFI knee-index classifier (model.py).
+Training pipeline for the CNN-based RFI knee-index classifier using linear-normalized features.
 
 Label convention
 ----------------
