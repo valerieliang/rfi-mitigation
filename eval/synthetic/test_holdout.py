@@ -38,7 +38,7 @@ from generate_synthetic_data import (
     generate_clean_image,
     BLOCK_HEIGHT, N_BLOCKS, RANGE_BINS, BLOCK_WIDTH,
 )
-from train import (
+from train_linear import (
     extract_features,
     label_from_rfi_bands,
     save_confusion_matrix_png,

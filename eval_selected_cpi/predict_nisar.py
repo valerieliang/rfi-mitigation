@@ -31,7 +31,7 @@ from pathlib import Path
 
 # Add parent directory to path to import train.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from train import extract_features, M, N_CLASSES
+from train_linear import extract_features, M, N_CLASSES
 
 
 def load_nisar_dataset(h5_path, max_tiles=None):
