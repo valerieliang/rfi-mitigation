@@ -451,7 +451,8 @@ def main():
     print(f"JNR range: {JNR_RANGE_DB} dB")
     print(f"Output directory: {test_dir}")
 
-    seed = 0
+    # Start at seed=100 to ensure no correlation with training data (which uses seeds 0-24)
+    seed = 100
     total_images = 0
 
     for n_bands in LATE_KNEE_POSITIONS:
