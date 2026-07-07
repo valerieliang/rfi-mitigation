@@ -182,8 +182,13 @@ def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi
     for key, val in global_features_dict.items():
         print(f"    {key}: {val:.6f}")
 
-    # Compute eigenvalue slopes
-    slopes = np.diff(eigvals_normalized)
+    # Convert to dB scale
+    eigvals_normalized_db = 10 * np.log10(eigvals_normalized + 1e-12)
+    eigvals_sorted_db = 10 * np.log10(eigvals_sorted + 1e-12)
+    diagonal_db = 10 * np.log10(diagonal + 1e-12)
+
+    # Compute eigenvalue slopes in dB per index
+    slopes_db = np.diff(eigvals_normalized_db)
 
     result = {
         'name': name,
@@ -203,12 +208,15 @@ def inspect_cpi_tile(data, name, pulse_tile_idx, range_tile_idx, cpi_height, cpi
         },
         'eigenvalues': {
             'sorted': eigvals_sorted.tolist(),
+            'sorted_db': eigvals_sorted_db.tolist(),
             'normalized': eigvals_normalized.tolist(),
-            'slopes': slopes.tolist(),
+            'normalized_db': eigvals_normalized_db.tolist(),
+            'slopes_db': slopes_db.tolist(),
             'max_eigval_db': float(max_eigval_db),
         },
         'global_features': global_features_dict,
         'scm_diagonal': diagonal.tolist(),
+        'scm_diagonal_db': diagonal_db.tolist(),
     }
 
     # Optionally store CPI array (not saved to JSON, only for image plotting)
@@ -340,58 +348,58 @@ def plot_single_tile(result, output_dir):
         fontsize=14, fontweight='bold', y=0.98
     )
 
-    # Plot 1: Normalized eigenvalues
+    # Plot 1: Normalized eigenvalues in dB
     ax1 = fig.add_subplot(gs[0, 0])
-    eigvals = np.array(result['eigenvalues']['normalized'])
-    indices = np.arange(1, len(eigvals) + 1)
-    ax1.plot(indices, eigvals, marker='o', color='#1f77b4', linewidth=2.5, markersize=8)
+    eigvals_db = np.array(result['eigenvalues']['normalized_db'])
+    indices = np.arange(1, len(eigvals_db) + 1)
+    ax1.plot(indices, eigvals_db, marker='o', color='#1f77b4', linewidth=2.5, markersize=8)
     ax1.set_xlabel('Eigenvalue Index (1-based)', fontsize=11, fontweight='bold')
-    ax1.set_ylabel('Normalized Eigenvalue', fontsize=11, fontweight='bold')
-    ax1.set_title('Eigenvalue Profile (Normalized)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Normalized Eigenvalue (dB)', fontsize=11, fontweight='bold')
+    ax1.set_title('Eigenvalue Profile (Normalized, dB)', fontsize=12, fontweight='bold')
     ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.set_xlim(0.5, len(eigvals) + 0.5)
+    ax1.set_xlim(0.5, len(eigvals_db) + 0.5)
     # Add max eigenvalue info
     max_eig_db = result['eigenvalues']['max_eigval_db']
     ax1.text(0.02, 0.98, f"Max eigenvalue: {max_eig_db:.2f} dB",
              transform=ax1.transAxes, fontsize=9, verticalalignment='top',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
-    # Plot 2: Eigenvalue slopes
+    # Plot 2: Eigenvalue slopes in dB per index
     ax2 = fig.add_subplot(gs[0, 1])
-    slopes = np.array(result['eigenvalues']['slopes'])
-    indices = np.arange(1, len(slopes) + 1)
-    ax2.plot(indices, slopes, marker='s', color='#ff7f0e', linewidth=2.5, markersize=8)
+    slopes_db = np.array(result['eigenvalues']['slopes_db'])
+    indices = np.arange(1, len(slopes_db) + 1)
+    ax2.plot(indices, slopes_db, marker='s', color='#ff7f0e', linewidth=2.5, markersize=8)
     ax2.set_xlabel('Transition Index (k to k+1)', fontsize=11, fontweight='bold')
-    ax2.set_ylabel('Eigenvalue Slope (Δλ)', fontsize=11, fontweight='bold')
-    ax2.set_title('Eigenvalue Slopes (Finite Differences)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Eigenvalue Slope (dB per index)', fontsize=11, fontweight='bold')
+    ax2.set_title('Eigenvalue Slopes (dB per index)', fontsize=12, fontweight='bold')
     ax2.grid(True, alpha=0.3, linestyle='--')
     ax2.axhline(y=0, color='black', linestyle='--', linewidth=1.0, alpha=0.5)
     # Highlight the steepest drop
-    max_drop_idx = np.argmin(slopes)
-    ax2.plot(max_drop_idx + 1, slopes[max_drop_idx], 'r*', markersize=15,
+    max_drop_idx = np.argmin(slopes_db)
+    ax2.plot(max_drop_idx + 1, slopes_db[max_drop_idx], 'r*', markersize=15,
              label=f'Steepest drop at {max_drop_idx + 1}')
     ax2.legend(fontsize=9)
 
-    # Plot 3: SCM diagonal
+    # Plot 3: SCM diagonal in dB
     ax3 = fig.add_subplot(gs[1, 0])
-    diagonal = np.array(result['scm_diagonal'])
-    indices = np.arange(1, len(diagonal) + 1)
-    ax3.plot(indices, diagonal, marker='^', color='#2ca02c', linewidth=2.5, markersize=8)
+    diagonal_db = np.array(result['scm_diagonal_db'])
+    indices = np.arange(1, len(diagonal_db) + 1)
+    ax3.plot(indices, diagonal_db, marker='^', color='#2ca02c', linewidth=2.5, markersize=8)
     ax3.set_xlabel('Pulse Index (within CPI)', fontsize=11, fontweight='bold')
-    ax3.set_ylabel('SCM Diagonal Value', fontsize=11, fontweight='bold')
-    ax3.set_title('SCM Diagonal Elements (Real Part)', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('SCM Diagonal Value (dB)', fontsize=11, fontweight='bold')
+    ax3.set_title('SCM Diagonal Elements (dB)', fontsize=12, fontweight='bold')
     ax3.grid(True, alpha=0.3, linestyle='--')
 
-    # Plot 4: Unnormalized eigenvalues (log scale)
+    # Plot 4: Unnormalized eigenvalues in dB
     ax4 = fig.add_subplot(gs[1, 1])
-    eigvals_unnorm = np.array(result['eigenvalues']['sorted'])
-    indices = np.arange(1, len(eigvals_unnorm) + 1)
-    ax4.semilogy(indices, eigvals_unnorm, marker='D', color='#9467bd', linewidth=2.5, markersize=8)
+    eigvals_unnorm_db = np.array(result['eigenvalues']['sorted_db'])
+    indices = np.arange(1, len(eigvals_unnorm_db) + 1)
+    ax4.plot(indices, eigvals_unnorm_db, marker='D', color='#9467bd', linewidth=2.5, markersize=8)
     ax4.set_xlabel('Eigenvalue Index (1-based)', fontsize=11, fontweight='bold')
-    ax4.set_ylabel('Eigenvalue (Absolute Scale)', fontsize=11, fontweight='bold')
-    ax4.set_title('Eigenvalue Profile (Unnormalized, Log Scale)', fontsize=12, fontweight='bold')
-    ax4.grid(True, alpha=0.3, linestyle='--', which='both')
-    ax4.set_xlim(0.5, len(eigvals_unnorm) + 0.5)
+    ax4.set_ylabel('Eigenvalue (dB)', fontsize=11, fontweight='bold')
+    ax4.set_title('Eigenvalue Profile (Unnormalized, dB)', fontsize=12, fontweight='bold')
+    ax4.grid(True, alpha=0.3, linestyle='--')
+    ax4.set_xlim(0.5, len(eigvals_unnorm_db) + 0.5)
 
     # Add global features as text annotation
     global_feats = result['global_features']
