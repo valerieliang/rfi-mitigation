@@ -16,7 +16,7 @@ import h5py
 
 # Import from generate_synthetic_data
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from generate_synthetic_data import _compute_eigenvalues_normalized as compute_gen_synthetic
+from data_gen.generate_synthetic_data import _compute_eigenvalues_normalized as compute_gen_synthetic
 
 # Import from process_nisar_streaming
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'full_nisar_streaming'))

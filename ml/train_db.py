@@ -76,7 +76,7 @@ import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from generate_synthetic_data import BLOCK_HEIGHT
+from data_gen.generate_synthetic_data import BLOCK_HEIGHT
 from model import build_model
 
 # ---------------------------------------------------------------------------
