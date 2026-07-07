@@ -236,7 +236,10 @@ def plot_condition_number_distribution(validation_data, out_path):
     cond_nums = [knee_groups[k] for k in knees]
     labels = [f'knee={k}' if k > 0 else 'clean' for k in knees]
 
-    bp = ax.boxplot(cond_nums, labels=labels, patch_artist=True, widths=0.6)
+    positions = list(range(1, len(knees) + 1))
+    bp = ax.boxplot(cond_nums, positions=positions, patch_artist=True, widths=0.6)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
 
     # Color boxes by knee count
     norm_knee = mcolors.Normalize(vmin=0, vmax=MAX_BANDS)
