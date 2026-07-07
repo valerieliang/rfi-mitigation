@@ -2,8 +2,6 @@
 __pycache__/
 
 .env
-data/nisar_out/
-nisar_image/
 rfi_gen.egg-info
 
 *.npy
