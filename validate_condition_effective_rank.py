@@ -169,46 +169,40 @@ def load_and_validate_h5(h5_path):
 
 def plot_eigenvalue_with_metrics(validation_data, out_path):
     """
-    Plot eigenvalue profiles color-coded by knee count, with condition number
-    and effective rank annotations.
+    Plot eigenvalue profiles in dB scale, color-coded by max RFI power.
 
     Shows all CPI tiles from the validation dataset overlaid on one plot.
     """
     fig, ax = plt.subplots(figsize=(12, 6))
 
-    # Color mapping by knee count
-    norm_knee = mcolors.Normalize(vmin=0, vmax=MAX_BANDS)
+    # Determine max JNR for color mapping
+    max_jnr = JNR_RANGE_DB[1]
+    norm_jnr = mcolors.Normalize(vmin=0, vmax=max_jnr)
     cmap = cm.plasma
 
     ev_index_1based = np.arange(1, BLOCK_HEIGHT + 1)
 
     for data in validation_data:
-        knee = data['n_distinct_pulses']
-        eigvals_db = data['eigvals_db']
-        cond_num = data['condition_number_db']
-        eff_rank = data['eff_rank']
+        jnr_db_list = data['jnr_db_list']
+        max_jnr_power = max(jnr_db_list) if len(jnr_db_list) > 0 else 0
 
-        # Normalize eigenvalues to [0, 1] for plotting
-        eigvals_norm = 10 ** (eigvals_db / 10)  # Back to linear
-        eigvals_norm = eigvals_norm / np.max(eigvals_norm)
+        # Compute eigenvalues in dB: 10*log10(abs(eigvals))
+        eigvals_linear = data['eigvals_computed']
+        eigvals_db_plot = 10 * np.log10(np.abs(eigvals_linear) + 1e-12)
 
-        ax.plot(ev_index_1based, eigvals_norm,
-                color=cmap(norm_knee(knee)), alpha=0.4, linewidth=0.8)
-
-        # Mark knee position if RFI is present
-        if knee > 0:
-            ax.plot(knee, eigvals_norm[knee-1], 'rx', markersize=4, alpha=0.3)
+        color = cmap(norm_jnr(max_jnr_power))
+        ax.plot(ev_index_1based, eigvals_db_plot,
+                color=color, alpha=0.4, linewidth=0.8)
 
     # Add colorbar
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm_knee)
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm_jnr)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label('RFI Count (knee: 0=clean, 1-6=contaminated)', fontsize=10)
+    cbar.set_label('Max RFI Power (JNR dB, 0=clean)', fontsize=10)
 
     ax.set_xlabel('Eigenvalue Index (1-based)', fontsize=11)
-    ax.set_ylabel('Normalized Eigenvalue (0-1)', fontsize=11)
-    ax.set_ylim([0, 1.05])
-    ax.set_title('Eigenvalue Profiles with Condition Number and Effective Rank',
+    ax.set_ylabel('Eigenvalue (dB)', fontsize=11)
+    ax.set_title('Eigenvalue Profiles in dB Scale',
                  fontsize=12, fontweight='bold')
     ax.grid(True, linestyle='--', alpha=0.4)
 
@@ -220,37 +214,45 @@ def plot_eigenvalue_with_metrics(validation_data, out_path):
 
 def plot_condition_number_distribution(validation_data, out_path):
     """
-    Plot condition number distribution grouped by knee count.
+    Plot condition number distribution grouped by max RFI power.
     """
-    # Group by knee count
-    knee_groups = defaultdict(list)
+    # Group by max RFI power, with separate category for clean
+    power_groups = defaultdict(list)
     for data in validation_data:
-        knee = data['n_distinct_pulses']
+        jnr_db_list = data['jnr_db_list']
+        if len(jnr_db_list) == 0:
+            # Clean data
+            max_jnr = -1  # Special marker for clean
+        else:
+            max_jnr = max(jnr_db_list)
+
         cond_num = data['condition_number_db']
-        knee_groups[knee].append(cond_num)
+        power_groups[max_jnr].append(cond_num)
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
     # Box plot
-    knees = sorted(knee_groups.keys())
-    cond_nums = [knee_groups[k] for k in knees]
-    labels = [f'knee={k}' if k > 0 else 'clean' for k in knees]
+    powers = sorted(power_groups.keys())
+    cond_nums = [power_groups[p] for p in powers]
+    labels = ['clean' if p < 0 else f'{int(p)} dB' for p in powers]
 
-    positions = list(range(1, len(knees) + 1))
+    positions = list(range(1, len(powers) + 1))
     bp = ax.boxplot(cond_nums, positions=positions, patch_artist=True, widths=0.6)
     ax.set_xticks(positions)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels(labels, rotation=45, ha='right')
 
-    # Color boxes by knee count
-    norm_knee = mcolors.Normalize(vmin=0, vmax=MAX_BANDS)
+    # Color boxes by RFI power
+    max_jnr = JNR_RANGE_DB[1]
+    norm_jnr = mcolors.Normalize(vmin=0, vmax=max_jnr)
     cmap = cm.plasma
-    for patch, knee in zip(bp['boxes'], knees):
-        patch.set_facecolor(cmap(norm_knee(knee)))
+    for patch, power in zip(bp['boxes'], powers):
+        color_val = 0 if power < 0 else power
+        patch.set_facecolor(cmap(norm_jnr(color_val)))
         patch.set_alpha(0.6)
 
-    ax.set_xlabel('Knee Position (# distinct RFI pulse rows)', fontsize=11)
+    ax.set_xlabel('Max RFI Power (JNR dB)', fontsize=11)
     ax.set_ylabel('Condition Number (dB)', fontsize=11)
-    ax.set_title('Condition Number Distribution by RFI Count',
+    ax.set_title('Condition Number Distribution by Max RFI Power',
                  fontsize=12, fontweight='bold')
     ax.grid(True, axis='y', linestyle='--', alpha=0.4)
 
@@ -262,37 +264,45 @@ def plot_condition_number_distribution(validation_data, out_path):
 
 def plot_effective_rank_distribution(validation_data, out_path):
     """
-    Plot effective rank distribution grouped by knee count.
+    Plot effective rank distribution grouped by max RFI power.
     """
-    # Group by knee count
-    knee_groups = defaultdict(list)
+    # Group by max RFI power, with separate category for clean
+    power_groups = defaultdict(list)
     for data in validation_data:
-        knee = data['n_distinct_pulses']
+        jnr_db_list = data['jnr_db_list']
+        if len(jnr_db_list) == 0:
+            # Clean data
+            max_jnr = -1  # Special marker for clean
+        else:
+            max_jnr = max(jnr_db_list)
+
         eff_rank = data['eff_rank']
-        knee_groups[knee].append(eff_rank)
+        power_groups[max_jnr].append(eff_rank)
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
     # Box plot
-    knees = sorted(knee_groups.keys())
-    eff_ranks = [knee_groups[k] for k in knees]
-    labels = [f'knee={k}' if k > 0 else 'clean' for k in knees]
+    powers = sorted(power_groups.keys())
+    eff_ranks = [power_groups[p] for p in powers]
+    labels = ['clean' if p < 0 else f'{int(p)} dB' for p in powers]
 
-    positions = list(range(1, len(knees) + 1))
+    positions = list(range(1, len(powers) + 1))
     bp = ax.boxplot(eff_ranks, positions=positions, patch_artist=True, widths=0.6)
     ax.set_xticks(positions)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels(labels, rotation=45, ha='right')
 
-    # Color boxes by knee count
-    norm_knee = mcolors.Normalize(vmin=0, vmax=MAX_BANDS)
+    # Color boxes by RFI power
+    max_jnr = JNR_RANGE_DB[1]
+    norm_jnr = mcolors.Normalize(vmin=0, vmax=max_jnr)
     cmap = cm.plasma
-    for patch, knee in zip(bp['boxes'], knees):
-        patch.set_facecolor(cmap(norm_knee(knee)))
+    for patch, power in zip(bp['boxes'], powers):
+        color_val = 0 if power < 0 else power
+        patch.set_facecolor(cmap(norm_jnr(color_val)))
         patch.set_alpha(0.6)
 
-    ax.set_xlabel('Knee Position (# distinct RFI pulse rows)', fontsize=11)
+    ax.set_xlabel('Max RFI Power (JNR dB)', fontsize=11)
     ax.set_ylabel('Effective Rank', fontsize=11)
-    ax.set_title('Effective Rank Distribution by RFI Count',
+    ax.set_title('Effective Rank Distribution by Max RFI Power',
                  fontsize=12, fontweight='bold')
     ax.grid(True, axis='y', linestyle='--', alpha=0.4)
 
@@ -309,27 +319,30 @@ def plot_effective_rank_distribution(validation_data, out_path):
 
 def plot_scatter_cond_vs_eff_rank(validation_data, out_path):
     """
-    Scatter plot of condition number vs effective rank, color-coded by knee.
+    Scatter plot of condition number vs effective rank, color-coded by max RFI power.
     """
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Color mapping by knee count
-    norm_knee = mcolors.Normalize(vmin=0, vmax=MAX_BANDS)
+    # Color mapping by max RFI power
+    max_jnr = JNR_RANGE_DB[1]
+    norm_jnr = mcolors.Normalize(vmin=0, vmax=max_jnr)
     cmap = cm.plasma
 
     for data in validation_data:
-        knee = data['n_distinct_pulses']
+        jnr_db_list = data['jnr_db_list']
+        max_jnr_power = max(jnr_db_list) if len(jnr_db_list) > 0 else 0
+
         cond_num = data['condition_number_db']
         eff_rank = data['eff_rank']
 
-        ax.scatter(eff_rank, cond_num, c=[cmap(norm_knee(knee))],
+        ax.scatter(eff_rank, cond_num, c=[cmap(norm_jnr(max_jnr_power))],
                    alpha=0.5, s=30, edgecolors='none')
 
     # Add colorbar
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm_knee)
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm_jnr)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax)
-    cbar.set_label('RFI Count (knee: 0=clean, 1-6=contaminated)', fontsize=10)
+    cbar.set_label('Max RFI Power (JNR dB, 0=clean)', fontsize=10)
 
     ax.set_xlabel('Effective Rank', fontsize=11)
     ax.set_ylabel('Condition Number (dB)', fontsize=11)
