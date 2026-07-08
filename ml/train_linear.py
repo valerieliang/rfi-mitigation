@@ -78,7 +78,10 @@ import h5py
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path to import data_gen
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 from data_gen.generate_synthetic_data import BLOCK_HEIGHT
 from model import build_model
 
