@@ -3,6 +3,13 @@ train_db.py
 
 Training pipeline for the CNN-based RFI knee-index classifier using dB-normalized features.
 
+Usage:
+    # Train on default multi_band data
+    python ml/train_db.py
+
+    # Train on multi_band_original data
+    python ml/train_db.py --data-folder multi_band_original
+
 Label convention
 ----------------
 Keras requires non-negative class indices, so the 17 classes are encoded as:
@@ -70,6 +77,7 @@ JSON metrics saved to:
 import os
 import sys
 import json
+import argparse
 import numpy as np
 import h5py
 import tensorflow as tf
@@ -577,17 +585,31 @@ def main():
     """
     Full training pipeline.
 
-    Step 1: Load clean samples from data/multi_band/clean/ (label = 0).
-    Step 2: Load contaminated samples from data/multi_band/contaminated/ (label = 1-16).
+    Step 1: Load clean samples from data/<folder>/clean/ (label = 0).
+    Step 2: Load contaminated samples from data/<folder>/contaminated/ (label = 1-16).
     Step 3: Merge, split 80/10/10, train, and evaluate a single combined model.
     Step 4: Print summary metrics and knee confusion matrix.
     """
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train RFI knee classifier')
+    parser.add_argument('--data-folder', type=str, default='multi_band',
+                        help='Data folder name under data/ (default: multi_band)')
+    args = parser.parse_args()
+
+    data_folder = args.data_folder
+    model_name = data_folder  # Use data folder name as model name
+
     os.makedirs(MODELS_ROOT, exist_ok=True)
+
+    print(f"\n{'='*70}")
+    print(f"Training on data/{data_folder}")
+    print(f"Model will be saved to models/{model_name}")
+    print(f"{'='*70}\n")
 
     # ------------------------------------------------------------------
     # Step 1: Load clean dataset
     # ------------------------------------------------------------------
-    clean_folder = os.path.join(DATA_ROOT, 'multi_band', 'clean')
+    clean_folder = os.path.join(DATA_ROOT, data_folder, 'clean')
     print(f"\nLoading CLEAN dataset from {clean_folder} ...")
     e_clean, g_clean, y_clean = load_dataset_from_folder(clean_folder, expected_is_clean=True)
     print(f"  Clean samples: {len(y_clean)}")
@@ -598,7 +620,7 @@ def main():
     # ------------------------------------------------------------------
     # Step 2: Load contaminated (RFI) dataset
     # ------------------------------------------------------------------
-    rfi_folder = os.path.join(DATA_ROOT, 'multi_band', 'contaminated')
+    rfi_folder = os.path.join(DATA_ROOT, data_folder, 'contaminated')
     print(f"\nLoading CONTAMINATED dataset from {rfi_folder} ...")
     e_rfi, g_rfi, y_rfi = load_dataset_from_folder(rfi_folder, expected_is_clean=False)
     print(f"  RFI samples  : {len(y_rfi)}")
@@ -624,7 +646,7 @@ def main():
      y_tr, y_va, y_te) = split_dataset(eigen, global_, labels)
 
     results = train_one_run(
-        'multi_band',
+        model_name,
         e_tr, e_va, e_te,
         g_tr, g_va, g_te,
         y_tr, y_va, y_te,
@@ -633,13 +655,13 @@ def main():
     # ------------------------------------------------------------------
     # Step 4: Summary
     # ------------------------------------------------------------------
-    summary_path = os.path.join(MODELS_ROOT, 'summary.json')
+    summary_path = os.path.join(MODELS_ROOT, f'{model_name}_summary.json')
     with open(summary_path, 'w') as fh:
         json.dump(results, fh, indent=2)
     print(f"\nSummary saved to {summary_path}")
-    print(f"Training plots : models/multi_band/training_curves.png")
-    print(f"Confusion matrix: models/multi_band/confusion_matrix.png")
-    print(f"Metrics bar chart: models/multi_band/metrics.png")
+    print(f"Training plots : models/{model_name}/training_curves.png")
+    print(f"Confusion matrix: models/{model_name}/confusion_matrix.png")
+    print(f"Metrics bar chart: models/{model_name}/metrics.png")
 
 
 if __name__ == '__main__':

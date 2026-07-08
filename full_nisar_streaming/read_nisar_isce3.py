@@ -53,6 +53,9 @@ Examples:
 
   # Read with pulse/range subsetting
   python read_nisar_isce3.py input.h5 --pulse-start 0 --pulse-end 5000 --range-start 0 --range-end 10000
+
+  # Read range 76k-110k for testing trained model
+  python read_nisar_isce3.py input.h5 --range-start 76000 --range-end 110000 --stream --save-eigenvalues
         """
     )
 
@@ -70,9 +73,9 @@ Examples:
     parser.add_argument('--pulse-end', type=int, default=None,
                         help='End pulse index (slow time)')
     parser.add_argument('--range-start', type=int, default=None,
-                        help='Start range sample index')
+                        help='Start range sample index (default: 0)')
     parser.add_argument('--range-end', type=int, default=None,
-                        help='End range sample index')
+                        help='End range sample index (default: all, use 110000 for 76k-110k range with --range-start 76000)')
 
     # Processing options
     parser.add_argument('--stream', action='store_true',
