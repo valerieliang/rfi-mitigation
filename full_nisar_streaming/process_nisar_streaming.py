@@ -174,8 +174,18 @@ def extract_model_features(cpi, eigvals_normalized, n_global_features=None):
 
     # Adapt to model's expected number of global features
     if n_global_features == 2:
-        # Legacy 2-feature model: just condition number and sigma_min
-        global_ = np.array([cond_number, sigma_min], dtype=np.float32)
+        # Legacy 2-feature model: condition_number_db and effective_rank
+        # Condition number in dB space (equivalent to ratio in linear space)
+        eigvals_db = 10 * np.log10(eigvals_normalized + 1e-12)
+        cond_number_db = eigvals_db[0] - max(eigvals_db[-1], -100)
+
+        # Effective rank via Shannon entropy of eigenvalue distribution
+        p = np.maximum(eigvals_normalized, 1e-12)
+        p = p / np.sum(p)
+        p = p[p > 0]
+        eff_rank = np.exp(-np.sum(p * np.log(p)))
+
+        global_ = np.array([cond_number_db, eff_rank], dtype=np.float32)
     else:
         # Full 5-feature version
         global_ = np.array(
