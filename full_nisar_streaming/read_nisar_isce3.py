@@ -34,6 +34,10 @@ from nisar.products.readers.Raw import Raw
 from isce3.signal.compute_evd_cpi import compute_evd_tb, slice_gen
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Add project root to path for model imports
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 
 def parse_args():
     """Parse command line arguments."""
@@ -94,6 +98,12 @@ Examples:
                         help='Receiver dynamic range in dB (default: 50.0)')
     parser.add_argument('--min-ev-valid-idx', type=int, default=10,
                         help='Minimum eigenvalue valid index (default: 10)')
+
+    # Model prediction parameters
+    parser.add_argument('--model', type=str, default=None,
+                        help='Path to trained model for RFI predictions (optional)')
+    parser.add_argument('--save-predictions', action='store_true',
+                        help='Save model predictions to HDF5 (requires --model)')
 
     return parser.parse_args()
 
@@ -162,6 +172,101 @@ def get_dataset_info(raw: Raw):
     return info
 
 
+def extract_model_features(cpi, n_global_features=2):
+    """
+    Extract features for model prediction from a CPI tile.
+
+    Parameters
+    ----------
+    cpi : np.ndarray
+        Complex CPI array of shape (M, K)
+    n_global_features : int
+        Number of global features (2 or 5)
+
+    Returns
+    -------
+    eigen : np.ndarray
+        Shape (M, 2) - eigenvalues and slopes in dB
+    global_ : np.ndarray
+        Shape (n_global_features,) - global features
+    """
+    M, K = cpi.shape
+
+    # Compute SCM and eigenvalues
+    SCM = (cpi @ cpi.conj().T) / K
+    eigvals = np.linalg.eigvalsh(SCM)
+    eigvals_sorted = np.sort(eigvals)[::-1]  # Descending
+
+    # Normalize by max eigenvalue, convert to dB
+    max_eigval = eigvals_sorted[0]
+    eigvals_normalized = eigvals_sorted / max(max_eigval, 1e-12)
+    eigvals_db = 10 * np.log10(eigvals_normalized + 1e-12)
+
+    # Eigenvalue slopes
+    slopes = np.diff(eigvals_db)
+    slopes_padded = np.append(slopes, 0.0)
+    eigen = np.stack([eigvals_db, slopes_padded], axis=-1).astype(np.float32)
+
+    # Global features
+    cond_number_db = eigvals_db[0] - max(eigvals_db[-1], -100)
+
+    # Effective rank via Shannon entropy
+    p = np.maximum(eigvals_sorted, 1e-12)
+    p = p / np.sum(p)
+    p = p[p > 0]
+    eff_rank = np.exp(-np.sum(p * np.log(p)))
+
+    if n_global_features == 2:
+        global_ = np.array([cond_number_db, eff_rank], dtype=np.float32)
+    else:
+        # Extended features (5 total) - add dummy values for compatibility
+        global_ = np.array([
+            cond_number_db, eff_rank, 0.0, 0.0, 0.0
+        ], dtype=np.float32)[:n_global_features]
+
+    return eigen, global_
+
+
+def load_model(model_path):
+    """
+    Load a trained Keras model.
+
+    Parameters
+    ----------
+    model_path : str
+        Path to model file
+
+    Returns
+    -------
+    model : keras.Model
+        Loaded model
+    n_global_features : int
+        Number of global features expected by model
+    """
+    try:
+        import tensorflow as tf
+    except ImportError:
+        raise ImportError("TensorFlow required for model predictions. Install with: pip install tensorflow")
+
+    print(f"\nLoading model from {model_path}...")
+    model = tf.keras.models.load_model(model_path)
+
+    # Detect number of global features
+    n_global_features = 2  # Default
+    try:
+        for layer in model.inputs:
+            if 'global' in layer.name.lower():
+                n_global_features = layer.shape[-1]
+                break
+    except:
+        pass
+
+    print(f"  Model loaded successfully")
+    print(f"  Expected global features: {n_global_features}")
+
+    return model, n_global_features
+
+
 def read_raw_data_batch(
     raw: Raw,
     freq: str,
@@ -216,9 +321,12 @@ def process_polarization_streaming(
     save_eigenvalues: bool = True,
     rx_dynamic_range_db: float = 50.0,
     min_ev_valid_idx: int = 10,
+    model=None,
+    n_global_features: int = 2,
+    save_predictions: bool = False,
 ):
     """
-    Process a single polarization in streaming mode with EVD computation.
+    Process a single polarization in streaming mode with EVD computation and model predictions.
 
     Parameters
     ----------
@@ -242,6 +350,12 @@ def process_polarization_streaming(
         Receiver dynamic range in dB
     min_ev_valid_idx : int
         Minimum eigenvalue valid index
+    model : keras.Model, optional
+        Trained model for predictions
+    n_global_features : int
+        Number of global features expected by model
+    save_predictions : bool
+        Whether to save predictions
 
     Returns
     -------
@@ -312,8 +426,57 @@ def process_polarization_streaming(
     print(f"  EVD computed in {evd_time:.2f}s")
     print(f"  TB valid: {tb_is_valid}")
 
+    # Model predictions
+    predictions = None
+    pred_time = 0.0
+    if model is not None:
+        print(f"  Running model predictions on {num_cpi} CPIs...")
+        pred_start = time.time()
+
+        # Extract features for all CPIs
+        # Reshape raw_data into CPIs: (num_cpi, cpi_len, n_range)
+        n_range = raw_data.shape[1]
+        cpi_width = min(250, n_range)  # Use 250 or available range
+        n_tiles_per_cpi = n_range // cpi_width
+
+        eigen_list = []
+        global_list = []
+
+        for cpi_idx in range(num_cpi):
+            cpi_start = cpi_idx * cpi_len
+            cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :cpi_width]
+
+            # Extract features
+            eigen, global_ = extract_model_features(cpi_data, n_global_features)
+            eigen_list.append(eigen)
+            global_list.append(global_)
+
+        # Stack for batch prediction
+        eigen_batch = np.stack(eigen_list)
+        global_batch = np.stack(global_list)
+
+        # Predict
+        probs = model.predict([eigen_batch, global_batch], verbose=0)
+
+        # Extract predictions
+        predictions = {
+            'knee_indices': np.argmax(probs, axis=-1).astype(np.int32),
+            'confidences': np.max(probs, axis=-1).astype(np.float32),
+            'probabilities': probs.astype(np.float32),
+        }
+
+        pred_time = time.time() - pred_start
+        print(f"  Predictions computed in {pred_time:.2f}s")
+
+        # Print summary statistics
+        unique, counts = np.unique(predictions['knee_indices'], return_counts=True)
+        print(f"  Predicted knee distribution:")
+        for k, c in zip(unique, counts):
+            pct = 100 * c / num_cpi
+            print(f"    knee={k}: {c} ({pct:.1f}%)")
+
     # Save results
-    if save_eigenvalues:
+    if save_eigenvalues or (save_predictions and predictions is not None):
         output_file = os.path.join(output_dir, f'nisar_{freq}_{pol}_eigenvalues.h5')
         print(f"  Saving eigenvalues to {output_file}...")
 
@@ -350,6 +513,18 @@ def process_polarization_streaming(
             meta_grp.attrs['center_frequency_hz'] = fc
             meta_grp.attrs['sample_rate_hz'] = fs
             meta_grp.attrs['bandwidth_hz'] = bandwidth
+
+            # Save predictions if available
+            if save_predictions and predictions is not None:
+                pred_grp = f.create_group('predictions')
+                pred_grp.create_dataset('knee_indices', data=predictions['knee_indices'], compression='gzip')
+                pred_grp.create_dataset('confidences', data=predictions['confidences'], compression='gzip')
+                pred_grp.create_dataset('probabilities', data=predictions['probabilities'], compression='gzip')
+
+                # Prediction statistics
+                pred_grp.attrs['n_predictions'] = len(predictions['knee_indices'])
+                pred_grp.attrs['mean_confidence'] = float(np.mean(predictions['confidences']))
+                pred_grp.attrs['prediction_time_s'] = pred_time
 
     total_time = time.time() - start_time
 
@@ -538,6 +713,16 @@ def main():
     # Get dataset info
     info = get_dataset_info(raw)
 
+    # Load model if provided
+    model = None
+    n_global_features = 2
+    if args.model:
+        model_path = Path(args.model)
+        if not model_path.exists():
+            print(f"ERROR: Model file not found: {args.model}")
+            sys.exit(1)
+        model, n_global_features = load_model(str(model_path))
+
     # Determine which datasets to process
     freqs_to_process = [args.freq] if args.freq else list(raw.polarizations.keys())
 
@@ -549,7 +734,7 @@ def main():
 
         for pol in pols_to_process:
             if args.stream:
-                # Streaming mode with EVD
+                # Streaming mode with EVD and predictions
                 results = process_polarization_streaming(
                     raw, freq, pol, args.output_dir,
                     cpi_len=args.cpi_len,
@@ -560,6 +745,9 @@ def main():
                     save_eigenvalues=args.save_eigenvalues,
                     rx_dynamic_range_db=args.rx_dynamic_range_db,
                     min_ev_valid_idx=args.min_ev_valid_idx,
+                    model=model,
+                    n_global_features=n_global_features,
+                    save_predictions=args.save_predictions,
                 )
             else:
                 # Full read mode

@@ -62,16 +62,19 @@ Directory layout expected on disk
 Outputs
 -------
 Model saved to:
-    models/multi_band/best_model.keras
+    models/<data-folder>/best_model.keras
 
-Evaluation PNGs saved to models/multi_band/:
+Evaluation PNGs saved to models/<data-folder>/:
     training_curves.png   -- loss and accuracy vs epoch
     confusion_matrix.png  -- knee confusion matrix (normalised by row)
     metrics.png           -- bar chart of scalar evaluation metrics
 
 JSON metrics saved to:
-    models/multi_band/eval_results.json
-    models/summary.json
+    models/<data-folder>/eval_results.json
+    models/<data-folder>_summary.json
+
+The model name matches the data folder name, so different data sources
+are automatically saved to separate directories.
 """
 
 import os

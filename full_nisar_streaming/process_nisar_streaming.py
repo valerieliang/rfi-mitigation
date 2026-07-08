@@ -642,8 +642,8 @@ Examples:
     parser.add_argument('--dataset', required=True, help='HDF5 dataset path')
     parser.add_argument('--polarization', choices=['HH', 'HV', 'VH', 'VV'],
                         help='Polarization (auto-detected if not provided)')
-    parser.add_argument('--model', required=True,
-                        help='Path to trained model for predictions')
+    parser.add_argument('--model', default='models/multi_band/best_model.keras',
+                        help='Path to trained model for predictions (default: models/multi_band/best_model.keras)')
     parser.add_argument('--cpi-height', type=int, default=16,
                         help='CPI height in pulses (default: 16)')
     parser.add_argument('--cpi-width', type=int, default=250,
