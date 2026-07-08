@@ -1,9 +1,9 @@
 {
   "run": "multi_band",
-  "n_test": 40000,
-  "exact_acc": 0.99985,
+  "n_test": 104000,
+  "exact_acc": 0.9999423076923077,
   "tol1_acc": 1.0,
-  "exact_rfi": 0.9997,
+  "exact_rfi": 0.9998928571428571,
   "tol1_rfi": 1.0,
   "exact_no_rfi": 1.0
 }
