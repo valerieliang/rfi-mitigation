@@ -694,8 +694,8 @@ def main():
     print(f"  JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB (dynamic per SNR level)  bands per block: {MIN_BANDS}-{MAX_BANDS}")
     print(f"  Noise: {NOISE_DB} dB (fixed)")
 
-    # Generate CLEAN samples
-    print(f"\n[CLEAN SAMPLES]")
+    # Generate CLEAN samples (seeds 0-99)
+    print(f"\n[CLEAN SAMPLES] (seeds 0-99)")
     seed = 0
     for snr_db in SNR_LEVELS:
         print(f"\n  Generating CLEAN SNR = {snr_db} dB:")
@@ -713,14 +713,14 @@ def main():
                 is_clean    = True,
             )
 
-            print(f"    seed={seed:02d}  -> {os.path.basename(out_path)}")
+            print(f"    seed={seed:03d}  -> {os.path.basename(out_path)}")
             plot_eigenvalue_profiles(h5_path=out_path, out_dir=clean_dir)
 
             seed += 1
 
-    # Generate CONTAMINATED samples
-    print(f"\n[CONTAMINATED SAMPLES]")
-    seed = 0
+    # Generate CONTAMINATED samples (seeds 100-199)
+    print(f"\n[CONTAMINATED SAMPLES] (seeds 100-199)")
+    seed = 100
     for snr_db in SNR_LEVELS:
         print(f"\n  Generating CONTAMINATED SNR = {snr_db} dB:")
         for img_idx in range(N_IMAGES_PER_SNR):
@@ -737,7 +737,7 @@ def main():
                 is_clean    = False,
             )
 
-            print(f"    seed={seed:02d}  -> {os.path.basename(out_path)}")
+            print(f"    seed={seed:03d}  -> {os.path.basename(out_path)}")
             plot_eigenvalue_profiles(h5_path=out_path, out_dir=contaminated_dir)
 
             seed += 1

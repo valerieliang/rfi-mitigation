@@ -463,9 +463,11 @@ def main():
     print(f"SNR levels: {SNR_LEVELS} dB")
     print(f"JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB (dynamic per SNR level)")
     print(f"Output directory: {test_dir}")
+    print(f"Seed range: Starting at 1000 (separate from training seeds 0-199)")
 
-    # Start at seed=100 to ensure no correlation with training data (which uses seeds 0-24)
-    seed = 100
+    # Start at seed=1000 to ensure no correlation with training data
+    # Training uses: 0-99 (clean), 100-199 (contaminated)
+    seed = 1000
     total_images = 0
 
     for n_bands in LATE_KNEE_POSITIONS:
