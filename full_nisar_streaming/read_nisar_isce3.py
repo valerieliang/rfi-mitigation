@@ -465,30 +465,35 @@ def process_polarization_streaming(
     print(f"  Eigenvalues computed in {evd_time:.2f}s")
     print(f"  Valid CPIs: {num_cpi}")
 
-    # Model predictions
+    # Model predictions - process ALL range tiles for spatial maps
     predictions = None
     pred_time = 0.0
     if model is not None:
-        print(f"  Running model predictions on {num_cpi} CPIs...")
-        pred_start = time.time()
-
-        # Extract features for all CPIs
-        # Reshape raw_data into CPIs: (num_cpi, cpi_len, n_range)
         n_range = raw_data.shape[1]
-        cpi_width = min(250, n_range)  # Use 250 or available range
-        n_tiles_per_cpi = n_range // cpi_width
+        cpi_width = 250  # Standard CPI width
+        n_range_tiles = n_range // cpi_width
+
+        print(f"  Running model predictions on {num_cpi} CPIs × {n_range_tiles} range tiles = {num_cpi * n_range_tiles} total tiles...")
+        pred_start = time.time()
 
         eigen_list = []
         global_list = []
 
+        # Process each CPI and each range tile
         for cpi_idx in range(num_cpi):
             cpi_start = cpi_idx * cpi_len
-            cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :cpi_width]
 
-            # Extract features
-            eigen, global_ = extract_model_features(cpi_data, n_global_features)
-            eigen_list.append(eigen)
-            global_list.append(global_)
+            for range_tile_idx in range(n_range_tiles):
+                range_start = range_tile_idx * cpi_width
+                range_end = range_start + cpi_width
+
+                # Extract tile
+                cpi_data = raw_data[cpi_start:cpi_start + cpi_len, range_start:range_end]
+
+                # Extract features
+                eigen, global_ = extract_model_features(cpi_data, n_global_features)
+                eigen_list.append(eigen)
+                global_list.append(global_)
 
         # Stack for batch prediction
         eigen_batch = np.stack(eigen_list)
@@ -497,21 +502,28 @@ def process_polarization_streaming(
         # Predict
         probs = model.predict([eigen_batch, global_batch], verbose=0)
 
-        # Extract predictions
+        # Extract predictions and reshape to 2D (pulse_tiles × range_tiles)
+        knee_indices = np.argmax(probs, axis=-1).astype(np.int32).reshape(num_cpi, n_range_tiles)
+        confidences = np.max(probs, axis=-1).astype(np.float32).reshape(num_cpi, n_range_tiles)
+
         predictions = {
-            'knee_indices': np.argmax(probs, axis=-1).astype(np.int32),
-            'confidences': np.max(probs, axis=-1).astype(np.float32),
+            'knee_indices': knee_indices,
+            'confidences': confidences,
             'probabilities': probs.astype(np.float32),
+            'n_pulse_tiles': num_cpi,
+            'n_range_tiles': n_range_tiles,
         }
 
         pred_time = time.time() - pred_start
         print(f"  Predictions computed in {pred_time:.2f}s")
+        print(f"  Prediction shape: {knee_indices.shape} (pulse_tiles × range_tiles)")
 
         # Print summary statistics
-        unique, counts = np.unique(predictions['knee_indices'], return_counts=True)
+        unique, counts = np.unique(knee_indices, return_counts=True)
+        total_tiles = num_cpi * n_range_tiles
         print(f"  Predicted knee distribution:")
         for k, c in zip(unique, counts):
-            pct = 100 * c / num_cpi
+            pct = 100 * c / total_tiles
             print(f"    knee={k}: {c} ({pct:.1f}%)")
 
     # Save results
@@ -560,10 +572,13 @@ def process_polarization_streaming(
                 pred_grp.create_dataset('confidences', data=predictions['confidences'], compression='gzip')
                 pred_grp.create_dataset('probabilities', data=predictions['probabilities'], compression='gzip')
 
-                # Prediction statistics
-                pred_grp.attrs['n_predictions'] = len(predictions['knee_indices'])
+                # Prediction metadata
+                pred_grp.attrs['n_pulse_tiles'] = predictions['n_pulse_tiles']
+                pred_grp.attrs['n_range_tiles'] = predictions['n_range_tiles']
+                pred_grp.attrs['n_predictions'] = predictions['knee_indices'].size
                 pred_grp.attrs['mean_confidence'] = float(np.mean(predictions['confidences']))
                 pred_grp.attrs['prediction_time_s'] = pred_time
+                pred_grp.attrs['cpi_width'] = 250  # Standard tile width
 
     total_time = time.time() - start_time
 
