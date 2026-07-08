@@ -213,16 +213,16 @@ def main():
         # Create colormap (matplotlib 3.5+ compatible)
         n_colors = args.knee_bound + 1
         try:
-            cmap = plt.colormaps['RdYlGn_r'].resampled(n_colors)
+            cmap = plt.colormaps['turbo'].resampled(n_colors)
         except AttributeError:
             # Fallback for older matplotlib versions
-            cmap = plt.cm.get_cmap('RdYlGn_r', n_colors)
+            cmap = plt.cm.get_cmap('turbo', n_colors)
 
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
         # Original predictions (swap axes: pulse on Y, range on X)
         im1 = ax1.imshow(knee_indices, aspect='auto', cmap=cmap,
-                         vmin=0, vmax=args.knee_bound, origin='lower')
+                         vmin=0, vmax=args.knee_bound, origin='upper')
         ax1.set_xlabel('Range Tile Index', fontsize=11)
         ax1.set_ylabel('Pulse Tile Index', fontsize=11)
         ax1.set_title(f'Original RFI Predictions: {freq}-{pol}\n'
@@ -233,7 +233,7 @@ def main():
 
         # Bounded predictions
         im2 = ax2.imshow(knee_bounded, aspect='auto', cmap=cmap,
-                         vmin=0, vmax=args.knee_bound, origin='lower')
+                         vmin=0, vmax=args.knee_bound, origin='upper')
         ax2.set_xlabel('Range Tile Index', fontsize=11)
         ax2.set_ylabel('Pulse Tile Index', fontsize=11)
         ax2.set_title(f'Bounded Predictions (knee≤{args.knee_bound}): {freq}-{pol}\n'
@@ -250,8 +250,8 @@ def main():
 
         # Plot 6: Confidence spatial map
         fig, ax = plt.subplots(figsize=(12, 6))
-        im = ax.imshow(confidences, aspect='auto', cmap='viridis',
-                       vmin=0, vmax=1, origin='lower')
+        im = ax.imshow(confidences, aspect='auto', cmap='turbo',
+                       vmin=0, vmax=1, origin='upper')
         ax.set_xlabel('Range Tile Index', fontsize=11)
         ax.set_ylabel('Pulse Tile Index', fontsize=11)
         ax.set_title(f'Prediction Confidence Map: {freq}-{pol}\n'
