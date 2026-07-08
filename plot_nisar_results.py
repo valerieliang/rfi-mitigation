@@ -175,38 +175,7 @@ def main():
     print(f"Saved: {eigval_path}")
     plt.close()
 
-    # Plot 4: Time series of predictions (flatten if spatial)
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-
-    # Use flattened data for time series
-    knee_plot = knee_flat if is_spatial else knee_indices
-    conf_plot = conf_flat if is_spatial else confidences
-
-    # Knee predictions over time
-    ax1.plot(knee_plot, 'o', markersize=2, alpha=0.5)
-    ax1.axhline(args.knee_bound, color='red', linestyle='--', linewidth=2, label=f'Threshold={args.knee_bound}')
-    ax1.set_ylabel('Knee Index', fontsize=11)
-    ax1.set_title(f'RFI Predictions Over Time: {freq}-{pol}', fontsize=12)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend()
-
-    # Confidence over time
-    ax2.plot(conf_plot, 'o', markersize=2, alpha=0.5, color='green')
-    ax2.axhline(np.mean(conf_plot), color='red', linestyle='--', linewidth=2,
-                label=f'Mean={np.mean(conf_plot):.3f}')
-    ax2.set_xlabel('Tile Index' if is_spatial else 'CPI Index', fontsize=11)
-    ax2.set_ylabel('Confidence', fontsize=11)
-    ax2.set_title('Prediction Confidence Over Time', fontsize=12)
-    ax2.grid(True, alpha=0.3)
-    ax2.legend()
-
-    plt.tight_layout()
-    time_path = output_dir / f'time_series_{freq}_{pol}.png'
-    plt.savefig(time_path, dpi=150, bbox_inches='tight')
-    print(f"Saved: {time_path}")
-    plt.close()
-
-    # Plot 5: Spatial maps (if data is 2D)
+    # Plot 4: Spatial maps (if data is 2D)
     if is_spatial:
         print(f"\nGenerating spatial maps...")
 
@@ -246,6 +215,40 @@ def main():
         spatial_path = output_dir / f'spatial_map_{freq}_{pol}.png'
         plt.savefig(spatial_path, dpi=200, bbox_inches='tight')
         print(f"Saved: {spatial_path}")
+        plt.close()
+
+        # Plot 5a: Original predictions (standalone)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        im = ax.imshow(knee_indices, aspect='auto', cmap=cmap,
+                       vmin=0, vmax=args.knee_bound, origin='upper')
+        ax.set_xlabel('Range Tile Index', fontsize=11)
+        ax.set_ylabel('Pulse Tile Index', fontsize=11)
+        ax.set_title(f'Original RFI Predictions: {freq}-{pol}\n'
+                     f'{n_clean} clean, {n_rfi} RFI detected',
+                     fontsize=12)
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Knee Index', fontsize=11)
+        plt.tight_layout()
+        original_path = output_dir / f'spatial_map_original_{freq}_{pol}.png'
+        plt.savefig(original_path, dpi=200, bbox_inches='tight')
+        print(f"Saved: {original_path}")
+        plt.close()
+
+        # Plot 5b: Bounded predictions (standalone)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        im = ax.imshow(knee_bounded, aspect='auto', cmap=cmap,
+                       vmin=0, vmax=args.knee_bound, origin='upper')
+        ax.set_xlabel('Range Tile Index', fontsize=11)
+        ax.set_ylabel('Pulse Tile Index', fontsize=11)
+        ax.set_title(f'Bounded Predictions (knee≤{args.knee_bound}): {freq}-{pol}\n'
+                     f'{n_recoverable} recoverable, {n_severe} severe',
+                     fontsize=12)
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Knee Index', fontsize=11)
+        plt.tight_layout()
+        bounded_path = output_dir / f'spatial_map_bounded_{freq}_{pol}.png'
+        plt.savefig(bounded_path, dpi=200, bbox_inches='tight')
+        print(f"Saved: {bounded_path}")
         plt.close()
 
         # Plot 6: Confidence spatial map
