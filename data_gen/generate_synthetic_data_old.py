@@ -687,7 +687,7 @@ def main():
 
     # Generate CLEAN samples
     print(f"\n[CLEAN SAMPLES]")
-    seed = 0
+    seed = 100
     for snr_db in SNR_LEVELS:
         print(f"\n  Generating CLEAN SNR = {snr_db} dB:")
         for img_idx in range(N_IMAGES_PER_SNR):
