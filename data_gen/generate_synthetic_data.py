@@ -82,11 +82,21 @@ RFI_SEED     = 2
 JNR_SEED     = 3
 CLUTTER_SEED = 4    # for clutter generation
 
-# Clutter parameters
-CLUTTER_MODES = ['none', 'urban', 'forest']
-URBAN_CLUTTER_CNR_RANGE_DB = (10, 25)   # Urban clutter CNR: 10-25 dB
-FOREST_CLUTTER_CNR_RANGE_DB = (5, 15)   # Forest clutter CNR: 5-15 dB
-N_DOMINANT_SCATTERERS_RANGE = (2, 8)    # Urban: 2-8 strong point targets
+# Clean data scenario parameters
+CLEAN_SCENARIOS = ['mountain', 'urban', 'distributed']
+
+# Mountain: Z-shaped eigenvalue profile (few very strong + weak background)
+MOUNTAIN_CNR_RANGE_DB = (15, 30)        # Strong terrain returns
+MOUNTAIN_N_SCATTERERS_RANGE = (1, 3)    # Very few dominant features
+MOUNTAIN_POWER_FRACTION = (0.90, 0.95)  # 90-95% in dominant scatterers (creates steep drop)
+
+# Urban: Elevated eigenvalues from point scatterers
+URBAN_CNR_RANGE_DB = (10, 25)           # Urban clutter CNR: 10-25 dB
+URBAN_N_SCATTERERS_RANGE = (2, 8)       # Multiple strong point targets
+URBAN_POWER_FRACTION = (0.70, 0.90)     # 70-90% in dominant scatterers
+
+# Distributed: Flatter eigenvalue profile (volume scattering)
+DISTRIBUTED_CNR_RANGE_DB = (5, 15)      # Moderate distributed returns
 K_DISTRIBUTION_SHAPE_RANGE = (0.5, 2.0) # K-distribution shape (lower = spikier)
 
 
@@ -196,6 +206,90 @@ def generate_clean_image(seed=0, snr_db=6):
 # CLUTTER GENERATION
 # ---------------------------------------------------------------------------
 
+def generate_mountain_clutter(M, K, cnr_db, noise_power_linear, seed=0):
+    """
+    Generate mountain terrain clutter with Z-shaped eigenvalue profile.
+
+    Mountain SAR phenomenology:
+    - Very few (1-3) extremely strong specular returns from terrain facets
+    - Steep eigenvalue dropoff after dominant returns
+    - Weak distributed background (shadows, low-backscatter areas)
+    - Creates characteristic "Z-shaped" eigenvalue curve
+
+    This produces:
+      - High eigenvalues: few dominant terrain returns
+      - Steep transition: rapid dropoff
+      - Flat tail: weak background/noise floor
+
+    Args:
+        M (int): Number of pulses (CPI height = 16)
+        K (int): Number of range bins (CPI width = 250)
+        cnr_db (float): Clutter-to-noise ratio in dB
+        noise_power_linear (float): Noise power in linear scale
+        seed (int): Random seed
+
+    Returns:
+        clutter_matrix (np.ndarray): Complex (M, K) clutter realization
+    """
+    rng = np.random.default_rng(seed)
+
+    # Total clutter power
+    clutter_power_linear = noise_power_linear * (10.0 ** (cnr_db / 10.0))
+
+    # CRITICAL: 90-95% of power in very few dominant scatterers (creates Z-shape)
+    dominant_power_fraction = rng.uniform(*MOUNTAIN_POWER_FRACTION)
+
+    # Very few dominant scatterers (1-3) - this creates the steep drop in eigenvalues
+    n_scatterers = int(rng.integers(*MOUNTAIN_N_SCATTERERS_RANGE))
+
+    # Dominant scatterer power (very strong)
+    dominant_power = clutter_power_linear * dominant_power_fraction
+    scatterer_power = dominant_power / n_scatterers
+    sigma_scatterer = np.sqrt(scatterer_power / 2.0)
+
+    clutter_matrix = np.zeros((M, K), dtype=np.complex64)
+
+    # Add very strong dominant scatterers (terrain facets)
+    for scatt_idx in range(n_scatterers):
+        # Random pulse position
+        pulse_idx = int(rng.integers(0, M))
+
+        # Narrow Doppler shift (static terrain)
+        doppler_freq = rng.uniform(-0.2, 0.2)
+
+        # Longer range correlation (terrain features are spatially extended)
+        range_corr_length = rng.uniform(5, 15)  # Longer than urban
+
+        # Generate correlated range profile
+        range_profile_real = rng.standard_normal(K) * sigma_scatterer
+        range_profile_imag = rng.standard_normal(K) * sigma_scatterer
+
+        # Apply smoothing for spatial correlation
+        from scipy.ndimage import gaussian_filter1d
+        range_profile_real = gaussian_filter1d(range_profile_real, sigma=range_corr_length / 3.0)
+        range_profile_imag = gaussian_filter1d(range_profile_imag, sigma=range_corr_length / 3.0)
+
+        range_profile = range_profile_real + 1j * range_profile_imag
+
+        # Azimuth modulation
+        azimuth_phase = np.exp(1j * 2.0 * np.pi * doppler_freq * pulse_idx)
+
+        clutter_matrix[pulse_idx, :] += azimuth_phase * range_profile
+
+    # Very weak distributed background (shadowed areas, low backscatter)
+    # This creates the flat tail of the Z-shape
+    distributed_power = clutter_power_linear * (1.0 - dominant_power_fraction)
+    sigma_distributed = np.sqrt(distributed_power / 2.0)
+
+    # Simple Gaussian background (represents noise-like weak returns)
+    background_real = rng.standard_normal((M, K)) * sigma_distributed
+    background_imag = rng.standard_normal((M, K)) * sigma_distributed
+
+    clutter_matrix += (background_real + 1j * background_imag).astype(np.complex64)
+
+    return clutter_matrix
+
+
 def generate_urban_clutter(M, K, cnr_db, noise_power_linear, seed=0):
     """
     Generate urban clutter model with dominant point scatterers.
@@ -224,10 +318,10 @@ def generate_urban_clutter(M, K, cnr_db, noise_power_linear, seed=0):
     clutter_power_linear = noise_power_linear * (10.0 ** (cnr_db / 10.0))
 
     # Split power: 70-90% in dominant scatterers, rest in distributed clutter
-    dominant_power_fraction = rng.uniform(0.7, 0.9)
+    dominant_power_fraction = rng.uniform(*URBAN_POWER_FRACTION)
 
     # Number of dominant scatterers (creates rank-N structure in eigenvalues)
-    n_scatterers = int(rng.integers(*N_DOMINANT_SCATTERERS_RANGE))
+    n_scatterers = int(rng.integers(*URBAN_N_SCATTERERS_RANGE))
 
     # Dominant scatterer power
     dominant_power = clutter_power_linear * dominant_power_fraction
@@ -286,17 +380,21 @@ def generate_urban_clutter(M, K, cnr_db, noise_power_linear, seed=0):
     return clutter_matrix
 
 
-def generate_forest_clutter(M, K, cnr_db, noise_power_linear, seed=0):
+def generate_distributed_clutter(M, K, cnr_db, noise_power_linear, seed=0):
     """
-    Generate forest clutter model (volume scattering).
+    Generate distributed clutter model (water, vegetation, volume scattering).
 
-    Forest phenomenology:
-    - Distributed volume scattering (no dominant targets)
-    - Higher effective rank than urban
+    Distributed scatterers phenomenology:
+    - No dominant point targets
+    - Volume scattering from vegetation or weak returns from water
+    - Higher effective rank (flatter eigenvalue curve)
     - Moderate spatial correlation in both azimuth and range
 
+    This creates a relatively flat eigenvalue profile compared to mountain/urban,
+    representing scenes dominated by distributed scattering (forests, water bodies).
+
     Args:
-        M, K, cnr_db, noise_power_linear, seed: Same as urban model
+        M, K, cnr_db, noise_power_linear, seed: Same as other models
 
     Returns:
         clutter_matrix (np.ndarray): Complex (M, K) clutter
@@ -322,40 +420,47 @@ def generate_forest_clutter(M, K, cnr_db, noise_power_linear, seed=0):
     return (clutter_real + 1j * clutter_imag).astype(np.complex64)
 
 
-def generate_clutter_per_tile(M, K, clutter_mode, cnr_db, noise_power_linear, seed=0):
+def generate_scenario_per_tile(M, K, scenario, cnr_db, noise_power_linear, seed=0):
     """
-    Generate clutter for a single CPI tile based on mode.
+    Generate clean data for a single CPI tile based on scenario.
 
     Args:
         M (int): CPI height (16)
         K (int): CPI width (250)
-        clutter_mode (str): 'none', 'urban', 'forest'
-        cnr_db (float): Clutter-to-noise ratio in dB
+        scenario (str): 'mountain', 'urban', 'distributed'
+        cnr_db (float): CNR in dB (terrain/clutter to noise ratio)
         noise_power_linear (float): Noise power
         seed (int): Random seed
 
     Returns:
-        clutter_tile (np.ndarray): Complex (M, K) clutter, or zeros if mode='none'
+        scenario_tile (np.ndarray): Complex (M, K) clean data realization
     """
-    if clutter_mode == 'none':
-        return np.zeros((M, K), dtype=np.complex64)
-    elif clutter_mode == 'urban':
+    if scenario == 'mountain':
+        return generate_mountain_clutter(M, K, cnr_db, noise_power_linear, seed)
+    elif scenario == 'urban':
         return generate_urban_clutter(M, K, cnr_db, noise_power_linear, seed)
-    elif clutter_mode == 'forest':
-        return generate_forest_clutter(M, K, cnr_db, noise_power_linear, seed)
+    elif scenario == 'distributed':
+        return generate_distributed_clutter(M, K, cnr_db, noise_power_linear, seed)
     else:
-        raise ValueError(f"Unknown clutter mode: {clutter_mode}")
+        raise ValueError(f"Unknown scenario: {scenario}")
 
 
 # ---------------------------------------------------------------------------
 # RFI IMAGE
 # ---------------------------------------------------------------------------
 
-def generate_rfi_image(seed=0, snr_db=6, clutter_mode='none', cnr_db=None):
+def generate_rfi_image(seed=0, snr_db=6, scenario='mountain', cnr_db=None):
     """
-    Generate a complex-valued image with noise + signal + clutter + RFI.
+    Generate a complex-valued image with noise + signal + clean scenario + RFI.
 
-    NEW: Now supports realistic urban/forest clutter models!
+    NEW: Now supports realistic clean data scenarios with proper eigenvalue profiles!
+
+    Clean scenarios:
+      - 'mountain': Z-shaped eigenvalue curve (few strong + weak background)
+      - 'urban': Elevated eigenvalues from point scatterers
+      - 'distributed': Flat eigenvalue curve (volume scattering - water/trees)
+
+    RFI is independently overlaid on top of the clean scenario.
 
     For every block of BLOCK_HEIGHT pulses, 1-6 independent RFI bands are
     injected. Each band occupies a single randomly chosen pulse row within the
@@ -363,15 +468,12 @@ def generate_rfi_image(seed=0, snr_db=6, clutter_mode='none', cnr_db=None):
     independently based on SNR (at least 3 dB above SNR, max 30 dB).
     All bands are mutually uncorrelated (separate RNG streams).
 
-    Clutter is added per-tile with unique realizations, creating realistic
-    eigenvalue structures that match real urban/forest NISAR data.
-
     Args:
         seed (int): Base seed. JNR draws use seed+JNR_SEED; RFI uses seed+RFI_SEED.
         snr_db (float): Signal-to-noise ratio in dB for this image.
-        clutter_mode (str): 'none', 'urban', or 'forest'
+        scenario (str): 'mountain', 'urban', or 'distributed'
         cnr_db (float|None): Clutter-to-noise ratio in dB. If None, drawn randomly
-                             based on clutter_mode.
+                             based on scenario.
 
     Returns:
         rfi_image (np.ndarray): Complex64 array of shape (TOTAL_PULSES, RANGE_BINS).
@@ -381,51 +483,50 @@ def generate_rfi_image(seed=0, snr_db=6, clutter_mode='none', cnr_db=None):
     # Generate base signal + noise
     clean_image = generate_clean_image(seed, snr_db)
 
-    # Add clutter per tile if requested
+    # Add clean scenario characteristics per tile
     noise_power_linear = 10.0 ** (NOISE_DB / 10.0)
 
-    if clutter_mode != 'none':
-        # Draw CNR if not specified
-        if cnr_db is None:
-            rng_cnr = np.random.default_rng(seed + CLUTTER_SEED)
-            if clutter_mode == 'urban':
-                cnr_db = float(rng_cnr.uniform(*URBAN_CLUTTER_CNR_RANGE_DB))
-            elif clutter_mode == 'forest':
-                cnr_db = float(rng_cnr.uniform(*FOREST_CLUTTER_CNR_RANGE_DB))
-            else:
-                raise ValueError(f"Unknown clutter mode: {clutter_mode}")
+    # Draw CNR if not specified
+    if cnr_db is None:
+        rng_cnr = np.random.default_rng(seed + CLUTTER_SEED)
+        if scenario == 'mountain':
+            cnr_db = float(rng_cnr.uniform(*MOUNTAIN_CNR_RANGE_DB))
+        elif scenario == 'urban':
+            cnr_db = float(rng_cnr.uniform(*URBAN_CNR_RANGE_DB))
+        elif scenario == 'distributed':
+            cnr_db = float(rng_cnr.uniform(*DISTRIBUTED_CNR_RANGE_DB))
+        else:
+            raise ValueError(f"Unknown scenario: {scenario}")
 
-        # Generate clutter per tile (like RFI, unique per tile)
-        clutter_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
+    # Generate clean scenario data per tile (unique per tile)
+    scenario_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
 
-        for b in range(N_BLOCKS):
-            block_start = b * BLOCK_HEIGHT
+    for b in range(N_BLOCKS):
+        block_start = b * BLOCK_HEIGHT
 
-            for range_tile_idx in range(0, RANGE_BINS // BLOCK_WIDTH):
-                range_start = range_tile_idx * BLOCK_WIDTH
-                range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
-                tile_width = range_end - range_start
+        for range_tile_idx in range(0, RANGE_BINS // BLOCK_WIDTH):
+            range_start = range_tile_idx * BLOCK_WIDTH
+            range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
+            tile_width = range_end - range_start
 
-                # Unique clutter per tile
-                clutter_seed = seed + CLUTTER_SEED + b * 1000 + range_tile_idx
+            # Unique clean data per tile
+            scenario_seed = seed + CLUTTER_SEED + b * 1000 + range_tile_idx
 
-                clutter_tile = generate_clutter_per_tile(
-                    BLOCK_HEIGHT,
-                    tile_width,
-                    clutter_mode,
-                    cnr_db,
-                    noise_power_linear,
-                    clutter_seed
-                )
+            scenario_tile = generate_scenario_per_tile(
+                BLOCK_HEIGHT,
+                tile_width,
+                scenario,
+                cnr_db,
+                noise_power_linear,
+                scenario_seed
+            )
 
-                clutter_matrix[block_start:block_start+BLOCK_HEIGHT, range_start:range_end] = clutter_tile
+            scenario_matrix[block_start:block_start+BLOCK_HEIGHT, range_start:range_end] = scenario_tile
 
-        clean_image = (clean_image + clutter_matrix).astype(np.complex64)
-        actual_cnr_db = cnr_db
-    else:
-        actual_cnr_db = 0.0
+    clean_image = (clean_image + scenario_matrix).astype(np.complex64)
+    actual_cnr_db = cnr_db
 
-    # Add RFI (per-tile, as updated earlier)
+    # Add RFI (per-tile, independently overlaid)
     rfi_signal, meta = _generate_multi_band_rfi(seed, snr_db)
     rfi_image = (clean_image + rfi_signal).astype(np.complex64)
 
@@ -542,7 +643,7 @@ def divide_cpi_and_save(
     cpi_width=BLOCK_WIDTH,
     output_path=None,
     is_clean=False,
-    clutter_mode='none',
+    scenario='mountain',
     cnr_db=0.0,
 ):
     """
@@ -565,6 +666,8 @@ def divide_cpi_and_save(
         max_bands      (int)   : maximum bands per block
         seed           (int)   : base seed used for generation
         is_clean       (bool)  : True if this is a clean (no RFI) sample
+        scenario       (str)   : Clean data scenario ('mountain', 'urban', 'distributed')
+        cnr_db         (float) : CNR in dB for clean scenario
 
     Dataset per CPI tile, name "cpi_{i}_{j}":
         Data: complex64 array of shape (cpi_height, cpi_width).
@@ -585,6 +688,8 @@ def divide_cpi_and_save(
         cpi_width  (int)       : Range columns per CPI tile. Must divide RANGE_BINS.
         output_path(str|None)  : Path for the HDF5 file. No file is written if None.
         is_clean   (bool)      : True if this is a clean (no RFI) sample.
+        scenario   (str)       : Clean data scenario ('mountain', 'urban', 'distributed').
+        cnr_db     (float)     : CNR in dB for clean scenario.
     """
     if output_path is None:
         return
@@ -614,7 +719,7 @@ def divide_cpi_and_save(
         f.attrs['max_bands']       = MAX_BANDS
         f.attrs['seed']            = seed
         f.attrs['is_clean']        = is_clean
-        f.attrs['clutter_mode']    = clutter_mode
+        f.attrs['scenario']        = scenario
         f.attrs['cnr_db']          = cnr_db
 
         # --- CPI datasets ---------------------------------------------------
@@ -908,14 +1013,16 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
 
 def main():
     """
-    Multi-scenario data generation pipeline with clutter support.
+    Multi-scenario data generation pipeline with realistic SAR phenomenology.
 
-    NEW: Generates training data across multiple clutter scenarios:
-      - 33% no clutter (baseline synthetic)
-      - 33% urban clutter (CNR 10-25 dB, dominant scatterers)
-      - 33% forest clutter (CNR 5-15 dB, volume scattering)
+    NEW: Generates training data across three clean data scenarios with
+    distinct eigenvalue profiles:
+      - 33% mountain: Z-shaped eigenvalue curve (few strong + weak background)
+      - 33% urban: Elevated eigenvalues from point scatterers
+      - 33% distributed: Flat eigenvalue curve (volume scattering - water/trees)
 
     For each scenario, generates clean + contaminated samples across SNR levels.
+    RFI is independently overlaid on top of each clean scenario.
 
     This creates diverse training data that matches real SAR phenomenology,
     eliminating the distribution mismatch that caused 0% RFI detection on real data.
@@ -923,33 +1030,33 @@ def main():
     # Scenario configuration
     scenarios = [
         {
-            'name': 'no_clutter',
-            'clutter_mode': 'none',
+            'name': 'mountain',
+            'scenario': 'mountain',
             'fraction': 0.33,
             'seed_offset': 0,
-            'description': 'Baseline (noise + signal only)',
+            'description': 'Mountain terrain (Z-shaped eigenvalues, CNR 15-30 dB)',
         },
         {
             'name': 'urban',
-            'clutter_mode': 'urban',
+            'scenario': 'urban',
             'fraction': 0.33,
             'seed_offset': 10000,
-            'description': 'Urban clutter (CNR 10-25 dB, point scatterers)',
+            'description': 'Urban (point scatterers, CNR 10-25 dB)',
         },
         {
-            'name': 'forest',
-            'clutter_mode': 'forest',
-            'fraction': 0.33,
+            'name': 'distributed',
+            'scenario': 'distributed',
+            'fraction': 0.34,
             'seed_offset': 20000,
-            'description': 'Forest clutter (CNR 5-15 dB, volume scattering)',
+            'description': 'Distributed (water/trees, CNR 5-15 dB)',
         },
     ]
 
     print("\n" + "="*80)
-    print("MULTI-SCENARIO DATA GENERATION WITH CLUTTER")
+    print("MULTI-SCENARIO DATA GENERATION - REALISTIC SAR PHENOMENOLOGY")
     print("="*80)
     print()
-    print("Clutter scenarios:")
+    print("Clean data scenarios (with distinct eigenvalue profiles):")
     for sc in scenarios:
         print(f"  - {sc['name']:12s} ({sc['fraction']*100:4.0f}%): {sc['description']}")
     print()
@@ -958,7 +1065,7 @@ def main():
     print(f"  - SNR levels: {SNR_LEVELS}")
     print(f"  - Clean + Contaminated samples")
     print()
-    print(f"RFI configuration:")
+    print(f"RFI configuration (independently overlaid):")
     print(f"  - Bands per block: {MIN_BANDS}-{MAX_BANDS}")
     print(f"  - JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB")
     print(f"  - Per-tile generation (unique RFI per 250-sample tile)")
@@ -967,18 +1074,18 @@ def main():
     total_images_clean = 0
     total_images_rfi = 0
 
-    for scenario in scenarios:
-        scenario_name = scenario['name']
-        clutter_mode = scenario['clutter_mode']
-        seed_offset = scenario['seed_offset']
+    for scenario_config in scenarios:
+        scenario_name = scenario_config['name']
+        scenario = scenario_config['scenario']
+        seed_offset = scenario_config['seed_offset']
 
         print("="*80)
-        print(f"SCENARIO: {scenario_name.upper()} ({scenario['description']})")
+        print(f"SCENARIO: {scenario_name.upper()} ({scenario_config['description']})")
         print("="*80)
         print()
 
         # Create directories
-        base_dir = os.path.join(DATA_ROOT, 'multi_band_with_clutter', scenario_name)
+        base_dir = os.path.join(DATA_ROOT, 'multi_scenario', scenario_name)
         clean_dir = os.path.join(base_dir, 'clean')
         contaminated_dir = os.path.join(base_dir, 'contaminated')
 
@@ -986,7 +1093,7 @@ def main():
         os.makedirs(contaminated_dir, exist_ok=True)
 
         # Number of images for this scenario
-        n_images_per_type = max(1, int(N_IMAGES_PER_SNR * scenario['fraction']))
+        n_images_per_type = max(1, int(N_IMAGES_PER_SNR * scenario_config['fraction']))
 
         print(f"Generating {n_images_per_type} images per SNR level per type")
         print(f"  Total: {n_images_per_type * len(SNR_LEVELS) * 2} images for this scenario")
@@ -1000,41 +1107,36 @@ def main():
             for img_idx in range(n_images_per_type):
                 out_path = os.path.join(clean_dir, f"image_{seed}_snr_{snr_db}.h5")
 
-                # Generate image with clutter but no RFI
-                clean_image, _, cnr_db = generate_rfi_image(
-                    seed=seed,
-                    snr_db=snr_db,
-                    clutter_mode=clutter_mode,
-                    cnr_db=None  # Draw randomly based on mode
-                )
+                # Generate base: noise + signal + clean scenario characteristics (NO RFI)
+                base_image = generate_clean_image(seed=seed, snr_db=snr_db)
+                noise_power_linear = 10.0 ** (NOISE_DB / 10.0)
 
-                # For clean samples, use the clean base (before adding non-existent RFI)
-                # We need to regenerate without the RFI call
-                if clutter_mode == 'none':
-                    clean_image = generate_clean_image(seed=seed, snr_db=snr_db)
-                    cnr_db = 0.0
-                else:
-                    # Regenerate base with clutter
-                    base_image = generate_clean_image(seed=seed, snr_db=snr_db)
-                    noise_power_linear = 10.0 ** (NOISE_DB / 10.0)
+                # Draw CNR for this scenario
+                rng_cnr = np.random.default_rng(seed + CLUTTER_SEED)
+                if scenario == 'mountain':
+                    cnr_db = float(rng_cnr.uniform(*MOUNTAIN_CNR_RANGE_DB))
+                elif scenario == 'urban':
+                    cnr_db = float(rng_cnr.uniform(*URBAN_CNR_RANGE_DB))
+                elif scenario == 'distributed':
+                    cnr_db = float(rng_cnr.uniform(*DISTRIBUTED_CNR_RANGE_DB))
 
-                    # Generate clutter per tile
-                    clutter_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
-                    for b in range(N_BLOCKS):
-                        block_start = b * BLOCK_HEIGHT
-                        for range_tile_idx in range(0, RANGE_BINS // BLOCK_WIDTH):
-                            range_start = range_tile_idx * BLOCK_WIDTH
-                            range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
-                            tile_width = range_end - range_start
-                            clutter_seed = seed + CLUTTER_SEED + b * 1000 + range_tile_idx
+                # Generate clean scenario data per tile
+                scenario_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
+                for b in range(N_BLOCKS):
+                    block_start = b * BLOCK_HEIGHT
+                    for range_tile_idx in range(0, RANGE_BINS // BLOCK_WIDTH):
+                        range_start = range_tile_idx * BLOCK_WIDTH
+                        range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
+                        tile_width = range_end - range_start
+                        scenario_seed = seed + CLUTTER_SEED + b * 1000 + range_tile_idx
 
-                            clutter_tile = generate_clutter_per_tile(
-                                BLOCK_HEIGHT, tile_width, clutter_mode,
-                                cnr_db, noise_power_linear, clutter_seed
-                            )
-                            clutter_matrix[block_start:block_start+BLOCK_HEIGHT, range_start:range_end] = clutter_tile
+                        scenario_tile = generate_scenario_per_tile(
+                            BLOCK_HEIGHT, tile_width, scenario,
+                            cnr_db, noise_power_linear, scenario_seed
+                        )
+                        scenario_matrix[block_start:block_start+BLOCK_HEIGHT, range_start:range_end] = scenario_tile
 
-                    clean_image = (base_image + clutter_matrix).astype(np.complex64)
+                clean_image = (base_image + scenario_matrix).astype(np.complex64)
 
                 divide_cpi_and_save(
                     matrix=clean_image,
@@ -1043,12 +1145,11 @@ def main():
                     snr_db=snr_db,
                     output_path=out_path,
                     is_clean=True,
-                    clutter_mode=clutter_mode,
+                    scenario=scenario,
                     cnr_db=cnr_db,
                 )
 
-                cnr_str = f" CNR={cnr_db:.1f}dB" if clutter_mode != 'none' else ""
-                print(f"    seed={seed:05d}{cnr_str} -> {os.path.basename(out_path)}")
+                print(f"    seed={seed:05d} CNR={cnr_db:.1f}dB -> {os.path.basename(out_path)}")
 
                 # Plot first few images only to save time
                 if img_idx < 2:
@@ -1057,7 +1158,7 @@ def main():
                 seed += 1
                 total_images_clean += 1
 
-        # Generate CONTAMINATED samples (with RFI + clutter)
+        # Generate CONTAMINATED samples (with RFI + scenario)
         print(f"\n[{scenario_name.upper()} CONTAMINATED]")
         seed = seed_offset + 100000  # Large offset to separate clean/contaminated seeds
         for snr_db in SNR_LEVELS:
@@ -1065,11 +1166,11 @@ def main():
             for img_idx in range(n_images_per_type):
                 out_path = os.path.join(contaminated_dir, f"image_{seed}_snr_{snr_db}.h5")
 
-                # Generate image with both clutter AND RFI
+                # Generate image with clean scenario + RFI overlaid
                 rfi_image, meta, cnr_db = generate_rfi_image(
                     seed=seed,
                     snr_db=snr_db,
-                    clutter_mode=clutter_mode,
+                    scenario=scenario,
                     cnr_db=None
                 )
 
@@ -1080,12 +1181,11 @@ def main():
                     snr_db=snr_db,
                     output_path=out_path,
                     is_clean=False,
-                    clutter_mode=clutter_mode,
+                    scenario=scenario,
                     cnr_db=cnr_db,
                 )
 
-                cnr_str = f" CNR={cnr_db:.1f}dB" if clutter_mode != 'none' else ""
-                print(f"    seed={seed:05d}{cnr_str} -> {os.path.basename(out_path)}")
+                print(f"    seed={seed:05d} CNR={cnr_db:.1f}dB -> {os.path.basename(out_path)}")
 
                 # Plot first few images only
                 if img_idx < 2:
@@ -1106,18 +1206,24 @@ def main():
     print(f"  Contaminated: {total_images_rfi}")
     print(f"  Total: {total_images_clean + total_images_rfi}")
     print()
-    print(f"Output directory: data/multi_band_with_clutter/")
+    print(f"Output directory: data/multi_scenario/")
     print()
     print("Scenario breakdown:")
-    for scenario in scenarios:
-        n_per_type = max(1, int(N_IMAGES_PER_SNR * scenario['fraction']))
+    for scenario_config in scenarios:
+        n_per_type = max(1, int(N_IMAGES_PER_SNR * scenario_config['fraction']))
         n_total = n_per_type * len(SNR_LEVELS) * 2
-        print(f"  {scenario['name']:12s}: {n_total:4d} images ({scenario['fraction']*100:4.0f}%)")
+        print(f"  {scenario_config['name']:12s}: {n_total:4d} images ({scenario_config['fraction']*100:4.0f}%)")
+    print()
+    print("Eigenvalue profile characteristics:")
+    print("  - Mountain: Z-shaped (1-3 strong scatterers, steep drop, flat tail)")
+    print("  - Urban: Elevated (2-8 point scatterers, curved profile)")
+    print("  - Distributed: Flat (volume scattering, high effective rank)")
     print()
     print("Next steps:")
-    print("  1. Update train_db.py to load from multi_band_with_clutter/")
-    print("  2. Train model: python ml/train_db.py")
-    print("  3. Test on real NISAR to verify improved generalization")
+    print("  1. Inspect eigenvalue plots in each scenario directory")
+    print("  2. Update train_db.py to load from data/multi_scenario/")
+    print("  3. Train model: python ml/train_db.py")
+    print("  4. Test on real NISAR to verify improved generalization")
     print()
 
 

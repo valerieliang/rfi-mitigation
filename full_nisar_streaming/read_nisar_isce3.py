@@ -298,12 +298,15 @@ def read_raw_data_batch(
     # Get raw dataset (this handles BFPQLUT internally)
     dataset = raw.getRawDataset(freq, pol)
 
-    # Build indexing tuple
-    idx = [pulse_slice if pulse_slice is not None else slice(None),
-           range_slice if range_slice is not None else slice(None)]
+    # Convert slices to actual indices
+    pulse_start = pulse_slice.start if pulse_slice and pulse_slice.start else 0
+    pulse_stop = pulse_slice.stop if pulse_slice and pulse_slice.stop else dataset.shape[0]
+    range_start = range_slice.start if range_slice and range_slice.start else 0
+    range_stop = range_slice.stop if range_slice and range_slice.stop else dataset.shape[1]
 
     # Read data - ISCE3 handles BFPQLUT decoding automatically
-    data = dataset[tuple(idx)]
+    # Use explicit indexing instead of slice objects
+    data = dataset[pulse_start:pulse_stop, range_start:range_stop]
 
     return data
 
@@ -409,18 +412,51 @@ def process_polarization_streaming(
     read_time = time.time() - read_start
     data_gb = raw_data.nbytes / 1e9
     print(f"  Data read: {data_gb:.3f} GB in {read_time:.2f}s ({data_gb/read_time:.2f} GB/s)")
+    print(f"  Actual data shape: {raw_data.shape}, dtype: {raw_data.dtype}")
+
+    # Verify data was read
+    if raw_data.size == 0:
+        raise ValueError(f"No data read! Check range limits. Dataset shape: {dataset.shape}, requested: [{p_start}:{p_start+tb_size}, {r_start}:{r_end}]")
 
     # Compute EVD
     print(f"  Computing EVD for {num_cpi} CPIs...")
     evd_start = time.time()
 
-    eig_val_sort, eig_vec_sort, diag_power, diag_valid, tb_is_valid = compute_evd_tb(
-        raw_data,
-        cpi_len=cpi_len,
-        mask_valid=None,  # No mask for now
-        min_ev_valid_idx=min_ev_valid_idx,
-        rx_dynamic_range_db=rx_dynamic_range_db,
-    )
+    # Check if we can use ISCE3's compute_evd_tb or need manual computation
+    n_range_samples = raw_data.shape[1]
+    use_manual_evd = n_range_samples < 32  # ISCE3 requires at least 32 samples
+
+    if use_manual_evd:
+        print(f"  Warning: Using manual EVD computation (range samples: {n_range_samples} < 32)")
+        # Manual EVD computation
+        eig_val_sort = np.zeros((num_cpi, cpi_len), dtype=np.float32)
+        diag_power = np.zeros((num_cpi, cpi_len), dtype=np.float32)
+        diag_valid = np.ones((num_cpi, cpi_len), dtype=bool)
+        tb_is_valid = True
+
+        for cpi_idx in range(num_cpi):
+            cpi_start = cpi_idx * cpi_len
+            cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :]
+
+            # Compute SCM
+            M, K = cpi_data.shape
+            SCM = (cpi_data @ cpi_data.conj().T) / K
+
+            # Eigenvalues
+            eigvals = np.linalg.eigvalsh(SCM)
+            eig_val_sort[cpi_idx, :] = np.sort(eigvals)[::-1]  # Descending
+
+            # Diagonal power
+            diag_power[cpi_idx, :] = np.abs(np.diag(SCM))
+    else:
+        # Use ISCE3's optimized EVD
+        eig_val_sort, eig_vec_sort, diag_power, diag_valid, tb_is_valid = compute_evd_tb(
+            raw_data,
+            cpi_len=cpi_len,
+            mask_valid=None,  # No mask for now
+            min_ev_valid_idx=min_ev_valid_idx,
+            rx_dynamic_range_db=rx_dynamic_range_db,
+        )
 
     evd_time = time.time() - evd_start
     print(f"  EVD computed in {evd_time:.2f}s")
