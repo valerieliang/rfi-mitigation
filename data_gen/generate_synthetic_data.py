@@ -54,9 +54,10 @@ from typing import List
 # ---------------------------------------------------------------------------
 
 NOISE_DB = 3        # fixed noise power in dB
-SNR_RANGE_DB = (6, 10)   # SNR range in dB: [6, 7, 8, 9, 10]
+SNR_RANGE_DB = (6, 20)   # SNR range in dB: 6-20
 
-JNR_RANGE_DB = (10, 30)  # per-band JNR range, both ends inclusive
+JNR_MAX_DB = 30         # Absolute max for JNR
+JNR_MIN_OFFSET_DB = 3   # JNR must be at least 3 dB above SNR
 
 TOTAL_PULSES = 1600     # rows  (slow-time / azimuth)
 RANGE_BINS   = 10000    # cols  (fast-time / range)
@@ -186,8 +187,8 @@ def generate_rfi_image(seed=0, snr_db=6):
     For every block of BLOCK_HEIGHT pulses, 1-6 independent RFI bands are
     injected. Each band occupies a single randomly chosen pulse row within the
     block (bands need not be adjacent). Each band draws its own JNR
-    independently from JNR_RANGE_DB. All bands are mutually uncorrelated
-    (separate RNG streams).
+    independently based on SNR (at least 3 dB above SNR, max 30 dB).
+    All bands are mutually uncorrelated (separate RNG streams).
 
     Args:
         seed (int): Base seed. JNR draws use seed+JNR_SEED; RFI uses
@@ -199,7 +200,7 @@ def generate_rfi_image(seed=0, snr_db=6):
         meta      (RfiMeta)   : Per-block band descriptors.
     """
     clean_image = generate_clean_image(seed, snr_db)
-    rfi_signal, meta = _generate_multi_band_rfi(seed)
+    rfi_signal, meta = _generate_multi_band_rfi(seed, snr_db)
     rfi_image = (clean_image + rfi_signal).astype(np.complex64)
     return rfi_image, meta
 
@@ -208,7 +209,7 @@ def generate_rfi_image(seed=0, snr_db=6):
 # RFI SIGNAL GENERATOR
 # ---------------------------------------------------------------------------
 
-def _generate_multi_band_rfi(seed):
+def _generate_multi_band_rfi(seed, snr_db):
     """
     Generate a multi-band RFI signal and inject it into every CPI block.
 
@@ -218,7 +219,7 @@ def _generate_multi_band_rfi(seed):
          (with replacement -- two bands may land on the same row and their
          contributions sum incoherently because they use independent range
          coefficient vectors and independent Doppler frequencies).
-      3. Draw a per-band JNR from JNR_RANGE_DB (integer, both ends inclusive)
+      3. Draw a per-band JNR from dynamic range based on SNR (at least 3 dB above SNR, max 30 dB)
          using the shared JNR RNG.
       4. Generate the range coefficient vector from an independent RNG child
          stream so that bands are statistically uncorrelated.
@@ -231,6 +232,7 @@ def _generate_multi_band_rfi(seed):
     Args:
         seed (int): Base seed; band RNGs use (seed+RFI_SEED, block, band) via
                     SeedSequence; JNR RNG uses seed+JNR_SEED.
+        snr_db (float): Signal-to-noise ratio in dB, used to determine JNR range.
 
     Returns:
         rfi_matrix (np.ndarray): Complex64, shape (TOTAL_PULSES, RANGE_BINS).
@@ -243,6 +245,10 @@ def _generate_multi_band_rfi(seed):
 
     # Separate RNG for JNR so the JNR stream is decoupled from placement draws.
     rng_jnr = np.random.default_rng(seed + JNR_SEED)
+
+    # Calculate JNR range based on SNR: at least 3 dB above SNR, max 30 dB
+    jnr_min = snr_db + JNR_MIN_OFFSET_DB
+    jnr_max = JNR_MAX_DB
 
     rfi_matrix      = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
     bands_per_block : List[List[BandMeta]] = []
@@ -262,10 +268,8 @@ def _generate_multi_band_rfi(seed):
             local_idx = int(local_indices[band_idx])
             abs_row   = block_start + local_idx
 
-            # Per-band JNR (independent draw from shared JNR RNG)
-            jnr_db           = int(rng_jnr.integers(
-                JNR_RANGE_DB[0], JNR_RANGE_DB[1] + 1
-            ))
+            # Per-band JNR: at least 3 dB above SNR, max 30 dB
+            jnr_db = int(rng_jnr.integers(jnr_min, jnr_max + 1))
             rfi_power_linear = noise_power_linear * (10.0 ** (jnr_db / 10.0))
             sigma            = np.sqrt(rfi_power_linear / 2.0)
 
@@ -369,8 +373,9 @@ def divide_cpi_and_save(
         f.attrs['n_blocks']        = N_BLOCKS
         f.attrs['noise_db']        = NOISE_DB
         f.attrs['snr_db']          = snr_db
-        f.attrs['jnr_range_low']   = JNR_RANGE_DB[0]
-        f.attrs['jnr_range_high']  = JNR_RANGE_DB[1]
+        # JNR range depends on SNR: at least 3 dB above SNR, max 30 dB
+        f.attrs['jnr_range_low']   = snr_db + JNR_MIN_OFFSET_DB
+        f.attrs['jnr_range_high']  = JNR_MAX_DB
         f.attrs['min_bands']       = MIN_BANDS
         f.attrs['max_bands']       = MAX_BANDS
         f.attrs['seed']            = seed
@@ -427,7 +432,8 @@ def divide_cpi_and_save(
 # ---------------------------------------------------------------------------
 
 N_IMAGES_PER_SNR = 10          # number of images per SNR level (for each type: clean & contaminated)
-SNR_LEVELS = [6, 7, 8, 9, 10]  # SNR levels in dB
+# Expanded SNR levels to cover the full range (6-20)
+SNR_LEVELS = [6, 8, 10, 12, 14, 16, 18, 20]  # SNR levels in dB
 N_IMAGES_CLEAN = N_IMAGES_PER_SNR * len(SNR_LEVELS)  # total clean images
 N_IMAGES_RFI = N_IMAGES_PER_SNR * len(SNR_LEVELS)    # total contaminated images
 DATA_ROOT  = 'data' # root output directory
@@ -504,7 +510,10 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
     import matplotlib.cm as cm
     import matplotlib.colors as mcolors
 
-    jnr_min_global, jnr_max_global = JNR_RANGE_DB
+    # Read JNR range from file attributes (depends on SNR)
+    with h5py.File(h5_path, 'r') as f_temp:
+        jnr_min_global = f_temp.attrs['jnr_range_low']
+        jnr_max_global = f_temp.attrs['jnr_range_high']
 
     block_pulse_offsets = [b * BLOCK_HEIGHT for b in range(N_BLOCKS)]
     ev_index_1based = np.arange(1, BLOCK_HEIGHT + 1)  # 1-based indexing
@@ -682,7 +691,7 @@ def main():
     print(f"  CLEAN images: {N_IMAGES_CLEAN}")
     print(f"  CONTAMINATED images: {N_IMAGES_RFI}")
     print(f"  SNR range: {SNR_RANGE_DB[0]}-{SNR_RANGE_DB[1]} dB  ({N_IMAGES_PER_SNR} images per level per type)")
-    print(f"  JNR range: {JNR_RANGE_DB} dB  bands per block: {MIN_BANDS}-{MAX_BANDS}")
+    print(f"  JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB (dynamic per SNR level)  bands per block: {MIN_BANDS}-{MAX_BANDS}")
     print(f"  Noise: {NOISE_DB} dB (fixed)")
 
     # Generate CLEAN samples

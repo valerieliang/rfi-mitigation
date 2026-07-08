@@ -24,8 +24,9 @@ from typing import List
 # Import constants and utilities from the main generation script
 # We'll reuse the same infrastructure
 NOISE_DB = 3
-SNR_RANGE_DB = (6, 10)
-JNR_RANGE_DB = (10, 30)
+SNR_RANGE_DB = (6, 20)
+JNR_MAX_DB = 30  # Absolute max for JNR
+JNR_MIN_OFFSET_DB = 3  # JNR must be at least 3 dB above SNR
 
 TOTAL_PULSES = 1600
 RANGE_BINS = 10000
@@ -84,7 +85,7 @@ def generate_clean_image(seed=0, snr_db=6):
     return (noise_matrix + signal_matrix).astype(np.complex64)
 
 
-def _generate_late_knee_rfi(seed, n_bands):
+def _generate_late_knee_rfi(seed, n_bands, snr_db):
     """
     Generate multi-band RFI with a fixed number of bands per block.
 
@@ -95,6 +96,7 @@ def _generate_late_knee_rfi(seed, n_bands):
     Args:
         seed (int): Base seed for RNG
         n_bands (int): Fixed number of bands per block (7 or 8)
+        snr_db (float): Signal-to-noise ratio in dB, used to determine JNR range
 
     Returns:
         rfi_matrix (np.ndarray): Complex64, shape (TOTAL_PULSES, RANGE_BINS)
@@ -107,6 +109,11 @@ def _generate_late_knee_rfi(seed, n_bands):
 
     rfi_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
     bands_per_block: List[List[BandMeta]] = []
+
+    # Calculate JNR range based on SNR
+    # JNR must be at least 3 dB above SNR and at most 30 dB
+    jnr_min = snr_db + JNR_MIN_OFFSET_DB
+    jnr_max = JNR_MAX_DB
 
     for b in range(N_BLOCKS):
         block_start = b * BLOCK_HEIGHT
@@ -121,10 +128,8 @@ def _generate_late_knee_rfi(seed, n_bands):
             local_idx = int(local_indices[band_idx])
             abs_row = block_start + local_idx
 
-            # Per-band JNR
-            jnr_db = int(rng_jnr.integers(
-                JNR_RANGE_DB[0], JNR_RANGE_DB[1] + 1
-            ))
+            # Per-band JNR: at least 3 dB above SNR, max 30 dB
+            jnr_db = int(rng_jnr.integers(jnr_min, jnr_max + 1))
             rfi_power_linear = noise_power_linear * (10.0 ** (jnr_db / 10.0))
             sigma = np.sqrt(rfi_power_linear / 2.0)
 
@@ -164,7 +169,7 @@ def generate_late_knee_rfi_image(seed=0, snr_db=6, n_bands=7):
         meta (RfiMeta): Per-block band descriptors
     """
     clean_image = generate_clean_image(seed, snr_db)
-    rfi_signal, meta = _generate_late_knee_rfi(seed, n_bands)
+    rfi_signal, meta = _generate_late_knee_rfi(seed, n_bands, snr_db)
     rfi_image = (clean_image + rfi_signal).astype(np.complex64)
     return rfi_image, meta
 
@@ -200,8 +205,9 @@ def divide_cpi_and_save(
         f.attrs['n_blocks'] = N_BLOCKS
         f.attrs['noise_db'] = NOISE_DB
         f.attrs['snr_db'] = snr_db
-        f.attrs['jnr_range_low'] = JNR_RANGE_DB[0]
-        f.attrs['jnr_range_high'] = JNR_RANGE_DB[1]
+        # JNR range depends on SNR: at least 3 dB above SNR, max 30 dB
+        f.attrs['jnr_range_low'] = snr_db + JNR_MIN_OFFSET_DB
+        f.attrs['jnr_range_high'] = JNR_MAX_DB
         f.attrs['n_bands_fixed'] = n_bands  # Fixed for late knee test
         f.attrs['seed'] = seed
         f.attrs['is_test'] = True  # Mark as test data
@@ -292,7 +298,10 @@ def plot_late_knee_profiles(h5_path, out_dir, n_bands):
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
 
-    jnr_min_global, jnr_max_global = JNR_RANGE_DB
+    # Read JNR range from file attributes (depends on SNR)
+    with h5py.File(h5_path, 'r') as f_temp:
+        jnr_min_global = f_temp.attrs['jnr_range_low']
+        jnr_max_global = f_temp.attrs['jnr_range_high']
 
     block_pulse_offsets = [b * BLOCK_HEIGHT for b in range(N_BLOCKS)]
     ev_index_1based = np.arange(1, BLOCK_HEIGHT + 1)
@@ -434,9 +443,13 @@ def main():
 
     Creates test samples with knees at positions 7 and 8 to evaluate model
     performance on these edge cases.
+
+    SNR range: 6-20 dB
+    JNR range: at least 3 dB above SNR, max 30 dB
     """
     N_IMAGES_PER_KNEE = 5  # 5 images per knee position per SNR level
-    SNR_LEVELS = [6, 7, 8, 9, 10]
+    # Expanded SNR levels to cover the full range (6-20)
+    SNR_LEVELS = [6, 8, 10, 12, 14, 16, 18, 20]
 
     test_dir = os.path.join('data', 'test_late_knee')
     os.makedirs(test_dir, exist_ok=True)
@@ -448,7 +461,7 @@ def main():
     print(f"Test knee positions: {LATE_KNEE_POSITIONS}")
     print(f"Images per knee per SNR: {N_IMAGES_PER_KNEE}")
     print(f"SNR levels: {SNR_LEVELS} dB")
-    print(f"JNR range: {JNR_RANGE_DB} dB")
+    print(f"JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB (dynamic per SNR level)")
     print(f"Output directory: {test_dir}")
 
     # Start at seed=100 to ensure no correlation with training data (which uses seeds 0-24)
