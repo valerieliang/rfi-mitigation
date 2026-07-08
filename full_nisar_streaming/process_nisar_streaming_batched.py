@@ -517,7 +517,8 @@ def main():
     parser.add_argument('output', help='Output HDF5 file')
     parser.add_argument('--dataset', required=True, help='HDF5 dataset path')
     parser.add_argument('--polarization', choices=['HH', 'HV', 'VH', 'VV'])
-    parser.add_argument('--model', required=True, help='Path to trained model')
+    parser.add_argument('--model', default='models/multi_band/best_model.keras',
+                        help='Path to trained model (default: models/multi_band/best_model.keras)')
     parser.add_argument('--cpi-height', type=int, default=16)
     parser.add_argument('--cpi-width', type=int, default=250)
     parser.add_argument('--range-start', type=int, default=None)
