@@ -76,10 +76,18 @@ MIN_BANDS = 1
 MAX_BANDS = 6
 
 # Child-seed offsets for SeedSequence-style isolation
-NOISE_SEED  = 0
-SIGNAL_SEED = 1
-RFI_SEED    = 2
-JNR_SEED    = 3     # separate offset so JNR draw does not perturb RFI state
+NOISE_SEED   = 0
+SIGNAL_SEED  = 1
+RFI_SEED     = 2
+JNR_SEED     = 3
+CLUTTER_SEED = 4    # for clutter generation
+
+# Clutter parameters
+CLUTTER_MODES = ['none', 'urban', 'forest']
+URBAN_CLUTTER_CNR_RANGE_DB = (10, 25)   # Urban clutter CNR: 10-25 dB
+FOREST_CLUTTER_CNR_RANGE_DB = (5, 15)   # Forest clutter CNR: 5-15 dB
+N_DOMINANT_SCATTERERS_RANGE = (2, 8)    # Urban: 2-8 strong point targets
+K_DISTRIBUTION_SHAPE_RANGE = (0.5, 2.0) # K-distribution shape (lower = spikier)
 
 
 # ---------------------------------------------------------------------------
@@ -95,16 +103,25 @@ class BandMeta:
 
 
 @dataclass
+class TileMeta:
+    """Descriptor for RFI in a single tile (pulse_block, range_tile)."""
+    pulse_block_idx : int              # Which pulse block (0 to N_BLOCKS-1)
+    range_tile_idx  : int              # Which range tile (0 to n_range_tiles-1)
+    bands           : List[BandMeta]   # RFI bands in this tile
+
+
+@dataclass
 class RfiMeta:
     """
     Carries all RFI injection metadata for one generated image.
 
     Attributes:
-        bands_per_block (list[list[BandMeta]]): N_BLOCKS outer entries.
-            Each inner list holds 1-6 BandMeta objects, one per injected band.
-            Bands within a block are uncorrelated and may occupy any row.
-            len(bands_per_block[b]) is the number of bands injected in block b.
+        tiles (dict): Maps (pulse_idx, range_idx) tuple to TileMeta.
+                      Each tile has unique RFI configuration.
+        bands_per_block (list[list[BandMeta]]): DEPRECATED - kept for compatibility.
+                      Now just references first tile's config per block for labels.
     """
+    tiles           : dict = field(default_factory=dict)
     bands_per_block : List[List[BandMeta]] = field(default_factory=list)
 
 
@@ -176,13 +193,169 @@ def generate_clean_image(seed=0, snr_db=6):
 
 
 # ---------------------------------------------------------------------------
+# CLUTTER GENERATION
+# ---------------------------------------------------------------------------
+
+def generate_urban_clutter(M, K, cnr_db, noise_power_linear, seed=0):
+    """
+    Generate urban clutter model with dominant point scatterers.
+
+    Urban SAR phenomenology:
+    - Multiple strong point targets (buildings, corner reflectors)
+    - K-distributed background clutter (speckle)
+    - Limited spatial correlation in azimuth
+
+    This creates elevated eigenvalues from dominant scatterers, matching
+    what's seen in real urban NISAR data.
+
+    Args:
+        M (int): Number of pulses (CPI height = 16)
+        K (int): Number of range bins (CPI width = 250)
+        cnr_db (float): Clutter-to-noise ratio in dB
+        noise_power_linear (float): Noise power in linear scale
+        seed (int): Random seed
+
+    Returns:
+        clutter_matrix (np.ndarray): Complex (M, K) clutter realization
+    """
+    rng = np.random.default_rng(seed)
+
+    # Total clutter power
+    clutter_power_linear = noise_power_linear * (10.0 ** (cnr_db / 10.0))
+
+    # Split power: 70-90% in dominant scatterers, rest in distributed clutter
+    dominant_power_fraction = rng.uniform(0.7, 0.9)
+
+    # Number of dominant scatterers (creates rank-N structure in eigenvalues)
+    n_scatterers = int(rng.integers(*N_DOMINANT_SCATTERERS_RANGE))
+
+    # Dominant scatterer power
+    dominant_power = clutter_power_linear * dominant_power_fraction
+    scatterer_power = dominant_power / n_scatterers
+    sigma_scatterer = np.sqrt(scatterer_power / 2.0)
+
+    clutter_matrix = np.zeros((M, K), dtype=np.complex64)
+
+    # Add dominant scatterers at random pulse positions
+    for scatt_idx in range(n_scatterers):
+        # Random pulse position (can overlap with RFI - this is realistic!)
+        pulse_idx = int(rng.integers(0, M))
+
+        # Random Doppler shift
+        doppler_freq = rng.uniform(-0.3, 0.3)  # Narrower than RFI
+
+        # Range profile with limited correlation
+        range_corr_length = rng.uniform(3, 10)  # 3-10 range bins correlation
+
+        # Generate correlated range profile
+        range_profile_real = rng.standard_normal(K) * sigma_scatterer
+        range_profile_imag = rng.standard_normal(K) * sigma_scatterer
+
+        # Apply smoothing for spatial correlation
+        from scipy.ndimage import gaussian_filter1d
+        range_profile_real = gaussian_filter1d(range_profile_real, sigma=range_corr_length / 3.0)
+        range_profile_imag = gaussian_filter1d(range_profile_imag, sigma=range_corr_length / 3.0)
+
+        range_profile = range_profile_real + 1j * range_profile_imag
+
+        # Azimuth modulation (Doppler)
+        azimuth_phase = np.exp(1j * 2.0 * np.pi * doppler_freq * pulse_idx)
+
+        clutter_matrix[pulse_idx, :] += azimuth_phase * range_profile
+
+    # Distributed clutter background (K-distributed texture for speckle)
+    distributed_power = clutter_power_linear * (1.0 - dominant_power_fraction)
+
+    # K-distribution shape parameter (lower = spikier)
+    k_shape = rng.uniform(*K_DISTRIBUTION_SHAPE_RANGE)
+
+    # Generate K-distributed texture (uses gamma distribution)
+    from scipy.stats import gamma
+    texture = gamma.rvs(k_shape, scale=1.0/k_shape, size=(M, K), random_state=rng)
+
+    # Spatially white speckle
+    speckle_real = rng.standard_normal((M, K))
+    speckle_imag = rng.standard_normal((M, K))
+    speckle = (speckle_real + 1j * speckle_imag) / np.sqrt(2.0)
+
+    # Modulate by texture
+    distributed_clutter = speckle * np.sqrt(texture * distributed_power)
+
+    clutter_matrix += distributed_clutter.astype(np.complex64)
+
+    return clutter_matrix
+
+
+def generate_forest_clutter(M, K, cnr_db, noise_power_linear, seed=0):
+    """
+    Generate forest clutter model (volume scattering).
+
+    Forest phenomenology:
+    - Distributed volume scattering (no dominant targets)
+    - Higher effective rank than urban
+    - Moderate spatial correlation in both azimuth and range
+
+    Args:
+        M, K, cnr_db, noise_power_linear, seed: Same as urban model
+
+    Returns:
+        clutter_matrix (np.ndarray): Complex (M, K) clutter
+    """
+    rng = np.random.default_rng(seed)
+
+    clutter_power_linear = noise_power_linear * (10.0 ** (cnr_db / 10.0))
+    sigma = np.sqrt(clutter_power_linear / 2.0)
+
+    # Volume scattering: spatially correlated in azimuth and range
+    azimuth_corr_length = rng.uniform(2.0, 4.0)  # pulses
+    range_corr_length = rng.uniform(5.0, 15.0)   # range bins
+
+    # Generate white noise
+    clutter_real = rng.standard_normal((M, K)) * sigma
+    clutter_imag = rng.standard_normal((M, K)) * sigma
+
+    # Apply spatial correlation via 2D Gaussian filtering
+    from scipy.ndimage import gaussian_filter
+    clutter_real = gaussian_filter(clutter_real, sigma=[azimuth_corr_length, range_corr_length])
+    clutter_imag = gaussian_filter(clutter_imag, sigma=[azimuth_corr_length, range_corr_length])
+
+    return (clutter_real + 1j * clutter_imag).astype(np.complex64)
+
+
+def generate_clutter_per_tile(M, K, clutter_mode, cnr_db, noise_power_linear, seed=0):
+    """
+    Generate clutter for a single CPI tile based on mode.
+
+    Args:
+        M (int): CPI height (16)
+        K (int): CPI width (250)
+        clutter_mode (str): 'none', 'urban', 'forest'
+        cnr_db (float): Clutter-to-noise ratio in dB
+        noise_power_linear (float): Noise power
+        seed (int): Random seed
+
+    Returns:
+        clutter_tile (np.ndarray): Complex (M, K) clutter, or zeros if mode='none'
+    """
+    if clutter_mode == 'none':
+        return np.zeros((M, K), dtype=np.complex64)
+    elif clutter_mode == 'urban':
+        return generate_urban_clutter(M, K, cnr_db, noise_power_linear, seed)
+    elif clutter_mode == 'forest':
+        return generate_forest_clutter(M, K, cnr_db, noise_power_linear, seed)
+    else:
+        raise ValueError(f"Unknown clutter mode: {clutter_mode}")
+
+
+# ---------------------------------------------------------------------------
 # RFI IMAGE
 # ---------------------------------------------------------------------------
 
-def generate_rfi_image(seed=0, snr_db=6):
+def generate_rfi_image(seed=0, snr_db=6, clutter_mode='none', cnr_db=None):
     """
-    Generate a complex-valued image with additive multi-band RFI injected into
-    a clean frame.
+    Generate a complex-valued image with noise + signal + clutter + RFI.
+
+    NEW: Now supports realistic urban/forest clutter models!
 
     For every block of BLOCK_HEIGHT pulses, 1-6 independent RFI bands are
     injected. Each band occupies a single randomly chosen pulse row within the
@@ -190,19 +363,73 @@ def generate_rfi_image(seed=0, snr_db=6):
     independently based on SNR (at least 3 dB above SNR, max 30 dB).
     All bands are mutually uncorrelated (separate RNG streams).
 
+    Clutter is added per-tile with unique realizations, creating realistic
+    eigenvalue structures that match real urban/forest NISAR data.
+
     Args:
-        seed (int): Base seed. JNR draws use seed+JNR_SEED; RFI uses
-                    seed+RFI_SEED.
+        seed (int): Base seed. JNR draws use seed+JNR_SEED; RFI uses seed+RFI_SEED.
         snr_db (float): Signal-to-noise ratio in dB for this image.
+        clutter_mode (str): 'none', 'urban', or 'forest'
+        cnr_db (float|None): Clutter-to-noise ratio in dB. If None, drawn randomly
+                             based on clutter_mode.
 
     Returns:
         rfi_image (np.ndarray): Complex64 array of shape (TOTAL_PULSES, RANGE_BINS).
-        meta      (RfiMeta)   : Per-block band descriptors.
+        meta (RfiMeta): Per-tile band descriptors.
+        actual_cnr_db (float): CNR used (for logging).
     """
+    # Generate base signal + noise
     clean_image = generate_clean_image(seed, snr_db)
+
+    # Add clutter per tile if requested
+    noise_power_linear = 10.0 ** (NOISE_DB / 10.0)
+
+    if clutter_mode != 'none':
+        # Draw CNR if not specified
+        if cnr_db is None:
+            rng_cnr = np.random.default_rng(seed + CLUTTER_SEED)
+            if clutter_mode == 'urban':
+                cnr_db = float(rng_cnr.uniform(*URBAN_CLUTTER_CNR_RANGE_DB))
+            elif clutter_mode == 'forest':
+                cnr_db = float(rng_cnr.uniform(*FOREST_CLUTTER_CNR_RANGE_DB))
+            else:
+                raise ValueError(f"Unknown clutter mode: {clutter_mode}")
+
+        # Generate clutter per tile (like RFI, unique per tile)
+        clutter_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
+
+        for b in range(N_BLOCKS):
+            block_start = b * BLOCK_HEIGHT
+
+            for range_tile_idx in range(0, RANGE_BINS // BLOCK_WIDTH):
+                range_start = range_tile_idx * BLOCK_WIDTH
+                range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
+                tile_width = range_end - range_start
+
+                # Unique clutter per tile
+                clutter_seed = seed + CLUTTER_SEED + b * 1000 + range_tile_idx
+
+                clutter_tile = generate_clutter_per_tile(
+                    BLOCK_HEIGHT,
+                    tile_width,
+                    clutter_mode,
+                    cnr_db,
+                    noise_power_linear,
+                    clutter_seed
+                )
+
+                clutter_matrix[block_start:block_start+BLOCK_HEIGHT, range_start:range_end] = clutter_tile
+
+        clean_image = (clean_image + clutter_matrix).astype(np.complex64)
+        actual_cnr_db = cnr_db
+    else:
+        actual_cnr_db = 0.0
+
+    # Add RFI (per-tile, as updated earlier)
     rfi_signal, meta = _generate_multi_band_rfi(seed, snr_db)
     rfi_image = (clean_image + rfi_signal).astype(np.complex64)
-    return rfi_image, meta
+
+    return rfi_image, meta, actual_cnr_db
 
 
 # ---------------------------------------------------------------------------
@@ -211,89 +438,94 @@ def generate_rfi_image(seed=0, snr_db=6):
 
 def _generate_multi_band_rfi(seed, snr_db):
     """
-    Generate a multi-band RFI signal and inject it into every CPI block.
+    Generate a multi-band RFI signal with UNIQUE configuration per tile.
 
-    For each block:
-      1. Draw the number of bands uniformly from [MIN_BANDS, MAX_BANDS].
-      2. For each band, pick a random local pulse index within [0, BLOCK_HEIGHT)
-         (with replacement -- two bands may land on the same row and their
-         contributions sum incoherently because they use independent range
-         coefficient vectors and independent Doppler frequencies).
-      3. Draw a per-band JNR from dynamic range based on SNR (at least 3 dB above SNR, max 30 dB)
-         using the shared JNR RNG.
-      4. Generate the range coefficient vector from an independent RNG child
-         stream so that bands are statistically uncorrelated.
+    KEY CHANGE: RFI parameters (which rows, JNR) now vary per TILE, not per block.
+    This eliminates the 40× redundancy where all range tiles from the same pulse
+    block had nearly identical eigenvalue profiles.
 
-    Uncorrelation guarantee:
-      Each band within every block is generated from a fresh sub-stream
-      derived from (seed, block_index, band_index) so that no two bands share
-      any RNG state.
+    For each tile (pulse block × range tile):
+      1. Draw unique n_bands, pulse positions, and JNR values
+      2. Generate RFI ONLY for that tile's 250 range samples (truncated at tile boundary)
+      3. Each of the 4000 tiles per image now has UNIQUE RFI configuration
+
+    Result: 640K truly independent training samples instead of 16K repeated 40×.
 
     Args:
-        seed (int): Base seed; band RNGs use (seed+RFI_SEED, block, band) via
-                    SeedSequence; JNR RNG uses seed+JNR_SEED.
-        snr_db (float): Signal-to-noise ratio in dB, used to determine JNR range.
+        seed (int): Base seed for RFI generation
+        snr_db (float): Signal-to-noise ratio in dB, used to determine JNR range
 
     Returns:
-        rfi_matrix (np.ndarray): Complex64, shape (TOTAL_PULSES, RANGE_BINS).
-        meta       (RfiMeta)   : Per-block band descriptor lists.
+        rfi_matrix (np.ndarray): Complex64, shape (TOTAL_PULSES, RANGE_BINS)
+        meta (RfiMeta): Per-block band descriptor lists (for backwards compatibility)
+                        Note: Now stores first tile's config per block for labels
     """
     noise_power_linear = 10.0 ** (NOISE_DB / 10.0)
 
-    # Shared RNG for block-level structural draws (n_bands, local row positions).
-    rng_struct = np.random.default_rng(seed + RFI_SEED)
-
-    # Separate RNG for JNR so the JNR stream is decoupled from placement draws.
-    rng_jnr = np.random.default_rng(seed + JNR_SEED)
-
-    # Calculate JNR range based on SNR: at least 3 dB above SNR, max 30 dB
+    # Calculate JNR range based on SNR
     jnr_min = snr_db + JNR_MIN_OFFSET_DB
     jnr_max = JNR_MAX_DB
 
-    rfi_matrix      = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
+    rfi_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
+    tiles_dict = {}
     bands_per_block : List[List[BandMeta]] = []
 
+    # Generate RFI per TILE instead of per BLOCK
     for b in range(N_BLOCKS):
         block_start = b * BLOCK_HEIGHT
+        pulse_idx = block_start  # Pulse index for this block
 
-        # Number of bands for this block
-        n_bands = int(rng_struct.integers(MIN_BANDS, MAX_BANDS + 1))
+        for range_tile_idx_counter in range(0, RANGE_BINS // BLOCK_WIDTH):
+            range_start = range_tile_idx_counter * BLOCK_WIDTH
+            range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
+            tile_width = range_end - range_start
 
-        # Local pulse indices within [0, BLOCK_HEIGHT) (sampled with replacement)
-        local_indices = rng_struct.integers(0, BLOCK_HEIGHT, size=n_bands)
+            # UNIQUE seed per tile: depends on both block AND range position
+            tile_seed = seed + RFI_SEED + b * 1000 + range_tile_idx_counter
+            rng_tile = np.random.default_rng(tile_seed)
 
-        block_bands : List[BandMeta] = []
+            # UNIQUE RFI configuration per tile
+            n_bands = int(rng_tile.integers(MIN_BANDS, MAX_BANDS + 1))
+            local_indices = rng_tile.integers(0, BLOCK_HEIGHT, size=n_bands)
 
-        for band_idx in range(n_bands):
-            local_idx = int(local_indices[band_idx])
-            abs_row   = block_start + local_idx
+            tile_bands = []
 
-            # Per-band JNR: at least 3 dB above SNR, max 30 dB
-            jnr_db = int(rng_jnr.integers(jnr_min, jnr_max + 1))
-            rfi_power_linear = noise_power_linear * (10.0 ** (jnr_db / 10.0))
-            sigma            = np.sqrt(rfi_power_linear / 2.0)
+            for band_idx in range(n_bands):
+                local_idx = int(local_indices[band_idx])
+                abs_row = block_start + local_idx
 
-            # Derive a deterministic child seed from (seed, b, band_idx) so
-            # that each band's range coefficients are fully reproducible and
-            # uncorrelated regardless of how many bands other blocks have.
-            child_seed = (seed + RFI_SEED) * 10_000 + b * MAX_BANDS + band_idx
-            rng_band   = np.random.default_rng(child_seed)
+                # JNR varies per tile
+                jnr_db = int(rng_tile.integers(jnr_min, jnr_max + 1))
+                rfi_power_linear = noise_power_linear * (10.0 ** (jnr_db / 10.0))
+                sigma = np.sqrt(rfi_power_linear / 2.0)
 
-            doppler_freq = rng_band.uniform(-0.5, 0.5)
-            range_coeff  = (
-                rng_band.standard_normal(RANGE_BINS)
-                + 1j * rng_band.standard_normal(RANGE_BINS)
-            ) * sigma
+                # Generate range coefficients ONLY for this tile's width
+                doppler_freq = rng_tile.uniform(-0.5, 0.5)
+                range_coeff = (
+                    rng_tile.standard_normal(tile_width)
+                    + 1j * rng_tile.standard_normal(tile_width)
+                ) * sigma
 
-            phase = np.exp(1j * 2.0 * np.pi * doppler_freq * abs_row)
-            rfi_matrix[abs_row, :] += (phase * range_coeff).astype(np.complex64)
+                phase = np.exp(1j * 2.0 * np.pi * doppler_freq * abs_row)
 
-            block_bands.append(BandMeta(local_idx=local_idx, row=abs_row,
-                                        jnr_db=jnr_db))
+                # Add RFI ONLY to this tile's range samples (truncated at BLOCK_WIDTH)
+                rfi_matrix[abs_row, range_start:range_end] += (phase * range_coeff).astype(np.complex64)
 
-        bands_per_block.append(block_bands)
+                tile_bands.append(BandMeta(local_idx=local_idx, row=abs_row, jnr_db=jnr_db))
 
-    meta = RfiMeta(bands_per_block=bands_per_block)
+            # Store tile-specific metadata
+            tile_key = (pulse_idx, range_start)
+            tiles_dict[tile_key] = TileMeta(
+                pulse_block_idx=b,
+                range_tile_idx=range_tile_idx_counter,
+                bands=tile_bands
+            )
+
+        # Store first tile's config per block for backwards compatibility with labeling
+        first_tile_key = (pulse_idx, 0)
+        bands_per_block.append(tiles_dict[first_tile_key].bands)
+
+    meta = RfiMeta(tiles=tiles_dict, bands_per_block=bands_per_block)
     return rfi_matrix, meta
 
 
@@ -310,6 +542,8 @@ def divide_cpi_and_save(
     cpi_width=BLOCK_WIDTH,
     output_path=None,
     is_clean=False,
+    clutter_mode='none',
+    cnr_db=0.0,
 ):
     """
     Divide a complex-valued matrix into non-overlapping CPI tiles and save to HDF5.
@@ -380,34 +614,48 @@ def divide_cpi_and_save(
         f.attrs['max_bands']       = MAX_BANDS
         f.attrs['seed']            = seed
         f.attrs['is_clean']        = is_clean
+        f.attrs['clutter_mode']    = clutter_mode
+        f.attrs['cnr_db']          = cnr_db
 
         # --- CPI datasets ---------------------------------------------------
         for i in range(0, TOTAL_PULSES, cpi_height):
-            # For clean samples, use empty RFI metadata
-            if is_clean:
-                pulse_positions = []
-                jnr_db_list = []
-                knee = 0
-            else:
-                # Each tile's pulse band maps 1-to-1 to one injection block when
-                # cpi_height == BLOCK_HEIGHT (the standard configuration).
-                block_idx = i // BLOCK_HEIGHT
-                bands     = meta.bands_per_block[block_idx]
-
-                # Convert to 1-based pulse positions and extract JNR values
-                pulse_positions = [b.local_idx + 1 for b in bands]  # 1-based indexing
-                jnr_db_list = [b.jnr_db for b in bands]
-                knee = len(bands)  # Number of RFI pulses, 0 if no RFI
-
-            # Serialise to JSON with new format
-            bands_json = json.dumps({
-                'pulse_positions': pulse_positions,
-                'knee': knee,
-                'jnr_db_list': jnr_db_list,
-            })
-
             for j in range(0, RANGE_BINS, cpi_width):
                 cpi  = matrix[i:i + cpi_height, j:j + cpi_width]
+
+                # Get tile-specific RFI metadata (now each tile has unique config!)
+                if is_clean:
+                    pulse_positions = []
+                    jnr_db_list = []
+                    knee = 0
+                else:
+                    tile_key = (i, j)
+                    if tile_key in meta.tiles:
+                        # Use tile-specific metadata
+                        tile_meta = meta.tiles[tile_key]
+                        bands = tile_meta.bands
+
+                        # Convert to 1-based pulse positions and extract JNR values
+                        pulse_positions = [b.local_idx + 1 for b in bands]  # 1-based indexing
+                        jnr_db_list = [b.jnr_db for b in bands]
+
+                        # Count DISTINCT pulse positions for knee label
+                        # (multiple bands on same row still count as one eigenvalue)
+                        n_distinct = len(set(pulse_positions))
+                        knee = n_distinct
+                    else:
+                        # Fallback to block-level metadata (shouldn't happen with new code)
+                        block_idx = i // BLOCK_HEIGHT
+                        bands = meta.bands_per_block[block_idx]
+                        pulse_positions = [b.local_idx + 1 for b in bands]
+                        jnr_db_list = [b.jnr_db for b in bands]
+                        knee = len(set(pulse_positions))
+
+                # Serialize to JSON
+                bands_json = json.dumps({
+                    'pulse_positions': pulse_positions,
+                    'knee': knee,
+                    'jnr_db_list': jnr_db_list,
+                })
 
                 # Compute SCM: M * M^H / cpi_width
                 M = cpi
@@ -418,7 +666,7 @@ def divide_cpi_and_save(
                 eigvals = np.linalg.eigvalsh(SCM)
                 eigvals_sorted = np.sort(eigvals)[::-1]  # Largest to smallest
 
-                # Save CPI data
+                # Save CPI data with tile-specific metadata
                 dset = f.create_dataset(f"cpi_{i}_{j}", data=cpi)
                 dset.attrs['rfi_bands'] = bands_json
 
@@ -660,92 +908,217 @@ def plot_eigenvalue_profiles(h5_path, out_dir):
 
 def main():
     """
-    End-to-end data generation pipeline.
+    Multi-scenario data generation pipeline with clutter support.
 
-    Steps
-    -----
-    1. Generate 50 images total:
-       - 25 CLEAN images: 10 images per SNR level (6-10 dB)
-       - 25 CONTAMINATED images: 10 images per SNR level (6-10 dB)
-    2. For clean images:
-       - Generate 16 signal pulses per CPI block
-       - NO RFI injection
-    3. For contaminated images:
-       - Generate 16 signal pulses per CPI block
-       - Generate 1-6 random RFI pulses per CPI block
-       - Each RFI pulse has random JNR in range [10, 30] dB
-    4. Save clean as HDF5 under data/multi_band/clean/image_<seed>_snr_<snr>.h5
-    5. Save contaminated as HDF5 under data/multi_band/contaminated/image_<seed>_snr_<snr>.h5
-    6. Generate eigenvalue profile plots for both types.
+    NEW: Generates training data across multiple clutter scenarios:
+      - 33% no clutter (baseline synthetic)
+      - 33% urban clutter (CNR 10-25 dB, dominant scatterers)
+      - 33% forest clutter (CNR 5-15 dB, volume scattering)
 
-    All random generations (noise, signal, RFI placement, JNR) are uncorrelated.
+    For each scenario, generates clean + contaminated samples across SNR levels.
+
+    This creates diverse training data that matches real SAR phenomenology,
+    eliminating the distribution mismatch that caused 0% RFI detection on real data.
     """
-    base_dir = os.path.join(DATA_ROOT, 'multi_band')
-    clean_dir = os.path.join(base_dir, 'clean')
-    contaminated_dir = os.path.join(base_dir, 'contaminated')
+    # Scenario configuration
+    scenarios = [
+        {
+            'name': 'no_clutter',
+            'clutter_mode': 'none',
+            'fraction': 0.33,
+            'seed_offset': 0,
+            'description': 'Baseline (noise + signal only)',
+        },
+        {
+            'name': 'urban',
+            'clutter_mode': 'urban',
+            'fraction': 0.33,
+            'seed_offset': 10000,
+            'description': 'Urban clutter (CNR 10-25 dB, point scatterers)',
+        },
+        {
+            'name': 'forest',
+            'clutter_mode': 'forest',
+            'fraction': 0.33,
+            'seed_offset': 20000,
+            'description': 'Forest clutter (CNR 5-15 dB, volume scattering)',
+        },
+    ]
 
-    os.makedirs(clean_dir, exist_ok=True)
-    os.makedirs(contaminated_dir, exist_ok=True)
+    print("\n" + "="*80)
+    print("MULTI-SCENARIO DATA GENERATION WITH CLUTTER")
+    print("="*80)
+    print()
+    print("Clutter scenarios:")
+    for sc in scenarios:
+        print(f"  - {sc['name']:12s} ({sc['fraction']*100:4.0f}%): {sc['description']}")
+    print()
+    print(f"Per scenario:")
+    print(f"  - {N_IMAGES_PER_SNR} images per SNR level")
+    print(f"  - SNR levels: {SNR_LEVELS}")
+    print(f"  - Clean + Contaminated samples")
+    print()
+    print(f"RFI configuration:")
+    print(f"  - Bands per block: {MIN_BANDS}-{MAX_BANDS}")
+    print(f"  - JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB")
+    print(f"  - Per-tile generation (unique RFI per 250-sample tile)")
+    print()
 
-    print(f"\n[multi_band]  Generating training data")
-    print(f"  CLEAN images: {N_IMAGES_CLEAN}")
-    print(f"  CONTAMINATED images: {N_IMAGES_RFI}")
-    print(f"  SNR range: {SNR_RANGE_DB[0]}-{SNR_RANGE_DB[1]} dB  ({N_IMAGES_PER_SNR} images per level per type)")
-    print(f"  JNR range: SNR + {JNR_MIN_OFFSET_DB} dB to {JNR_MAX_DB} dB (dynamic per SNR level)  bands per block: {MIN_BANDS}-{MAX_BANDS}")
-    print(f"  Noise: {NOISE_DB} dB (fixed)")
+    total_images_clean = 0
+    total_images_rfi = 0
 
-    # Generate CLEAN samples (seeds 0-99)
-    print(f"\n[CLEAN SAMPLES] (seeds 0-99)")
-    seed = 0
-    for snr_db in SNR_LEVELS:
-        print(f"\n  Generating CLEAN SNR = {snr_db} dB:")
-        for img_idx in range(N_IMAGES_PER_SNR):
-            out_path = os.path.join(clean_dir, f"image_{seed}_snr_{snr_db}.h5")
+    for scenario in scenarios:
+        scenario_name = scenario['name']
+        clutter_mode = scenario['clutter_mode']
+        seed_offset = scenario['seed_offset']
 
-            clean_image = generate_clean_image(seed=seed, snr_db=snr_db)
+        print("="*80)
+        print(f"SCENARIO: {scenario_name.upper()} ({scenario['description']})")
+        print("="*80)
+        print()
 
-            divide_cpi_and_save(
-                matrix      = clean_image,
-                meta        = None,
-                seed        = seed,
-                snr_db      = snr_db,
-                output_path = out_path,
-                is_clean    = True,
-            )
+        # Create directories
+        base_dir = os.path.join(DATA_ROOT, 'multi_band_with_clutter', scenario_name)
+        clean_dir = os.path.join(base_dir, 'clean')
+        contaminated_dir = os.path.join(base_dir, 'contaminated')
 
-            print(f"    seed={seed:03d}  -> {os.path.basename(out_path)}")
-            plot_eigenvalue_profiles(h5_path=out_path, out_dir=clean_dir)
+        os.makedirs(clean_dir, exist_ok=True)
+        os.makedirs(contaminated_dir, exist_ok=True)
 
-            seed += 1
+        # Number of images for this scenario
+        n_images_per_type = max(1, int(N_IMAGES_PER_SNR * scenario['fraction']))
 
-    # Generate CONTAMINATED samples (seeds 100-199)
-    print(f"\n[CONTAMINATED SAMPLES] (seeds 100-199)")
-    seed = 100
-    for snr_db in SNR_LEVELS:
-        print(f"\n  Generating CONTAMINATED SNR = {snr_db} dB:")
-        for img_idx in range(N_IMAGES_PER_SNR):
-            out_path = os.path.join(contaminated_dir, f"image_{seed}_snr_{snr_db}.h5")
+        print(f"Generating {n_images_per_type} images per SNR level per type")
+        print(f"  Total: {n_images_per_type * len(SNR_LEVELS) * 2} images for this scenario")
+        print()
 
-            rfi_image, meta = generate_rfi_image(seed=seed, snr_db=snr_db)
+        # Generate CLEAN samples
+        print(f"[{scenario_name.upper()} CLEAN]")
+        seed = seed_offset
+        for snr_db in SNR_LEVELS:
+            print(f"\n  SNR={snr_db} dB:")
+            for img_idx in range(n_images_per_type):
+                out_path = os.path.join(clean_dir, f"image_{seed}_snr_{snr_db}.h5")
 
-            divide_cpi_and_save(
-                matrix      = rfi_image,
-                meta        = meta,
-                seed        = seed,
-                snr_db      = snr_db,
-                output_path = out_path,
-                is_clean    = False,
-            )
+                # Generate image with clutter but no RFI
+                clean_image, _, cnr_db = generate_rfi_image(
+                    seed=seed,
+                    snr_db=snr_db,
+                    clutter_mode=clutter_mode,
+                    cnr_db=None  # Draw randomly based on mode
+                )
 
-            print(f"    seed={seed:03d}  -> {os.path.basename(out_path)}")
-            plot_eigenvalue_profiles(h5_path=out_path, out_dir=contaminated_dir)
+                # For clean samples, use the clean base (before adding non-existent RFI)
+                # We need to regenerate without the RFI call
+                if clutter_mode == 'none':
+                    clean_image = generate_clean_image(seed=seed, snr_db=snr_db)
+                    cnr_db = 0.0
+                else:
+                    # Regenerate base with clutter
+                    base_image = generate_clean_image(seed=seed, snr_db=snr_db)
+                    noise_power_linear = 10.0 ** (NOISE_DB / 10.0)
 
-            seed += 1
+                    # Generate clutter per tile
+                    clutter_matrix = np.zeros((TOTAL_PULSES, RANGE_BINS), dtype=np.complex64)
+                    for b in range(N_BLOCKS):
+                        block_start = b * BLOCK_HEIGHT
+                        for range_tile_idx in range(0, RANGE_BINS // BLOCK_WIDTH):
+                            range_start = range_tile_idx * BLOCK_WIDTH
+                            range_end = min(range_start + BLOCK_WIDTH, RANGE_BINS)
+                            tile_width = range_end - range_start
+                            clutter_seed = seed + CLUTTER_SEED + b * 1000 + range_tile_idx
 
-    print("\nDone.")
-    print(f"\nTotal samples generated:")
-    print(f"  Clean: {N_IMAGES_CLEAN} in {clean_dir}")
-    print(f"  Contaminated: {N_IMAGES_RFI} in {contaminated_dir}")
+                            clutter_tile = generate_clutter_per_tile(
+                                BLOCK_HEIGHT, tile_width, clutter_mode,
+                                cnr_db, noise_power_linear, clutter_seed
+                            )
+                            clutter_matrix[block_start:block_start+BLOCK_HEIGHT, range_start:range_end] = clutter_tile
+
+                    clean_image = (base_image + clutter_matrix).astype(np.complex64)
+
+                divide_cpi_and_save(
+                    matrix=clean_image,
+                    meta=None,
+                    seed=seed,
+                    snr_db=snr_db,
+                    output_path=out_path,
+                    is_clean=True,
+                    clutter_mode=clutter_mode,
+                    cnr_db=cnr_db,
+                )
+
+                cnr_str = f" CNR={cnr_db:.1f}dB" if clutter_mode != 'none' else ""
+                print(f"    seed={seed:05d}{cnr_str} -> {os.path.basename(out_path)}")
+
+                # Plot first few images only to save time
+                if img_idx < 2:
+                    plot_eigenvalue_profiles(h5_path=out_path, out_dir=clean_dir)
+
+                seed += 1
+                total_images_clean += 1
+
+        # Generate CONTAMINATED samples (with RFI + clutter)
+        print(f"\n[{scenario_name.upper()} CONTAMINATED]")
+        seed = seed_offset + 100000  # Large offset to separate clean/contaminated seeds
+        for snr_db in SNR_LEVELS:
+            print(f"\n  SNR={snr_db} dB:")
+            for img_idx in range(n_images_per_type):
+                out_path = os.path.join(contaminated_dir, f"image_{seed}_snr_{snr_db}.h5")
+
+                # Generate image with both clutter AND RFI
+                rfi_image, meta, cnr_db = generate_rfi_image(
+                    seed=seed,
+                    snr_db=snr_db,
+                    clutter_mode=clutter_mode,
+                    cnr_db=None
+                )
+
+                divide_cpi_and_save(
+                    matrix=rfi_image,
+                    meta=meta,
+                    seed=seed,
+                    snr_db=snr_db,
+                    output_path=out_path,
+                    is_clean=False,
+                    clutter_mode=clutter_mode,
+                    cnr_db=cnr_db,
+                )
+
+                cnr_str = f" CNR={cnr_db:.1f}dB" if clutter_mode != 'none' else ""
+                print(f"    seed={seed:05d}{cnr_str} -> {os.path.basename(out_path)}")
+
+                # Plot first few images only
+                if img_idx < 2:
+                    plot_eigenvalue_profiles(h5_path=out_path, out_dir=contaminated_dir)
+
+                seed += 1
+                total_images_rfi += 1
+
+        print()
+
+    # Final summary
+    print("="*80)
+    print("DATA GENERATION COMPLETE")
+    print("="*80)
+    print()
+    print(f"Total images generated:")
+    print(f"  Clean: {total_images_clean}")
+    print(f"  Contaminated: {total_images_rfi}")
+    print(f"  Total: {total_images_clean + total_images_rfi}")
+    print()
+    print(f"Output directory: data/multi_band_with_clutter/")
+    print()
+    print("Scenario breakdown:")
+    for scenario in scenarios:
+        n_per_type = max(1, int(N_IMAGES_PER_SNR * scenario['fraction']))
+        n_total = n_per_type * len(SNR_LEVELS) * 2
+        print(f"  {scenario['name']:12s}: {n_total:4d} images ({scenario['fraction']*100:4.0f}%)")
+    print()
+    print("Next steps:")
+    print("  1. Update train_db.py to load from multi_band_with_clutter/")
+    print("  2. Train model: python ml/train_db.py")
+    print("  3. Test on real NISAR to verify improved generalization")
+    print()
 
 
 if __name__ == '__main__':
