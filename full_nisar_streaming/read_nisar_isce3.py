@@ -131,6 +131,21 @@ def get_dataset_info(raw: Raw):
     print("NISAR Dataset Information")
     print("="*70)
 
+    # Also check raw HDF5 for comparison
+    import h5py
+    h5_shapes = {}
+    try:
+        with h5py.File(raw.filename, 'r') as f:
+            for freq in ['A', 'B']:
+                for pol in ['HH', 'HV', 'VH', 'VV']:
+                    for tx in ['txH', 'txV']:
+                        for rx in ['rxH', 'rxV']:
+                            path = f'/science/LSAR/RRSD/swaths/frequency{freq}/{tx}/{rx}/{pol}'
+                            if path in f:
+                                h5_shapes[f'{freq}-{pol}'] = f[path].shape
+    except:
+        pass
+
     for freq, pol_list in raw.polarizations.items():
         info['frequencies'][freq] = {
             'polarizations': pol_list,
@@ -160,7 +175,12 @@ def get_dataset_info(raw: Raw):
             }
 
             print(f"\n  {pol}:")
-            print(f"    Shape: {shape} (pulses × range samples)")
+            print(f"    ISCE3 Raw shape: {shape} (pulses × range samples)")
+            if f'{freq}-{pol}' in h5_shapes:
+                h5_shape = h5_shapes[f'{freq}-{pol}']
+                print(f"    Raw HDF5 shape: {h5_shape}")
+                if h5_shape != shape:
+                    print(f"    ⚠️  WARNING: ISCE3 view differs from raw HDF5!")
             print(f"    Dtype: {dtype}")
             print(f"    Center Frequency: {fc/1e9:.3f} GHz")
             print(f"    Sample Rate: {fs/1e6:.3f} MHz")
