@@ -31,7 +31,6 @@ from pathlib import Path
 from datetime import datetime
 import time
 from nisar.products.readers.Raw import Raw
-from isce3.signal.compute_evd_cpi import compute_evd_tb, slice_gen
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add project root to path for model imports
@@ -93,11 +92,11 @@ Examples:
     parser.add_argument('--n-workers', type=int, default=4,
                         help='Number of parallel workers (default: 4)')
 
-    # EVD parameters
+    # EVD parameters (kept for compatibility but not used - we compute eigenvalues manually)
     parser.add_argument('--rx-dynamic-range-db', type=float, default=50.0,
-                        help='Receiver dynamic range in dB (default: 50.0)')
+                        help='Receiver dynamic range in dB (default: 50.0, unused)')
     parser.add_argument('--min-ev-valid-idx', type=int, default=10,
-                        help='Minimum eigenvalue valid index (default: 10)')
+                        help='Minimum eigenvalue valid index (default: 10, unused)')
 
     # Model prediction parameters
     parser.add_argument('--model', type=str, default=None,
@@ -438,49 +437,33 @@ def process_polarization_streaming(
     if raw_data.size == 0:
         raise ValueError(f"No data read! Check range limits. Dataset shape: {dataset.shape}, requested: [{p_start}:{p_start+tb_size}, {r_start}:{r_end}]")
 
-    # Compute EVD
-    print(f"  Computing EVD for {num_cpi} CPIs...")
+    # Compute EVD manually (only use ISCE3 for data reading/decoding)
+    print(f"  Computing eigenvalues for {num_cpi} CPIs...")
     evd_start = time.time()
 
-    # Check if we can use ISCE3's compute_evd_tb or need manual computation
-    n_range_samples = raw_data.shape[1]
-    use_manual_evd = n_range_samples < 32  # ISCE3 requires at least 32 samples
+    eig_val_sort = np.zeros((num_cpi, cpi_len), dtype=np.float32)
+    diag_power = np.zeros((num_cpi, cpi_len), dtype=np.float32)
+    diag_valid = np.ones((num_cpi, cpi_len), dtype=bool)
+    tb_is_valid = True
 
-    if use_manual_evd:
-        print(f"  Warning: Using manual EVD computation (range samples: {n_range_samples} < 32)")
-        # Manual EVD computation
-        eig_val_sort = np.zeros((num_cpi, cpi_len), dtype=np.float32)
-        diag_power = np.zeros((num_cpi, cpi_len), dtype=np.float32)
-        diag_valid = np.ones((num_cpi, cpi_len), dtype=bool)
-        tb_is_valid = True
+    for cpi_idx in range(num_cpi):
+        cpi_start = cpi_idx * cpi_len
+        cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :]
 
-        for cpi_idx in range(num_cpi):
-            cpi_start = cpi_idx * cpi_len
-            cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :]
+        # Compute SCM
+        M, K = cpi_data.shape
+        SCM = (cpi_data @ cpi_data.conj().T) / K
 
-            # Compute SCM
-            M, K = cpi_data.shape
-            SCM = (cpi_data @ cpi_data.conj().T) / K
+        # Eigenvalues (descending order)
+        eigvals = np.linalg.eigvalsh(SCM)
+        eig_val_sort[cpi_idx, :] = np.sort(eigvals)[::-1]
 
-            # Eigenvalues
-            eigvals = np.linalg.eigvalsh(SCM)
-            eig_val_sort[cpi_idx, :] = np.sort(eigvals)[::-1]  # Descending
-
-            # Diagonal power
-            diag_power[cpi_idx, :] = np.abs(np.diag(SCM))
-    else:
-        # Use ISCE3's optimized EVD
-        eig_val_sort, eig_vec_sort, diag_power, diag_valid, tb_is_valid = compute_evd_tb(
-            raw_data,
-            cpi_len=cpi_len,
-            mask_valid=None,  # No mask for now
-            min_ev_valid_idx=min_ev_valid_idx,
-            rx_dynamic_range_db=rx_dynamic_range_db,
-        )
+        # Diagonal power
+        diag_power[cpi_idx, :] = np.abs(np.diag(SCM))
 
     evd_time = time.time() - evd_start
-    print(f"  EVD computed in {evd_time:.2f}s")
-    print(f"  TB valid: {tb_is_valid}")
+    print(f"  Eigenvalues computed in {evd_time:.2f}s")
+    print(f"  Valid CPIs: {num_cpi}")
 
     # Model predictions
     predictions = None
