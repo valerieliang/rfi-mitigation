@@ -62,35 +62,47 @@ def detect_polarization(dataset_path=None, polarization_arg=None):
 class H5DataAccessor:
     """
     Provides array-like access to NISAR HDF5 data with on-the-fly BFPQLUT decoding.
+
+    OPTIMIZATION: Keeps HDF5 file handle open to avoid repeated open/close overhead.
     """
     def __init__(self, h5_path, dataset_path):
         self.h5_path = h5_path
         self.dataset_path = dataset_path
 
-        with h5py.File(h5_path, 'r') as f:
-            dataset = f[dataset_path]
-            self.shape = dataset.shape
-            self.dtype = np.complex64
+        # Keep file handle open for performance
+        self.h5_file = h5py.File(h5_path, 'r')
+        self.dataset = self.h5_file[dataset_path]
+        self.shape = self.dataset.shape
+        self.dtype = np.complex64
 
-            # Extract BFPQLUT
-            parent_path = '/'.join(dataset_path.split('/')[:-1])
-            bfpqlut_path = f"{parent_path}/BFPQLUT"
+        # Extract BFPQLUT
+        parent_path = '/'.join(dataset_path.split('/')[:-1])
+        bfpqlut_path = f"{parent_path}/BFPQLUT"
 
-            if bfpqlut_path not in f:
-                raise ValueError(f"BFPQLUT not found at {bfpqlut_path}")
+        if bfpqlut_path not in self.h5_file:
+            raise ValueError(f"BFPQLUT not found at {bfpqlut_path}")
 
-            self.bfpqlut = f[bfpqlut_path][:]
+        self.bfpqlut = self.h5_file[bfpqlut_path][:]
 
         print(f"  Loaded BFPQLUT: {len(self.bfpqlut)} entries")
+        print(f"  HDF5 file kept open for streaming access")
 
     def __getitem__(self, key):
-        """Access data with on-the-fly decoding."""
-        with h5py.File(self.h5_path, 'r') as f:
-            dataset = f[self.dataset_path]
-            quantized = dataset[key]
-            real_decoded = self.bfpqlut[quantized['r']]
-            imag_decoded = self.bfpqlut[quantized['i']]
-            return (real_decoded + 1j * imag_decoded).astype(np.complex64)
+        """Access data with on-the-fly decoding (no file open/close overhead)."""
+        quantized = self.dataset[key]
+        real_decoded = self.bfpqlut[quantized['r']]
+        imag_decoded = self.bfpqlut[quantized['i']]
+        return (real_decoded + 1j * imag_decoded).astype(np.complex64)
+
+    def close(self):
+        """Close the HDF5 file handle."""
+        if hasattr(self, 'h5_file') and self.h5_file is not None:
+            self.h5_file.close()
+            self.h5_file = None
+
+    def __del__(self):
+        """Ensure file is closed on deletion."""
+        self.close()
 
 
 def compute_scm_and_eigenvalues(cpi):
@@ -123,17 +135,19 @@ def compute_scm_and_eigenvalues(cpi):
     return SCM, eigvals_sorted, eigvals_normalized, max_eigval_db
 
 
-def extract_model_features(cpi, eigvals_normalized):
+def extract_model_features(cpi, eigvals_normalized, n_global_features=None):
     """
     Extract features for model prediction (same as train.py).
 
     Args:
         cpi (np.ndarray): Complex CPI array (M, K)
         eigvals_normalized (np.ndarray): Normalized eigenvalues (M,)
+        n_global_features (int, optional): Number of global features expected by model.
+            If None, returns all 5 features. If 2, returns legacy 2-feature version.
 
     Returns:
         eigen (np.ndarray): Shape (M, 2) - [eigenvalues, slopes]
-        global_ (np.ndarray): Shape (5,) - global features
+        global_ (np.ndarray): Shape (n_global_features,) - global features
     """
     M, K = cpi.shape
     SCM = (cpi @ cpi.conj().T) / K
@@ -158,15 +172,21 @@ def extract_model_features(cpi, eigvals_normalized):
     eps = 1e-6
     f_factor = sigma_max / (sigma_min + eps)
 
-    global_ = np.array(
-        [cond_number, sigma_min, sigma_max, mu_min, f_factor],
-        dtype=np.float32
-    )
+    # Adapt to model's expected number of global features
+    if n_global_features == 2:
+        # Legacy 2-feature model: just condition number and sigma_min
+        global_ = np.array([cond_number, sigma_min], dtype=np.float32)
+    else:
+        # Full 5-feature version
+        global_ = np.array(
+            [cond_number, sigma_min, sigma_max, mu_min, f_factor],
+            dtype=np.float32
+        )
 
     return eigen, global_
 
 
-def process_cpi_tile(cpi, pulse_idx, range_idx, model=None):
+def process_cpi_tile(cpi, pulse_idx, range_idx, model=None, n_global_features=None):
     """
     Process a single CPI tile and compute all metrics.
 
@@ -175,6 +195,7 @@ def process_cpi_tile(cpi, pulse_idx, range_idx, model=None):
         pulse_idx (int): Starting pulse index
         range_idx (int): Starting range index
         model: Optional trained Keras model
+        n_global_features (int, optional): Number of global features expected by model
 
     Returns:
         dict: CPI metrics including eigenvalues, SCM, predictions, etc.
@@ -199,7 +220,7 @@ def process_cpi_tile(cpi, pulse_idx, range_idx, model=None):
 
     # Model prediction if available
     if model is not None:
-        eigen, global_ = extract_model_features(cpi, eigvals_normalized)
+        eigen, global_ = extract_model_features(cpi, eigvals_normalized, n_global_features)
 
         # Reshape for batch prediction
         eigen_batch = eigen[np.newaxis, ...]
@@ -224,9 +245,12 @@ def process_cpi_tile(cpi, pulse_idx, range_idx, model=None):
     return result
 
 
-def process_row_of_cpis(data, pulse_idx, range_indices, cpi_height, cpi_width, model):
+def process_row_of_cpis(data, pulse_idx, range_indices, cpi_height, cpi_width, model, n_global_features=None):
     """
     Process a full row of CPI tiles in parallel.
+
+    OPTIMIZATION: Decode entire row at once, then slice into CPIs to minimize
+    HDF5 access overhead and BFPQLUT lookup operations.
 
     Args:
         data: H5DataAccessor for NISAR data
@@ -235,18 +259,22 @@ def process_row_of_cpis(data, pulse_idx, range_indices, cpi_height, cpi_width, m
         cpi_height (int): CPI height
         cpi_width (int): CPI width
         model: Optional trained model
+        n_global_features (int, optional): Number of global features expected by model
 
     Returns:
         list: List of (range_idx, result) tuples
     """
+    # OPTIMIZATION: Decode entire row at once (single HDF5 read + decode)
+    row_data = data[pulse_idx:pulse_idx+cpi_height, :]
+
     results = []
 
     for range_idx in range_indices:
-        # Extract CPI tile
-        cpi = data[pulse_idx:pulse_idx+cpi_height, range_idx:range_idx+cpi_width]
+        # Extract CPI from already-decoded row data (no additional I/O)
+        cpi = row_data[:, range_idx:range_idx+cpi_width]
 
         # Process tile
-        result = process_cpi_tile(cpi, pulse_idx, range_idx, model=model)
+        result = process_cpi_tile(cpi, pulse_idx, range_idx, model=model, n_global_features=n_global_features)
         results.append((range_idx, result))
 
     return pulse_idx, results
@@ -296,6 +324,26 @@ def stream_process_nisar(
     if model is not None:
         print(f"Model: Loaded for predictions")
     print(f"Output: {output_h5_path if not log_only else 'Log only (no save)'}")
+
+    # Detect model's expected global feature count
+    n_global_features = None
+    if model is not None:
+        try:
+            # Get global_input shape from model
+            global_input = model.get_layer('global_input')
+            expected_shape = global_input.output_shape
+            n_global_features = expected_shape[-1]  # Last dimension is feature count
+            print(f"  Detected model expects {n_global_features} global features")
+        except:
+            # Try alternative method: check input layers
+            try:
+                for layer in model.inputs:
+                    if 'global' in layer.name.lower():
+                        n_global_features = layer.shape[-1]
+                        print(f"  Detected model expects {n_global_features} global features (from input '{layer.name}')")
+                        break
+            except:
+                print(f"  Warning: Could not detect model global feature count, using default (5)")
 
     # Load data accessor
     data = H5DataAccessor(input_path, dataset_path)
@@ -406,7 +454,8 @@ def stream_process_nisar(
                     range_indices,
                     cpi_height,
                     cpi_width,
-                    model
+                    model,
+                    n_global_features
                 ): pulse_idx
                 for pulse_idx in pulse_indices
             }
@@ -549,6 +598,8 @@ def stream_process_nisar(
             print(f"Metadata saved to: {metadata_path}")
 
     finally:
+        # Clean up resources
+        data.close()
         if output_file is not None:
             output_file.close()
 

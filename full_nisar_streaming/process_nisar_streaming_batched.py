@@ -46,9 +46,12 @@ from process_nisar_streaming import (
 )
 
 
-def process_row_cpis_batched(data, pulse_idx, range_indices, cpi_height, cpi_width):
+def process_row_cpis_batched(data, pulse_idx, range_indices, cpi_height, cpi_width, n_global_features=None):
     """
     Extract CPIs from a row and compute features (no model prediction yet).
+
+    OPTIMIZATION: Decode entire row at once, then slice into CPIs to minimize
+    HDF5 access overhead and BFPQLUT lookup operations.
 
     Args:
         data: H5DataAccessor
@@ -56,22 +59,26 @@ def process_row_cpis_batched(data, pulse_idx, range_indices, cpi_height, cpi_wid
         range_indices (list): List of range indices
         cpi_height (int): CPI height
         cpi_width (int): CPI width
+        n_global_features (int, optional): Number of global features expected by model
 
     Returns:
         list: List of (pulse_idx, range_idx, eigen, global_, scm_results) tuples
     """
+    # OPTIMIZATION: Decode entire row at once (single HDF5 read + decode)
+    row_data = data[pulse_idx:pulse_idx+cpi_height, :]
+
     results = []
 
     for range_idx in range_indices:
-        # Extract CPI
-        cpi = data[pulse_idx:pulse_idx+cpi_height, range_idx:range_idx+cpi_width]
+        # Extract CPI from already-decoded row data (no additional I/O)
+        cpi = row_data[:, range_idx:range_idx+cpi_width]
 
         # Compute SCM and eigenvalues
         SCM, eigvals_sorted, eigvals_normalized, max_eigval_db = compute_scm_and_eigenvalues(cpi)
         diagonal = np.diag(SCM).real
 
-        # Extract model features
-        eigen, global_ = extract_model_features(cpi, eigvals_normalized)
+        # Extract model features with correct number of global features
+        eigen, global_ = extract_model_features(cpi, eigvals_normalized, n_global_features)
 
         scm_results = {
             'eigenvalues': eigvals_sorted,
@@ -184,6 +191,26 @@ def stream_process_nisar_batched(
     print(f"Workers: {n_workers}")
     print(f"Output: {output_h5_path if not log_only else 'Log only (no save)'}")
 
+    # Detect model's expected global feature count
+    n_global_features = None
+    if model is not None:
+        try:
+            # Get global_input shape from model
+            global_input = model.get_layer('global_input')
+            expected_shape = global_input.output_shape
+            n_global_features = expected_shape[-1]  # Last dimension is feature count
+            print(f"  Detected model expects {n_global_features} global features")
+        except:
+            # Try alternative method: check input layers
+            try:
+                for layer in model.inputs:
+                    if 'global' in layer.name.lower():
+                        n_global_features = layer.shape[-1]
+                        print(f"  Detected model expects {n_global_features} global features (from input '{layer.name}')")
+                        break
+            except:
+                print(f"  Warning: Could not detect model global feature count, using default (5)")
+
     # Load data accessor
     data = H5DataAccessor(input_path, dataset_path)
     total_pulses = data.shape[0]
@@ -294,7 +321,8 @@ def stream_process_nisar_batched(
                     pulse_idx,
                     range_indices,
                     cpi_height,
-                    cpi_width
+                    cpi_width,
+                    n_global_features
                 ): pulse_idx
                 for pulse_idx in pulse_indices
             }
@@ -473,6 +501,8 @@ def stream_process_nisar_batched(
             print(f"Metadata saved to: {metadata_path}")
 
     finally:
+        # Clean up resources
+        data.close()
         if output_file is not None:
             output_file.close()
 
