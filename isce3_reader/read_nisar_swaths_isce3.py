@@ -643,6 +643,14 @@ def process_polarization_streaming(
             meta_grp.attrs['sample_rate_hz'] = fs
             meta_grp.attrs['bandwidth_hz'] = bandwidth
 
+            # Save subswath mask if it was used
+            if use_subswath_mask and subswath_mask is not None:
+                mask_grp = f.create_group('subswath_mask')
+                mask_grp.create_dataset('mask', data=subswath_mask, compression='gzip')
+                mask_grp.attrs['description'] = 'Boolean mask indicating valid data within subswath boundaries'
+                mask_grp.attrs['shape'] = subswath_mask.shape
+                mask_grp.attrs['valid_fraction'] = float(subswath_mask.sum() / subswath_mask.size)
+
             # Save predictions if available
             if save_predictions and predictions is not None:
                 pred_grp = f.create_group('predictions')
