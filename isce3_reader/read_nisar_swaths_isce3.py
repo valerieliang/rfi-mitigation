@@ -89,6 +89,8 @@ Examples:
                         help='Save decoded raw data to HDF5 (can be large!)')
     parser.add_argument('--save-eigenvalues', action='store_true',
                         help='Save eigenvalues from EVD processing')
+    parser.add_argument('--use-subswath-mask', action='store_true',
+                        help='Mask out gaps between subswaths during processing')
     parser.add_argument('--n-workers', type=int, default=4,
                         help='Number of parallel workers (default: 4)')
 
@@ -330,6 +332,58 @@ def read_raw_data_batch(
     return data
 
 
+def get_subswath_mask(
+    raw: Raw,
+    freq: str,
+    pol: str,
+    pulse_indices: np.ndarray,
+    num_range_samples: int,
+) -> np.ndarray:
+    """
+    Generate a boolean mask indicating valid data regions based on subswath boundaries.
+
+    NISAR data has gaps between subswaths. This function uses ISCE3's getSubSwaths()
+    to identify valid data regions and creates a mask.
+
+    Parameters
+    ----------
+    raw : Raw
+        ISCE3 Raw object
+    freq : str
+        Frequency ('A' or 'B')
+    pol : str
+        Polarization ('HH', 'HV', 'VH', 'VV')
+    pulse_indices : np.ndarray
+        Array of pulse indices to generate mask for
+    num_range_samples : int
+        Number of range samples (width of mask)
+
+    Returns
+    -------
+    mask : np.ndarray
+        Boolean mask of shape (len(pulse_indices), num_range_samples)
+        True indicates valid data within subswath boundaries
+    """
+    # Get transmit polarization from first character (e.g., 'H' from 'HH')
+    tx_pol = pol[0]
+
+    # Get subswath boundaries: shape (n_subswaths, n_total_pulses, 2)
+    # Last dimension contains [start_range, end_range] for each pulse
+    subswaths = raw.getSubSwaths(freq, tx_pol)
+
+    # Initialize mask
+    num_pulses = len(pulse_indices)
+    mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
+
+    # For each pulse, mark valid regions from all subswaths
+    for imask, ipulse in enumerate(pulse_indices):
+        for subswath in subswaths:
+            start, end = subswath[ipulse]
+            mask[imask, start:end] = True
+
+    return mask
+
+
 def process_polarization_streaming(
     raw: Raw,
     freq: str,
@@ -346,6 +400,7 @@ def process_polarization_streaming(
     model=None,
     n_global_features: int = 2,
     save_predictions: bool = False,
+    use_subswath_mask: bool = False,
 ):
     """
     Process a single polarization in streaming mode with EVD computation and model predictions.
@@ -378,6 +433,9 @@ def process_polarization_streaming(
         Number of global features expected by model
     save_predictions : bool
         Whether to save predictions
+    use_subswath_mask : bool
+        Whether to mask out gaps between subswaths (default: False)
+        When True, only processes data within valid subswath boundaries
 
     Returns
     -------
@@ -427,20 +485,6 @@ def process_polarization_streaming(
         pulse_slice=slice(p_start, p_start + tb_size),
         range_slice=slice(r_start, r_end)
     )
-    az_start_global = az_slice.start + pulse_start
-    az_stop_global  = az_slice.stop + pulse_start
-    
-    az_indices = np.arange(az_start_global, az_stop_global)
-    tx_pol = pols[0]
-    swaths = raw.getSubSwaths(freq, tx_pol)
-    swaths = swaths[:, pulse_idx, :]
-    
-    subswath_az_blk = read_subswath(
-            raw,
-            freq,
-            pols,
-            az_indices
-        )
 
     read_time = time.time() - read_start
     data_gb = raw_data.nbytes / 1e9
@@ -450,6 +494,20 @@ def process_polarization_streaming(
     # Verify data was read
     if raw_data.size == 0:
         raise ValueError(f"No data read! Check range limits. Dataset shape: {dataset.shape}, requested: [{p_start}:{p_start+tb_size}, {r_start}:{r_end}]")
+
+    # Get subswath mask if requested
+    subswath_mask = None
+    if use_subswath_mask:
+        print(f"  Generating subswath mask...")
+        mask_start = time.time()
+        pulse_indices = np.arange(p_start, p_start + tb_size)
+        subswath_mask = get_subswath_mask(raw, freq, pol, pulse_indices, n_range)
+        mask_time = time.time() - mask_start
+
+        # Calculate valid data percentage
+        valid_pct = 100 * subswath_mask.sum() / subswath_mask.size
+        print(f"  Subswath mask generated in {mask_time:.2f}s")
+        print(f"  Valid data within subswaths: {valid_pct:.1f}%")
 
     # Compute EVD manually (only use ISCE3 for data reading/decoding)
     print(f"  Computing eigenvalues for {num_cpi} CPIs...")
@@ -463,6 +521,12 @@ def process_polarization_streaming(
     for cpi_idx in range(num_cpi):
         cpi_start = cpi_idx * cpi_len
         cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :]
+
+        # Apply subswath mask if requested
+        if use_subswath_mask and subswath_mask is not None:
+            cpi_mask = subswath_mask[cpi_start:cpi_start + cpi_len, :]
+            # Zero out data outside valid subswath regions
+            cpi_data = cpi_data * cpi_mask
 
         # Compute SCM
         M, K = cpi_data.shape
@@ -816,6 +880,7 @@ def main():
                     model=model,
                     n_global_features=n_global_features,
                     save_predictions=args.save_predictions,
+                    use_subswath_mask=args.use_subswath_mask,
                 )
             else:
                 # Full read mode
