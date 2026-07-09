@@ -79,6 +79,11 @@ def parse_args():
                          help="Max allowed dB drop between any adjacent eigenvalue pair for a tile to be clean")
     parser.add_argument("--max-spread-db", type=float, default=12.0,
                          help="Max allowed total dB spread (max minus min eigenvalue) for a tile to be clean")
+    parser.add_argument("--step-search-depth", type=int, default=None,
+                         help="Restrict the max-step and spread checks to the top N eigenvalue "
+                              "indices, where a real RFI component would appear. Default: half of "
+                              "cpi-len. Set to cpi-len - 1 to check the full profile (not recommended "
+                              "at typical range-tile sample sizes, see docstring)")
 
     # Spatial consistency filter (along pulse/azimuth axis, per range tile column)
     parser.add_argument("--consistency-window", type=int, default=5,
@@ -190,36 +195,62 @@ def eigenvalues_to_db(eigvals, mode="top_anchored", eps=1e-12):
     return db.astype(np.float32)
 
 
-def classify_clean_tiles(eigvals_db, max_first_step_db, max_any_step_db, max_spread_db):
+def classify_clean_tiles(eigvals_db, max_first_step_db, max_any_step_db, max_spread_db,
+                          step_search_depth=None):
     """
     Conservative per-tile clean classification.
 
     A tile is marked clean only if:
       1. The first eigenvalue step (largest-to-second-largest) is below
          max_first_step_db, i.e. there is no dominant component.
-      2. No step anywhere in the profile exceeds max_any_step_db, i.e. no
-         staircase break further down the profile either.
-      3. The total spread (max minus min eigenvalue) is below
-         max_spread_db, i.e. the whole profile is a modest, gentle decline.
+      2. No step within the top step_search_depth indices exceeds
+         max_any_step_db, i.e. no staircase break among the eigenvalues
+         where a real RFI component could plausibly sit.
+      3. The spread from eigenvalue 1 down to step_search_depth is below
+         max_spread_db.
+
+    step_search_depth restricts checks 2 and 3 to the upper part of the
+    sorted spectrum. RFI eigenvalues are by construction the dominant ones
+    (ST-EVD assumes RFI power exceeds signal power), so a genuine additional
+    RFI component always appears near the top of the profile, never buried
+    deep in the tail. The smallest eigenvalues sit near the noise floor and
+    have real sample-covariance estimation variance, especially at modest
+    K/M ratios (few hundred range samples over a CPI length of order 10),
+    so evaluating the full profile depth produces false rejections from
+    tail noise rather than real contamination. Default is half of cpi_len.
+
+    Full-profile diagnostics are still returned for comparison/tuning even
+    when step_search_depth restricts the actual decision.
 
     Steps are differences of dB values and are therefore invariant to the
     db_mode anchoring convention used for eigvals_db.
     """
+    cpi_len = eigvals_db.shape[-1]
+    if step_search_depth is None:
+        step_search_depth = max(cpi_len // 2, 1)
+    step_search_depth = int(min(step_search_depth, cpi_len - 1))
+
     steps = -np.diff(eigvals_db, axis=-1)  # positive dB drop per index step
     first_step = steps[..., 0]
-    max_step = np.max(steps, axis=-1)
-    spread = eigvals_db[..., 0] - eigvals_db[..., -1]
+
+    max_step_full = np.max(steps, axis=-1)
+    max_step_depth = np.max(steps[..., :step_search_depth], axis=-1)
+
+    spread_full = eigvals_db[..., 0] - eigvals_db[..., -1]
+    spread_depth = eigvals_db[..., 0] - eigvals_db[..., step_search_depth]
 
     is_clean = (
         (first_step <= max_first_step_db)
-        & (max_step <= max_any_step_db)
-        & (spread <= max_spread_db)
+        & (max_step_depth <= max_any_step_db)
+        & (spread_depth <= max_spread_db)
     )
 
     diagnostics = {
         "first_step_db": first_step.astype(np.float32),
-        "max_step_db": max_step.astype(np.float32),
-        "spread_db": spread.astype(np.float32),
+        "max_step_db": max_step_full.astype(np.float32),
+        "max_step_depth_db": max_step_depth.astype(np.float32),
+        "spread_db": spread_full.astype(np.float32),
+        "spread_depth_db": spread_depth.astype(np.float32),
     }
 
     return is_clean, diagnostics
@@ -384,11 +415,14 @@ def main():
     eigvals_db = eigenvalues_to_db(eigvals, mode=args.db_mode)
 
     print("Applying conservative clean-tile heuristic...")
+    resolved_depth = args.step_search_depth if args.step_search_depth is not None else max(args.cpi_len // 2, 1)
+    print("  Step/spread search depth: top %d of %d eigenvalue indices" % (resolved_depth, args.cpi_len))
     is_clean_raw, diagnostics = classify_clean_tiles(
         eigvals_db,
         max_first_step_db=args.max_first_step_db,
         max_any_step_db=args.max_any_step_db,
         max_spread_db=args.max_spread_db,
+        step_search_depth=args.step_search_depth,
     )
 
     # Gap/edge tiles are never real signal, so they are forced non-clean and
@@ -403,10 +437,10 @@ def main():
              is_clean_raw.size - total_valid_tiles))
 
     print("  Diagnostic percentiles over valid tiles (10th / 50th / 90th):")
-    for key in ("first_step_db", "max_step_db", "spread_db"):
+    for key in ("first_step_db", "max_step_db", "max_step_depth_db", "spread_db", "spread_depth_db"):
         vals = diagnostics[key][valid_2d]
         p10, p50, p90 = np.percentile(vals, [10, 50, 90])
-        print("    %-14s %.3f / %.3f / %.3f dB" % (key, p10, p50, p90))
+        print("    %-18s %.3f / %.3f / %.3f dB" % (key, p10, p50, p90))
 
     is_clean_consistent = apply_spatial_consistency(
         is_clean_raw,
@@ -475,6 +509,7 @@ def main():
         meta_grp.attrs["max_first_step_db"] = args.max_first_step_db
         meta_grp.attrs["max_any_step_db"] = args.max_any_step_db
         meta_grp.attrs["max_spread_db"] = args.max_spread_db
+        meta_grp.attrs["step_search_depth"] = resolved_depth
         meta_grp.attrs["consistency_window"] = args.consistency_window
         meta_grp.attrs["consistency_frac"] = args.consistency_frac
         meta_grp.attrs["min_range_frac"] = args.min_range_frac
