@@ -96,6 +96,11 @@ def parse_args():
     parser.add_argument("--save-plots", action="store_true",
                          help="Save a few example clean and rejected profile plots for visual sanity check")
 
+    parser.add_argument("--gap-threshold-frac", type=float, default=0.1,
+                         help="Range tiles whose mean magnitude falls below this fraction of the "
+                              "median tile's mean magnitude are treated as transmission-gap or "
+                              "edge fill and excluded from all clean/RFI statistics (default: 0.1)")
+
     return parser.parse_args()
 
 
@@ -109,6 +114,34 @@ def read_raw_data_batch(raw, freq, pol, pulse_slice, range_slice):
     range_stop = range_slice.stop if range_slice.stop is not None else dataset.shape[1]
 
     return dataset[pulse_start:pulse_stop, range_start:range_stop]
+
+
+def detect_gap_range_tiles(raw_data, cpi_width, threshold_frac=0.1):
+    """
+    Flag range tiles that are transmission-gap or edge fill rather than real
+    signal, using mean magnitude relative to the median tile's mean
+    magnitude. This is the ADC near-zero-fill test: gap columns are not
+    exactly zero, so an absolute-zero test is not reliable, but their mean
+    magnitude is far below a typical signal-bearing tile.
+
+    Returns
+    -------
+    valid : np.ndarray of bool, shape (n_range_tiles,)
+        True for tiles that appear to contain real signal.
+    """
+    n_range = raw_data.shape[1]
+    n_range_tiles = n_range // cpi_width
+    mag = np.abs(raw_data)
+
+    tile_means = np.zeros(n_range_tiles, dtype=np.float64)
+    for rt in range(n_range_tiles):
+        r0 = rt * cpi_width
+        tile_means[rt] = mag[:, r0:r0 + cpi_width].mean()
+
+    median_mag = np.median(tile_means)
+    valid = tile_means >= threshold_frac * median_mag
+
+    return valid
 
 
 def compute_eigenvalue_tiles(raw_data, cpi_len, cpi_width):
@@ -333,6 +366,16 @@ def main():
     )
     print("  Read %.3f GB in %.2fs" % (raw_data.nbytes / 1e9, time.time() - t0))
 
+    print("Detecting transmission-gap / edge-fill range tiles...")
+    valid_range_tiles = detect_gap_range_tiles(raw_data, args.cpi_width, args.gap_threshold_frac)
+    n_gap_tiles = int((~valid_range_tiles).sum())
+    if n_gap_tiles:
+        gap_indices = np.where(~valid_range_tiles)[0]
+        print("  Excluding %d of %d range tiles as gap/edge fill: %s"
+              % (n_gap_tiles, len(valid_range_tiles), gap_indices.tolist()))
+    else:
+        print("  No gap/edge range tiles detected")
+
     print("Computing eigenvalue profiles...")
     t0 = time.time()
     eigvals = compute_eigenvalue_tiles(raw_data, args.cpi_len, args.cpi_width)
@@ -348,22 +391,35 @@ def main():
         max_spread_db=args.max_spread_db,
     )
 
-    total_tiles = is_clean_raw.size
+    # Gap/edge tiles are never real signal, so they are forced non-clean and
+    # excluded from the denominator of every reported statistic below.
+    is_clean_raw = is_clean_raw & valid_range_tiles[None, :]
+
+    valid_2d = np.broadcast_to(valid_range_tiles[None, :], is_clean_raw.shape)
+    total_valid_tiles = int(valid_2d.sum())
     n_clean_raw = int(is_clean_raw.sum())
-    print("  Per-tile clean (before spatial filter): %d / %d (%.1f%%)"
-          % (n_clean_raw, total_tiles, 100.0 * n_clean_raw / total_tiles))
+    print("  Per-tile clean (before spatial filter): %d / %d valid tiles (%.1f%%), %d gap tiles excluded"
+          % (n_clean_raw, total_valid_tiles, 100.0 * n_clean_raw / max(total_valid_tiles, 1),
+             is_clean_raw.size - total_valid_tiles))
+
+    print("  Diagnostic percentiles over valid tiles (10th / 50th / 90th):")
+    for key in ("first_step_db", "max_step_db", "spread_db"):
+        vals = diagnostics[key][valid_2d]
+        p10, p50, p90 = np.percentile(vals, [10, 50, 90])
+        print("    %-14s %.3f / %.3f / %.3f dB" % (key, p10, p50, p90))
 
     is_clean_consistent = apply_spatial_consistency(
         is_clean_raw,
         window=args.consistency_window,
         min_frac=args.consistency_frac,
     )
+    is_clean_consistent = is_clean_consistent & valid_range_tiles[None, :]
     n_clean_consistent = int(is_clean_consistent.sum())
-    print("  Per-tile clean (after spatial filter):  %d / %d (%.1f%%)"
-          % (n_clean_consistent, total_tiles, 100.0 * n_clean_consistent / total_tiles))
+    print("  Per-tile clean (after spatial filter):  %d / %d valid tiles (%.1f%%)"
+          % (n_clean_consistent, total_valid_tiles, 100.0 * n_clean_consistent / max(total_valid_tiles, 1)))
 
     windows = find_full_frame_clean_windows(
-        is_clean_consistent,
+        is_clean_consistent[:, valid_range_tiles],
         p_start=p_start,
         cpi_len=args.cpi_len,
         min_range_frac=args.min_range_frac,
@@ -392,6 +448,7 @@ def main():
         mask_grp = f.create_group("clean_mask")
         mask_grp.create_dataset("raw", data=is_clean_raw, compression="gzip")
         mask_grp.create_dataset("consistent", data=is_clean_consistent, compression="gzip")
+        mask_grp.create_dataset("valid_range_tile", data=valid_range_tiles, compression="gzip")
 
         diag_grp = f.create_group("diagnostics")
         for key, val in diagnostics.items():
@@ -422,6 +479,8 @@ def main():
         meta_grp.attrs["consistency_frac"] = args.consistency_frac
         meta_grp.attrs["min_range_frac"] = args.min_range_frac
         meta_grp.attrs["min_window_cpi"] = args.min_window_cpi
+        meta_grp.attrs["gap_threshold_frac"] = args.gap_threshold_frac
+        meta_grp.attrs["n_gap_tiles_excluded"] = n_gap_tiles
         meta_grp.attrs["processing_date"] = datetime.now().isoformat()
 
     if args.save_plots:
