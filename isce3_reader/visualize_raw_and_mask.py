@@ -38,6 +38,8 @@ def parse_args():
                         help='End range sample index for subset visualization')
     parser.add_argument('--dpi', type=int, default=150,
                         help='DPI for saved figures (default: 150)')
+    parser.add_argument('--show', action='store_true',
+                        help='Display plots interactively after saving')
 
     return parser.parse_args()
 
@@ -100,7 +102,7 @@ def compute_power_db(data):
     return power_db
 
 
-def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=None, dpi=150):
+def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=None, dpi=150, show=False):
     """
     Plot raw data power and subswath mask side by side.
 
@@ -118,6 +120,8 @@ def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=Non
         Color scale limits in dB
     dpi : int
         DPI for saved figure
+    show : bool
+        Whether to display the plot interactively
     """
     # Compute power in dB
     power_db = compute_power_db(raw_data)
@@ -170,10 +174,12 @@ def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=Non
     plt.tight_layout()
     plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
     print(f"Saved plot to {output_file}")
+    if show:
+        plt.show()
     plt.close()
 
 
-def plot_power_histogram(raw_data, mask, metadata, output_file, dpi=150):
+def plot_power_histogram(raw_data, mask, metadata, output_file, dpi=150, show=False):
     """
     Plot histogram of power values.
 
@@ -189,6 +195,8 @@ def plot_power_histogram(raw_data, mask, metadata, output_file, dpi=150):
         Output file path
     dpi : int
         DPI for saved figure
+    show : bool
+        Whether to display the plot interactively
     """
     power_db = compute_power_db(raw_data)
     power_db_flat = power_db[np.isfinite(power_db)].flatten()
@@ -218,6 +226,8 @@ def plot_power_histogram(raw_data, mask, metadata, output_file, dpi=150):
     plt.tight_layout()
     plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
     print(f"Saved histogram to {output_file}")
+    if show:
+        plt.show()
     plt.close()
 
 
@@ -269,8 +279,8 @@ def main():
     # Create visualizations
     print(f"\nCreating visualizations...")
     plot_raw_and_mask(raw_data, mask, metadata, str(output_file),
-                      vmin=args.vmin, vmax=args.vmax, dpi=args.dpi)
-    plot_power_histogram(raw_data, mask, metadata, str(hist_file), dpi=args.dpi)
+                      vmin=args.vmin, vmax=args.vmax, dpi=args.dpi, show=args.show)
+    plot_power_histogram(raw_data, mask, metadata, str(hist_file), dpi=args.dpi, show=args.show)
 
     print(f"\nDone! Plots saved to {output_dir}")
 

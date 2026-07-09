@@ -513,6 +513,11 @@ def process_polarization(
         raw, freq, pol,
         pulse_slice=slice(p_start, p_end),
         range_slice=slice(r_start, r_end)
+
+        print(f'{p_start = }, {p_end = }')
+
+        print(f'{r_start = }, {r_end = }')
+
     )
 
     read_time = time.time() - read_start
