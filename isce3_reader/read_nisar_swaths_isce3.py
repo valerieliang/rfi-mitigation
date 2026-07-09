@@ -12,14 +12,21 @@ Key optimizations:
 4. Memory-efficient chunked processing for large datasets
 
 Usage:
-    # Read entire file with all polarizations
-    python read_nisar_isce3.py input.h5 --output-dir ./output
+    # Save raw data only
+    python read_nisar_isce3.py input.h5 --save-raw --output-dir ./output
 
-    # Read specific frequency and polarization
-    python read_nisar_isce3.py input.h5 --freq A --pol HH --output-dir ./output
+    # Compute and save eigenvalues with subswath masking
+    python read_nisar_isce3.py input.h5 --compute-eigenvalues --save-eigenvalues \
+        --compute-subswath-mask --save-subswath-mask --output-dir ./output
 
-    # Process in streaming mode (process CPIs without saving raw data)
-    python read_nisar_isce3.py input.h5 --stream --cpi-len 16 --output-dir ./output
+    # Full processing with model predictions
+    python read_nisar_isce3.py input.h5 --save-raw --compute-eigenvalues \
+        --save-eigenvalues --compute-subswath-mask --save-subswath-mask \
+        --model path/to/model.h5 --save-predictions --output-dir ./output
+
+    # Process specific frequency/polarization with range subsetting
+    python read_nisar_isce3.py input.h5 --freq A --pol HV --range-start 0 \
+        --range-end 25000 --compute-eigenvalues --save-eigenvalues --output-dir ./output
 """
 
 import argparse
@@ -45,20 +52,23 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Read entire file (all frequencies and polarizations)
-  python read_nisar_isce3.py ALPSRP081257070-H1.0__A_HH_3000_LSAR_01_M_D_20081012T005927_20081012T010033_015559_000_001_0157.h5
+  # Save raw data only
+  python read_nisar_isce3.py input.h5 --save-raw
 
-  # Read specific frequency and polarization
-  python read_nisar_isce3.py input.h5 --freq A --pol HH --output-dir ./output
+  # Compute eigenvalues with subswath masking (don't save raw data)
+  python read_nisar_isce3.py input.h5 --compute-eigenvalues --save-eigenvalues --compute-subswath-mask --save-subswath-mask
 
-  # Stream processing with EVD computation
-  python read_nisar_isce3.py input.h5 --stream --cpi-len 16 --output-dir ./output
+  # Save both raw data and eigenvalues
+  python read_nisar_isce3.py input.h5 --save-raw --compute-eigenvalues --save-eigenvalues
 
-  # Read with pulse/range subsetting
-  python read_nisar_isce3.py input.h5 --pulse-start 0 --pulse-end 5000 --range-start 0 --range-end 10000
+  # Process specific frequency/pol with range subsetting
+  python read_nisar_isce3.py input.h5 --freq A --pol HV --range-start 0 --range-end 25000 --compute-eigenvalues --save-eigenvalues
 
-  # Read range 76k-110k for testing trained model
-  python read_nisar_isce3.py input.h5 --range-start 76000 --range-end 110000 --stream --save-eigenvalues
+  # Full processing with model predictions
+  python read_nisar_isce3.py input.h5 --save-raw --compute-eigenvalues --save-eigenvalues --model model.h5 --save-predictions
+
+  # Legacy streaming mode (equivalent to --compute-eigenvalues --save-eigenvalues)
+  python read_nisar_isce3.py input.h5 --stream
         """
     )
 
@@ -80,31 +90,42 @@ Examples:
     parser.add_argument('--range-end', type=int, default=None,
                         help='End range sample index (default: all, use 110000 for 76k-110k range with --range-start 76000)')
 
-    # Processing options
-    parser.add_argument('--stream', action='store_true',
-                        help='Stream processing mode: compute EVD without saving raw data')
+    # Processing options - what to compute
+    parser.add_argument('--compute-eigenvalues', action='store_true',
+                        help='Compute eigenvalue decomposition (EVD)')
+    parser.add_argument('--compute-subswath-mask', action='store_true',
+                        help='Generate subswath mask to identify valid data regions')
     parser.add_argument('--cpi-len', type=int, default=16,
-                        help='CPI length for streaming EVD (default: 16)')
+                        help='CPI length for EVD (default: 16)')
+
+    # Saving options - what to save to disk
     parser.add_argument('--save-raw', action='store_true',
                         help='Save decoded raw data to HDF5 (can be large!)')
     parser.add_argument('--save-eigenvalues', action='store_true',
-                        help='Save eigenvalues from EVD processing')
-    parser.add_argument('--use-subswath-mask', action='store_true',
-                        help='Mask out gaps between subswaths during processing')
-    parser.add_argument('--n-workers', type=int, default=4,
-                        help='Number of parallel workers (default: 4)')
+                        help='Save eigenvalues (requires --compute-eigenvalues)')
+    parser.add_argument('--save-subswath-mask', action='store_true',
+                        help='Save subswath mask (requires --compute-subswath-mask)')
+    parser.add_argument('--save-predictions', action='store_true',
+                        help='Save model predictions (requires --model)')
 
-    # EVD parameters (kept for compatibility but not used - we compute eigenvalues manually)
-    parser.add_argument('--rx-dynamic-range-db', type=float, default=50.0,
-                        help='Receiver dynamic range in dB (default: 50.0, unused)')
-    parser.add_argument('--min-ev-valid-idx', type=int, default=10,
-                        help='Minimum eigenvalue valid index (default: 10, unused)')
+    # Legacy options
+    parser.add_argument('--stream', action='store_true',
+                        help='DEPRECATED: Use --compute-eigenvalues --save-eigenvalues instead')
+    parser.add_argument('--use-subswath-mask', action='store_true',
+                        help='DEPRECATED: Use --compute-subswath-mask instead')
+
+    parser.add_argument('--n-workers', type=int, default=4,
+                        help='Number of parallel workers (default: 4, currently unused)')
 
     # Model prediction parameters
     parser.add_argument('--model', type=str, default=None,
                         help='Path to trained model for RFI predictions (optional)')
-    parser.add_argument('--save-predictions', action='store_true',
-                        help='Save model predictions to HDF5 (requires --model)')
+
+    # Legacy EVD parameters (kept for compatibility)
+    parser.add_argument('--rx-dynamic-range-db', type=float, default=50.0,
+                        help='DEPRECATED: Receiver dynamic range in dB (unused)')
+    parser.add_argument('--min-ev-valid-idx', type=int, default=10,
+                        help='DEPRECATED: Minimum eigenvalue valid index (unused)')
 
     return parser.parse_args()
 
@@ -384,26 +405,36 @@ def get_subswath_mask(
     return mask
 
 
-def process_polarization_streaming(
+def process_polarization(
     raw: Raw,
     freq: str,
     pol: str,
     output_dir: str,
-    cpi_len: int = 16,
     pulse_start: int = None,
     pulse_end: int = None,
     range_start: int = None,
     range_end: int = None,
-    save_eigenvalues: bool = True,
-    rx_dynamic_range_db: float = 50.0,
-    min_ev_valid_idx: int = 10,
+    # What to compute
+    compute_eigenvalues: bool = False,
+    compute_subswath_mask: bool = False,
+    cpi_len: int = 16,
+    # What to save
+    save_raw: bool = False,
+    save_eigenvalues: bool = False,
+    save_subswath_mask: bool = False,
+    save_predictions: bool = False,
+    # Model prediction
     model=None,
     n_global_features: int = 2,
-    save_predictions: bool = False,
-    use_subswath_mask: bool = False,
+    # Legacy parameters (kept for compatibility)
+    rx_dynamic_range_db: float = 50.0,
+    min_ev_valid_idx: int = 10,
 ):
     """
-    Process a single polarization in streaming mode with EVD computation and model predictions.
+    Unified processing function for a single polarization.
+
+    This function reads raw data and optionally computes/saves various products
+    based on the provided flags.
 
     Parameters
     ----------
@@ -412,37 +443,42 @@ def process_polarization_streaming(
     freq : str
         Frequency ('A' or 'B')
     pol : str
-        Polarization
+        Polarization ('HH', 'HV', 'VH', 'VV')
     output_dir : str
         Output directory
-    cpi_len : int
-        CPI length for EVD
     pulse_start, pulse_end : int, optional
         Pulse range to process
     range_start, range_end : int, optional
         Range sample limits
+    compute_eigenvalues : bool
+        Whether to compute eigenvalue decomposition
+    compute_subswath_mask : bool
+        Whether to generate subswath mask
+    cpi_len : int
+        CPI length for EVD (default: 16)
+    save_raw : bool
+        Whether to save raw data to HDF5
     save_eigenvalues : bool
-        Whether to save eigenvalues
-    rx_dynamic_range_db : float
-        Receiver dynamic range in dB
-    min_ev_valid_idx : int
-        Minimum eigenvalue valid index
+        Whether to save eigenvalues (requires compute_eigenvalues=True)
+    save_subswath_mask : bool
+        Whether to save subswath mask (requires compute_subswath_mask=True)
+    save_predictions : bool
+        Whether to save model predictions (requires model != None)
     model : keras.Model, optional
         Trained model for predictions
     n_global_features : int
         Number of global features expected by model
-    save_predictions : bool
-        Whether to save predictions
-    use_subswath_mask : bool
-        Whether to mask out gaps between subswaths (default: False)
-        When True, only processes data within valid subswath boundaries
+    rx_dynamic_range_db : float
+        Receiver dynamic range in dB (unused, kept for compatibility)
+    min_ev_valid_idx : int
+        Minimum eigenvalue valid index (unused, kept for compatibility)
 
     Returns
     -------
     results : dict
         Processing results including statistics
     """
-    print(f"\nProcessing {freq}-{pol} in streaming mode...")
+    print(f"\nProcessing {freq}-{pol}...")
     start_time = time.time()
 
     # Get dataset info
@@ -458,31 +494,24 @@ def process_polarization_streaming(
     n_pulses = p_end - p_start
     n_range = r_end - r_start
 
-    print(f"  Data shape: ({n_pulses}, {n_range})")
-    print(f"  CPI length: {cpi_len}")
+    # Adjust pulse range to align with CPI if computing eigenvalues
+    if compute_eigenvalues:
+        num_cpi = n_pulses // cpi_len
+        tb_size = num_cpi * cpi_len
+        n_pulses = tb_size  # Truncate to CPI boundary
+        p_end = p_start + tb_size
+        print(f"  Data shape: ({n_pulses}, {n_range})")
+        print(f"  CPI length: {cpi_len}, Number of CPIs: {num_cpi}")
+    else:
+        print(f"  Data shape: ({n_pulses}, {n_range})")
 
-    # Calculate number of threshold blocks (TBs)
-    num_cpi = n_pulses // cpi_len
-    tb_size = num_cpi * cpi_len
-
-    print(f"  Number of CPIs: {num_cpi}")
-    print(f"  TB size: {tb_size} pulses")
-
-    # Initialize output arrays
-    if save_eigenvalues:
-        eig_val_array = np.zeros((num_cpi, cpi_len), dtype=np.float32)
-        diag_power_array = np.zeros((num_cpi, cpi_len), dtype=np.float32)
-        diag_valid_array = np.zeros((num_cpi, cpi_len), dtype=bool)
-        tb_valid_array = np.zeros(num_cpi, dtype=bool)
-
-    # Process threshold block
-    print(f"  Reading data slice [{p_start}:{p_start+tb_size}, {r_start}:{r_end}]...")
+    # Read data
+    print(f"  Reading data slice [{p_start}:{p_end}, {r_start}:{r_end}]...")
     read_start = time.time()
 
-    # Read data using ISCE3's efficient reader
     raw_data = read_raw_data_batch(
         raw, freq, pol,
-        pulse_slice=slice(p_start, p_start + tb_size),
+        pulse_slice=slice(p_start, p_end),
         range_slice=slice(r_start, r_end)
     )
 
@@ -493,14 +522,19 @@ def process_polarization_streaming(
 
     # Verify data was read
     if raw_data.size == 0:
-        raise ValueError(f"No data read! Check range limits. Dataset shape: {dataset.shape}, requested: [{p_start}:{p_start+tb_size}, {r_start}:{r_end}]")
+        raise ValueError(f"No data read! Check range limits. Dataset shape: {dataset.shape}")
 
-    # Get subswath mask if requested
+    # Initialize timing variables
+    evd_time = 0.0
+    mask_time = 0.0
+    pred_time = 0.0
+
+    # Generate subswath mask if requested
     subswath_mask = None
-    if use_subswath_mask:
+    if compute_subswath_mask:
         print(f"  Generating subswath mask...")
         mask_start = time.time()
-        pulse_indices = np.arange(p_start, p_start + tb_size)
+        pulse_indices = np.arange(p_start, p_end)
         subswath_mask = get_subswath_mask(raw, freq, pol, pulse_indices, n_range)
         mask_time = time.time() - mask_start
 
@@ -509,47 +543,54 @@ def process_polarization_streaming(
         print(f"  Subswath mask generated in {mask_time:.2f}s")
         print(f"  Valid data within subswaths: {valid_pct:.1f}%")
 
-    # Compute EVD manually (only use ISCE3 for data reading/decoding)
-    print(f"  Computing eigenvalues for {num_cpi} CPIs...")
-    evd_start = time.time()
+    # Compute eigenvalues if requested
+    eig_val_sort = None
+    diag_power = None
+    diag_valid = None
+    tb_is_valid = None
+    num_cpi = None
 
-    eig_val_sort = np.zeros((num_cpi, cpi_len), dtype=np.float32)
-    diag_power = np.zeros((num_cpi, cpi_len), dtype=np.float32)
-    diag_valid = np.ones((num_cpi, cpi_len), dtype=bool)
-    tb_is_valid = True
+    if compute_eigenvalues:
+        num_cpi = n_pulses // cpi_len
+        print(f"  Computing eigenvalues for {num_cpi} CPIs...")
+        evd_start = time.time()
 
-    for cpi_idx in range(num_cpi):
-        cpi_start = cpi_idx * cpi_len
-        cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :]
+        eig_val_sort = np.zeros((num_cpi, cpi_len), dtype=np.float32)
+        diag_power = np.zeros((num_cpi, cpi_len), dtype=np.float32)
+        diag_valid = np.ones((num_cpi, cpi_len), dtype=bool)
+        tb_is_valid = True
 
-        # Apply subswath mask if requested
-        if use_subswath_mask and subswath_mask is not None:
-            cpi_mask = subswath_mask[cpi_start:cpi_start + cpi_len, :]
-            # Zero out data outside valid subswath regions
-            cpi_data = cpi_data * cpi_mask
+        for cpi_idx in range(num_cpi):
+            cpi_start = cpi_idx * cpi_len
+            cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :].copy()
 
-        # Compute SCM
-        M, K = cpi_data.shape
-        SCM = (cpi_data @ cpi_data.conj().T) / K
+            # Apply subswath mask if available
+            if compute_subswath_mask and subswath_mask is not None:
+                cpi_mask = subswath_mask[cpi_start:cpi_start + cpi_len, :]
+                # Zero out data outside valid subswath regions
+                cpi_data = cpi_data * cpi_mask
 
-        # Eigenvalues (descending order)
-        eigvals = np.linalg.eigvalsh(SCM)
-        eig_val_sort[cpi_idx, :] = np.sort(eigvals)[::-1]
+            # Compute SCM
+            M, K = cpi_data.shape
+            SCM = (cpi_data @ cpi_data.conj().T) / K
 
-        # Diagonal power
-        diag_power[cpi_idx, :] = np.abs(np.diag(SCM))
+            # Eigenvalues (descending order)
+            eigvals = np.linalg.eigvalsh(SCM)
+            eig_val_sort[cpi_idx, :] = np.sort(eigvals)[::-1]
 
-    evd_time = time.time() - evd_start
-    print(f"  Eigenvalues computed in {evd_time:.2f}s")
-    print(f"  Valid CPIs: {num_cpi}")
+            # Diagonal power
+            diag_power[cpi_idx, :] = np.abs(np.diag(SCM))
 
-    # Model predictions - process ALL range tiles for spatial maps
+        evd_time = time.time() - evd_start
+        print(f"  Eigenvalues computed in {evd_time:.2f}s")
+        print(f"  Valid CPIs: {num_cpi}")
+
+    # Model predictions
     predictions = None
-    pred_time = 0.0
-    if model is not None:
-        n_range = raw_data.shape[1]
+    if model is not None and compute_eigenvalues:
+        n_range_data = raw_data.shape[1]
         cpi_width = 250  # Standard CPI width
-        n_range_tiles = n_range // cpi_width
+        n_range_tiles = n_range_data // cpi_width
 
         print(f"  Running model predictions on {num_cpi} CPIs × {n_range_tiles} range tiles = {num_cpi * n_range_tiles} total tiles...")
         pred_start = time.time()
@@ -562,11 +603,11 @@ def process_polarization_streaming(
             cpi_start = cpi_idx * cpi_len
 
             for range_tile_idx in range(n_range_tiles):
-                range_start = range_tile_idx * cpi_width
-                range_end = range_start + cpi_width
+                range_tile_start = range_tile_idx * cpi_width
+                range_tile_end = range_tile_start + cpi_width
 
                 # Extract tile
-                cpi_data = raw_data[cpi_start:cpi_start + cpi_len, range_start:range_end]
+                cpi_data = raw_data[cpi_start:cpi_start + cpi_len, range_tile_start:range_tile_end]
 
                 # Extract features
                 eigen, global_ = extract_model_features(cpi_data, n_global_features)
@@ -604,8 +645,60 @@ def process_polarization_streaming(
             pct = 100 * c / total_tiles
             print(f"    knee={k}: {c} ({pct:.1f}%)")
 
-    # Save results
-    if save_eigenvalues or (save_predictions and predictions is not None):
+    # Get chirp parameters for metadata
+    pol_tx = pol[0]
+    fc, fs, _, _ = raw.getChirpParameters(freq, pol_tx)
+    bandwidth = raw.getRangeBandwidth(freq, pol_tx)
+
+    # Save raw data if requested
+    if save_raw:
+        output_file = os.path.join(output_dir, f'nisar_{freq}_{pol}_raw.h5')
+        print(f"  Saving raw data to {output_file}...")
+
+        save_start = time.time()
+        with h5py.File(output_file, 'w') as f:
+            # Save raw data
+            f.create_dataset('raw_data', data=raw_data, compression='gzip', compression_opts=4)
+
+            # Save metadata
+            meta_grp = f.create_group('metadata')
+            meta_grp.attrs['frequency'] = freq
+            meta_grp.attrs['polarization'] = pol
+            meta_grp.attrs['pulse_start'] = p_start
+            meta_grp.attrs['pulse_end'] = p_end
+            meta_grp.attrs['range_start'] = r_start
+            meta_grp.attrs['range_end'] = r_end
+            meta_grp.attrs['shape'] = raw_data.shape
+            meta_grp.attrs['dtype'] = str(raw_data.dtype)
+            meta_grp.attrs['center_frequency_hz'] = fc
+            meta_grp.attrs['sample_rate_hz'] = fs
+            meta_grp.attrs['bandwidth_hz'] = bandwidth
+            meta_grp.attrs['processing_date'] = datetime.now().isoformat()
+
+            # Compute and save statistics
+            stats = {
+                'mean': np.mean(np.abs(raw_data)),
+                'std': np.std(np.abs(raw_data)),
+                'max': np.max(np.abs(raw_data)),
+                'min': np.min(np.abs(raw_data)),
+            }
+            stats_grp = f.create_group('statistics')
+            for key, val in stats.items():
+                stats_grp.attrs[key] = val
+
+            # Save subswath mask if requested
+            if save_subswath_mask and subswath_mask is not None:
+                mask_grp = f.create_group('subswath_mask')
+                mask_grp.create_dataset('mask', data=subswath_mask, compression='gzip')
+                mask_grp.attrs['description'] = 'Boolean mask indicating valid data within subswath boundaries'
+                mask_grp.attrs['shape'] = subswath_mask.shape
+                mask_grp.attrs['valid_fraction'] = float(subswath_mask.sum() / subswath_mask.size)
+
+        save_time = time.time() - save_start
+        print(f"  Raw data saved in {save_time:.2f}s")
+
+    # Save eigenvalues and predictions if requested
+    if save_eigenvalues and eig_val_sort is not None:
         output_file = os.path.join(output_dir, f'nisar_{freq}_{pol}_eigenvalues.h5')
         print(f"  Saving eigenvalues to {output_file}...")
 
@@ -626,25 +719,19 @@ def process_polarization_streaming(
             meta_grp.attrs['cpi_len'] = cpi_len
             meta_grp.attrs['num_cpi'] = num_cpi
             meta_grp.attrs['pulse_start'] = p_start
-            meta_grp.attrs['pulse_end'] = p_start + tb_size
+            meta_grp.attrs['pulse_end'] = p_end
             meta_grp.attrs['range_start'] = r_start
             meta_grp.attrs['range_end'] = r_end
             meta_grp.attrs['total_pulses'] = total_pulses
             meta_grp.attrs['total_range'] = total_range
-            meta_grp.attrs['processing_time'] = time.time() - start_time
-            meta_grp.attrs['processing_date'] = datetime.now().isoformat()
-
-            # Get chirp parameters
-            pol_tx = pol[0]
-            fc, fs, _, _ = raw.getChirpParameters(freq, pol_tx)
-            bandwidth = raw.getRangeBandwidth(freq, pol_tx)
-
             meta_grp.attrs['center_frequency_hz'] = fc
             meta_grp.attrs['sample_rate_hz'] = fs
             meta_grp.attrs['bandwidth_hz'] = bandwidth
+            meta_grp.attrs['processing_time'] = time.time() - start_time
+            meta_grp.attrs['processing_date'] = datetime.now().isoformat()
 
-            # Save subswath mask if it was used
-            if use_subswath_mask and subswath_mask is not None:
+            # Save subswath mask if requested
+            if save_subswath_mask and subswath_mask is not None:
                 mask_grp = f.create_group('subswath_mask')
                 mask_grp.create_dataset('mask', data=subswath_mask, compression='gzip')
                 mask_grp.attrs['description'] = 'Boolean mask indicating valid data within subswath boundaries'
@@ -671,153 +758,19 @@ def process_polarization_streaming(
     results = {
         'frequency': freq,
         'polarization': pol,
+        'shape': (n_pulses, n_range),
         'num_cpi': num_cpi,
         'tb_is_valid': tb_is_valid,
         'total_time': total_time,
         'read_time': read_time,
         'evd_time': evd_time,
+        'mask_time': mask_time,
+        'pred_time': pred_time,
         'data_size_gb': data_gb,
         'throughput_gb_per_s': data_gb / total_time,
     }
 
     print(f"  Total time: {total_time:.2f}s ({results['throughput_gb_per_s']:.2f} GB/s)")
-
-    return results
-
-
-def process_polarization_full(
-    raw: Raw,
-    freq: str,
-    pol: str,
-    output_dir: str,
-    pulse_start: int = None,
-    pulse_end: int = None,
-    range_start: int = None,
-    range_end: int = None,
-    save_raw: bool = True,
-):
-    """
-    Process a single polarization by reading and optionally saving full data.
-
-    Parameters
-    ----------
-    raw : Raw
-        ISCE3 Raw object
-    freq : str
-        Frequency ('A' or 'B')
-    pol : str
-        Polarization
-    output_dir : str
-        Output directory
-    pulse_start, pulse_end : int, optional
-        Pulse range to process
-    range_start, range_end : int, optional
-        Range sample limits
-    save_raw : bool
-        Whether to save raw data
-
-    Returns
-    -------
-    results : dict
-        Processing results
-    """
-    print(f"\nProcessing {freq}-{pol}...")
-    start_time = time.time()
-
-    # Get dataset info
-    dataset = raw.getRawDataset(freq, pol)
-    total_pulses, total_range = dataset.shape
-
-    # Apply limits
-    p_start = pulse_start if pulse_start is not None else 0
-    p_end = pulse_end if pulse_end is not None else total_pulses
-    r_start = range_start if range_start is not None else 0
-    r_end = range_end if range_end is not None else total_range
-
-    n_pulses = p_end - p_start
-    n_range = r_end - r_start
-
-    print(f"  Reading data shape: ({n_pulses}, {n_range})")
-
-    # Read data
-    read_start = time.time()
-    raw_data = read_raw_data_batch(
-        raw, freq, pol,
-        pulse_slice=slice(p_start, p_end),
-        range_slice=slice(r_start, r_end)
-    )
-    read_time = time.time() - read_start
-
-    data_gb = raw_data.nbytes / 1e9
-    print(f"  Data read: {data_gb:.3f} GB in {read_time:.2f}s ({data_gb/read_time:.2f} GB/s)")
-
-    # Compute statistics
-    stats = {
-        'mean': np.mean(np.abs(raw_data)),
-        'std': np.std(np.abs(raw_data)),
-        'max': np.max(np.abs(raw_data)),
-        'min': np.min(np.abs(raw_data)),
-    }
-
-    print(f"  Statistics:")
-    print(f"    Mean: {stats['mean']:.2e}")
-    print(f"    Std:  {stats['std']:.2e}")
-    print(f"    Max:  {stats['max']:.2e}")
-    print(f"    Min:  {stats['min']:.2e}")
-
-    # Save raw data if requested
-    if save_raw:
-        output_file = os.path.join(output_dir, f'nisar_{freq}_{pol}_raw.h5')
-        print(f"  Saving raw data to {output_file}...")
-
-        save_start = time.time()
-        with h5py.File(output_file, 'w') as f:
-            # Save raw data
-            f.create_dataset('raw_data', data=raw_data, compression='gzip', compression_opts=4)
-
-            # Save metadata
-            meta_grp = f.create_group('metadata')
-            meta_grp.attrs['frequency'] = freq
-            meta_grp.attrs['polarization'] = pol
-            meta_grp.attrs['pulse_start'] = p_start
-            meta_grp.attrs['pulse_end'] = p_end
-            meta_grp.attrs['range_start'] = r_start
-            meta_grp.attrs['range_end'] = r_end
-            meta_grp.attrs['shape'] = raw_data.shape
-            meta_grp.attrs['dtype'] = str(raw_data.dtype)
-
-            # Get chirp parameters
-            pol_tx = pol[0]
-            fc, fs, _, _ = raw.getChirpParameters(freq, pol_tx)
-            bandwidth = raw.getRangeBandwidth(freq, pol_tx)
-
-            meta_grp.attrs['center_frequency_hz'] = fc
-            meta_grp.attrs['sample_rate_hz'] = fs
-            meta_grp.attrs['bandwidth_hz'] = bandwidth
-            meta_grp.attrs['processing_date'] = datetime.now().isoformat()
-
-            # Save statistics
-            stats_grp = f.create_group('statistics')
-            for key, val in stats.items():
-                stats_grp.attrs[key] = val
-
-        save_time = time.time() - save_start
-        print(f"  Saved in {save_time:.2f}s")
-
-    total_time = time.time() - start_time
-
-    results = {
-        'frequency': freq,
-        'polarization': pol,
-        'shape': (n_pulses, n_range),
-        'total_time': total_time,
-        'read_time': read_time,
-        'data_size_gb': data_gb,
-        'throughput_gb_per_s': data_gb / total_time,
-        'statistics': stats,
-    }
-
-    print(f"  Total time: {total_time:.2f}s")
 
     return results
 
@@ -835,12 +788,38 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Handle legacy flags
+    compute_eigenvalues = args.compute_eigenvalues or args.stream
+    compute_subswath_mask = args.compute_subswath_mask or args.use_subswath_mask
+    save_eigenvalues = args.save_eigenvalues or args.stream
+
+    # Validate save flags
+    if args.save_eigenvalues and not compute_eigenvalues:
+        print("WARNING: --save-eigenvalues requires --compute-eigenvalues. Enabling eigenvalue computation.")
+        compute_eigenvalues = True
+    if args.save_subswath_mask and not compute_subswath_mask:
+        print("WARNING: --save-subswath-mask requires --compute-subswath-mask. Enabling mask computation.")
+        compute_subswath_mask = True
+    if args.save_predictions and not args.model:
+        print("WARNING: --save-predictions requires --model. Predictions will not be saved.")
+        args.save_predictions = False
+
     print("\n" + "="*70)
     print("NISAR L0B Data Reader (ISCE3)")
     print("="*70)
     print(f"Input file: {args.input_file}")
     print(f"Output directory: {args.output_dir}")
-    print(f"Processing mode: {'Streaming EVD' if args.stream else 'Full read'}")
+    print(f"\nProcessing configuration:")
+    print(f"  Compute eigenvalues: {compute_eigenvalues}")
+    if compute_eigenvalues:
+        print(f"    CPI length: {args.cpi_len}")
+    print(f"  Compute subswath mask: {compute_subswath_mask}")
+    print(f"  Model predictions: {args.model is not None}")
+    print(f"\nSaving configuration:")
+    print(f"  Save raw data: {args.save_raw}")
+    print(f"  Save eigenvalues: {save_eigenvalues}")
+    print(f"  Save subswath mask: {args.save_subswath_mask}")
+    print(f"  Save predictions: {args.save_predictions}")
 
     # Initialize ISCE3 Raw reader
     print("\nInitializing ISCE3 Raw reader...")
@@ -873,33 +852,24 @@ def main():
         pols_to_process = [args.pol] if args.pol else raw.polarizations[freq]
 
         for pol in pols_to_process:
-            if args.stream:
-                # Streaming mode with EVD and predictions
-                results = process_polarization_streaming(
-                    raw, freq, pol, args.output_dir,
-                    cpi_len=args.cpi_len,
-                    pulse_start=args.pulse_start,
-                    pulse_end=args.pulse_end,
-                    range_start=args.range_start,
-                    range_end=args.range_end,
-                    save_eigenvalues=args.save_eigenvalues,
-                    rx_dynamic_range_db=args.rx_dynamic_range_db,
-                    min_ev_valid_idx=args.min_ev_valid_idx,
-                    model=model,
-                    n_global_features=n_global_features,
-                    save_predictions=args.save_predictions,
-                    use_subswath_mask=args.use_subswath_mask,
-                )
-            else:
-                # Full read mode
-                results = process_polarization_full(
-                    raw, freq, pol, args.output_dir,
-                    pulse_start=args.pulse_start,
-                    pulse_end=args.pulse_end,
-                    range_start=args.range_start,
-                    range_end=args.range_end,
-                    save_raw=args.save_raw,
-                )
+            results = process_polarization(
+                raw, freq, pol, args.output_dir,
+                pulse_start=args.pulse_start,
+                pulse_end=args.pulse_end,
+                range_start=args.range_start,
+                range_end=args.range_end,
+                compute_eigenvalues=compute_eigenvalues,
+                compute_subswath_mask=compute_subswath_mask,
+                cpi_len=args.cpi_len,
+                save_raw=args.save_raw,
+                save_eigenvalues=save_eigenvalues,
+                save_subswath_mask=args.save_subswath_mask,
+                save_predictions=args.save_predictions,
+                model=model,
+                n_global_features=n_global_features,
+                rx_dynamic_range_db=args.rx_dynamic_range_db,
+                min_ev_valid_idx=args.min_ev_valid_idx,
+            )
 
             all_results.append(results)
 
