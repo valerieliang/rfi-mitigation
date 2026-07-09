@@ -509,15 +509,13 @@ def process_polarization(
     print(f"  Reading data slice [{p_start}:{p_end}, {r_start}:{r_end}]...")
     read_start = time.time()
 
+    print(f'{p_start = }, {p_end = }')
+    print(f'{r_start = }, {r_end = }')
+
     raw_data = read_raw_data_batch(
         raw, freq, pol,
         pulse_slice=slice(p_start, p_end),
         range_slice=slice(r_start, r_end)
-
-        print(f'{p_start = }, {p_end = }')
-
-        print(f'{r_start = }, {r_end = }')
-
     )
 
     read_time = time.time() - read_start
