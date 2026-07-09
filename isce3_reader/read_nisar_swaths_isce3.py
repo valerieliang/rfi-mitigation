@@ -350,6 +350,11 @@ def read_raw_data_batch(
     # Use explicit indexing instead of slice objects
     data = dataset[pulse_start:pulse_stop, range_start:range_stop]
 
+    print("Inside function: read_raw_data_batch")
+
+    print(f"{pulse_start = }, {pulse_stop = }")
+    print(f"{range_start = }, {range_stop = }")
+
     return data
 
 
@@ -509,9 +514,9 @@ def process_polarization(
     print(f"  Reading data slice [{p_start}:{p_end}, {r_start}:{r_end}]...")
     read_start = time.time()
 
-    print(f'{p_start = }, {p_end = }')
-    print(f'{r_start = }, {r_end = }')
-
+    print(f'\n{p_start = }, {p_end = }')
+    print(f'{r_start = }, {r_end = }\n')
+    
     raw_data = read_raw_data_batch(
         raw, freq, pol,
         pulse_slice=slice(p_start, p_end),
