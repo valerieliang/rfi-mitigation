@@ -353,7 +353,7 @@ def read_raw_data_batch(
     print("Inside function: read_raw_data_batch")
 
     print(f"{pulse_start = }, {pulse_stop = }")
-    print(f"{range_start = }, {range_stop = }")
+    print(f"{range_start = }, {range_stop = }\n")
 
     return data
 
@@ -396,14 +396,25 @@ def get_subswath_mask(
     # Get subswath boundaries: shape (n_subswaths, n_total_pulses, 2)
     # Last dimension contains [start_range, end_range] for each pulse
     subswaths = raw.getSubSwaths(freq, tx_pol)
+    swaths = subswaths[:, pulse_indices, :]
+
+    print("Inside function: get_subswath_mask")
+    print(f"Subswath boundaries: {subswaths.shape}\n")
+    print(f"Swath boundaries: {swaths.shape}\n")
 
     # Initialize mask
     num_pulses = len(pulse_indices)
+    print(f"{pulse_indices.shape = }\n")
+
+    # print("Inside function: get_subswath_mask")
+    print(f"{num_pulses = }, {num_range_samples = }\n")
+    print(f"{pulse_indices = }\n")
+
     mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
 
     # For each pulse, mark valid regions from all subswaths
     for imask, ipulse in enumerate(pulse_indices):
-        for subswath in subswaths:
+        for subswath in swaths:
             start, end = subswath[ipulse]
             mask[imask, start:end] = True
 
