@@ -410,8 +410,9 @@ def get_subswath_mask(
     print(f"{range_indices.shape = }\n")
 
     # print("Inside function: get_subswath_mask")
-    print(f"{num_pulses = }, {num_range_samples = }\n")
+    # print(f"{num_pulses = }, {num_range_samples = }\n")
     print(f"{pulse_indices = }\n")
+    print(f"{range_indices = }\n")
 
     mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
 
