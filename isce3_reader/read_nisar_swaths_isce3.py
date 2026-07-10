@@ -202,7 +202,7 @@ def get_dataset_info(raw: Raw):
                 h5_shape = h5_shapes[f'{freq}-{pol}']
                 print(f"    Raw HDF5 shape: {h5_shape}")
                 if h5_shape != shape:
-                    print(f"    ⚠️  WARNING: ISCE3 view differs from raw HDF5!")
+                    print(f"    WARNING: ISCE3 view differs from raw HDF5!")
             print(f"    Dtype: {dtype}")
             print(f"    Center Frequency: {fc/1e9:.3f} GHz")
             print(f"    Sample Rate: {fs/1e6:.3f} MHz")
@@ -350,10 +350,9 @@ def read_raw_data_batch(
     # Use explicit indexing instead of slice objects
     data = dataset[pulse_start:pulse_stop, range_start:range_stop]
 
-    print("Inside function: read_raw_data_batch")
-
-    print(f"{pulse_start = }, {pulse_stop = }")
-    print(f"{range_start = }, {range_stop = }\n")
+    # print("Inside function: read_raw_data_batch")
+    # print(f"{pulse_start = }, {pulse_stop = }")
+    # print(f"{range_start = }, {range_stop = }\n")
 
     return data
 
@@ -398,21 +397,16 @@ def get_subswath_mask(
     subswaths = raw.getSubSwaths(freq, tx_pol)
     swaths = subswaths[:, pulse_indices, :]
 
-    print("Inside function: get_subswath_mask")
-    print(f"Subswath boundaries: {subswaths.shape}\n")
-    print(f"Swath boundaries: {swaths.shape}\n")
+    # print("Inside function: get_subswath_mask")
+    # print(f"Subswath boundaries: {subswaths.shape}")
+    # print(f"Swath boundaries: {swaths.shape}\n")
 
     # Initialize mask
     num_pulses = len(pulse_indices)
-    print(f"{pulse_indices.shape = }\n")
+    # print(f"{pulse_indices.shape = }\n")
 
     num_range_samples = len(range_indices)
-    print(f"{range_indices.shape = }\n")
-
-    # print("Inside function: get_subswath_mask")
-    # print(f"{num_pulses = }, {num_range_samples = }\n")
-    print(f"{pulse_indices = }\n")
-    print(f"{range_indices = }\n")
+    # print(f"{range_indices.shape = }\n")
 
     mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
 
@@ -536,9 +530,6 @@ def process_polarization(
     # Read data
     print(f"  Reading data slice [{p_start}:{p_end}, {r_start}:{r_end}]...")
     read_start = time.time()
-
-    print(f'\n{p_start = }, {p_end = }')
-    print(f'{r_start = }, {r_end = }\n')
     
     raw_data = read_raw_data_batch(
         raw, freq, pol,
