@@ -416,14 +416,21 @@ def get_subswath_mask(
 
     mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
 
+    # Subswath boundaries from getSubSwaths() are absolute range sample
+    # indices into the full swath. The mask array is window-relative, so
+    # shift boundaries by the window's first range index and clip to the
+    # window extent before painting.
+    r_offset = int(range_indices[0])
+
     if swaths is not None:
         for i in range(num_pulses):
-            for start, end in swaths[:,i,:]:
-                mask[i, start:end] = True
-    
-        mask_blk = mask[:, range_indices-range_indices[0]]
+            for start, end in swaths[:, i, :]:
+                s = max(int(start) - r_offset, 0)
+                e = min(int(end) - r_offset, num_range_samples)
+                if e > s:
+                    mask[i, s:e] = True
 
-    return mask_blk
+    return mask
 
 
 def process_polarization(

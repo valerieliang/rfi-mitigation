@@ -36,6 +36,8 @@ def parse_args():
                         help='Start range sample index for subset visualization')
     parser.add_argument('--range-end', type=int, default=None,
                         help='End range sample index for subset visualization')
+    parser.add_argument('--overlay-alpha', type=float, default=0.6,
+                        help='Opacity of black overlay on invalid regions (default: 0.6)')
     parser.add_argument('--dpi', type=int, default=150,
                         help='DPI for saved figures (default: 150)')
     parser.add_argument('--show', action='store_true',
@@ -102,7 +104,8 @@ def compute_power_db(data):
     return power_db
 
 
-def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=None, dpi=150, show=False):
+def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=None,
+                      dpi=150, show=False, overlay_alpha=0.6):
     """
     Plot raw data power and subswath mask side by side.
 
@@ -122,6 +125,9 @@ def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=Non
         DPI for saved figure
     show : bool
         Whether to display the plot interactively
+    overlay_alpha : float
+        Opacity of the black overlay on invalid regions in the third
+        panel (0 = fully transparent, 1 = solid black)
     """
     # Compute power in dB
     power_db = compute_power_db(raw_data)
@@ -156,13 +162,20 @@ def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=Non
         ax_mask.set_title('Subswath Mask')
         plt.colorbar(im_mask, ax=ax_mask, label='Valid (1) / Gap (0)')
 
-        # Plot masked power (power where mask is True)
-        power_masked = np.where(mask, power_db, np.nan)
-        im_masked = ax_masked.imshow(power_masked, aspect='auto', cmap='viridis',
+        # Plot raw power with a transparent overlay marking invalid regions.
+        # Invalid samples are covered with semi-transparent black; valid
+        # samples are fully transparent so the raw power shows through.
+        im_masked = ax_masked.imshow(power_db, aspect='auto', cmap='viridis',
                                      vmin=vmin, vmax=vmax, origin='lower')
+
+        overlay = np.zeros((*mask.shape, 4), dtype=np.float32)
+        overlay[~mask] = [0.0, 0.0, 0.0, overlay_alpha]
+        ax_masked.imshow(overlay, aspect='auto', origin='lower',
+                         interpolation='nearest')
+
         ax_masked.set_xlabel('Range Sample')
         ax_masked.set_ylabel('Pulse (Slow Time)')
-        ax_masked.set_title('Masked Power (Valid Regions Only)')
+        ax_masked.set_title('Raw Power with Invalid Regions Overlaid')
         plt.colorbar(im_masked, ax=ax_masked, label='Power (dB)')
 
     # Add metadata as title
@@ -279,7 +292,8 @@ def main():
     # Create visualizations
     print(f"\nCreating visualizations...")
     plot_raw_and_mask(raw_data, mask, metadata, str(output_file),
-                      vmin=args.vmin, vmax=args.vmax, dpi=args.dpi, show=args.show)
+                      vmin=args.vmin, vmax=args.vmax, dpi=args.dpi, show=args.show,
+                      overlay_alpha=args.overlay_alpha)
     plot_power_histogram(raw_data, mask, metadata, str(hist_file), dpi=args.dpi, show=args.show)
 
     print(f"\nDone! Plots saved to {output_dir}")
