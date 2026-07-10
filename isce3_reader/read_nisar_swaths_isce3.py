@@ -415,7 +415,7 @@ def get_subswath_mask(
     # For each pulse, mark valid regions from all subswaths
     for imask, ipulse in enumerate(pulse_indices):
         for subswath in swaths:
-            start, end = subswath[ipulse]
+            start, end = subswath[ipulse - pulse_indices[0], :]
             mask[imask, start:end] = True
 
     return mask
