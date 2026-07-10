@@ -363,7 +363,7 @@ def get_subswath_mask(
     freq: str,
     pol: str,
     pulse_indices: np.ndarray,
-    num_range_samples: int,
+    range_indices: np.ndarray,
 ) -> np.ndarray:
     """
     Generate a boolean mask indicating valid data regions based on subswath boundaries.
@@ -381,8 +381,8 @@ def get_subswath_mask(
         Polarization ('HH', 'HV', 'VH', 'VV')
     pulse_indices : np.ndarray
         Array of pulse indices to generate mask for
-    num_range_samples : int
-        Number of range samples (width of mask)
+    range_indices : np.ndarray
+        Array of range indices to generate mask for
 
     Returns
     -------
@@ -406,19 +406,23 @@ def get_subswath_mask(
     num_pulses = len(pulse_indices)
     print(f"{pulse_indices.shape = }\n")
 
+    num_range_samples = len(range_indices)
+    print(f"{range_indices.shape = }\n")
+
     # print("Inside function: get_subswath_mask")
     print(f"{num_pulses = }, {num_range_samples = }\n")
     print(f"{pulse_indices = }\n")
 
     mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
 
-    # For each pulse, mark valid regions from all subswaths
-    for imask, ipulse in enumerate(pulse_indices):
-        for subswath in swaths:
-            start, end = subswath[ipulse - pulse_indices[0], :]
-            mask[imask, start:end] = True
+    if swaths is not None:
+        for i in range(num_pulses):
+            for start, end in swaths[:,i,:]:
+                mask[i, start:end] = True
+    
+        mask_blk = mask[:, range_indices]
 
-    return mask
+    return mask_blk
 
 
 def process_polarization(
@@ -554,7 +558,7 @@ def process_polarization(
         print(f"  Generating subswath mask...")
         mask_start = time.time()
         pulse_indices = np.arange(p_start, p_end)
-        subswath_mask = get_subswath_mask(raw, freq, pol, pulse_indices, n_range)
+        subswath_mask = get_subswath_mask(raw, freq, pol, pulse_indices, np.arange(r_start, r_end))
         mask_time = time.time() - mask_start
 
         # Calculate valid data percentage
