@@ -421,7 +421,7 @@ def get_subswath_mask(
             for start, end in swaths[:,i,:]:
                 mask[i, start:end] = True
     
-        mask_blk = mask[:, range_indices]
+        mask_blk = mask[:, range_indices-range_indices[0]]
 
     return mask_blk
 
