@@ -42,6 +42,10 @@ def parse_args():
                         help='DPI for saved figures (default: 150)')
     parser.add_argument('--show', action='store_true',
                         help='Display plots interactively after saving')
+    parser.add_argument('--plot-scm', action='store_true',
+                        help='Also plot Sample Covariance Matrix (SCM) comparison: clean vs dropout CPIs')
+    parser.add_argument('--cpi-len', type=int, default=16,
+                        help='CPI length for SCM visualization (default: 16)')
 
     return parser.parse_args()
 
@@ -192,6 +196,213 @@ def plot_raw_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=Non
     plt.close()
 
 
+def find_cpi_with_dropouts(mask, cpi_len=16, min_dropout_pct=5.0, max_dropout_pct=50.0):
+    """
+    Find a CPI block that has dropouts (invalid samples).
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Boolean mask where True = valid, False = dropout/gap
+    cpi_len : int
+        CPI length
+    min_dropout_pct : float
+        Minimum percentage of dropout samples to consider interesting
+    max_dropout_pct : float
+        Maximum percentage of dropout samples (avoid mostly invalid blocks)
+
+    Returns
+    -------
+    cpi_idx : int or None
+        Index of a CPI with dropouts, or None if none found
+    dropout_pct : float
+        Percentage of dropout samples in the returned CPI
+    """
+    num_pulses = mask.shape[0]
+    num_cpi = num_pulses // cpi_len
+
+    candidates = []
+
+    for cpi_idx in range(num_cpi):
+        cpi_start = cpi_idx * cpi_len
+        cpi_mask = mask[cpi_start:cpi_start + cpi_len, :]
+
+        # Calculate dropout percentage
+        valid_frac = cpi_mask.sum() / cpi_mask.size
+        dropout_pct = 100 * (1 - valid_frac)
+
+        if min_dropout_pct <= dropout_pct <= max_dropout_pct:
+            candidates.append((cpi_idx, dropout_pct))
+
+    if candidates:
+        # Return CPI with dropout percentage closest to middle of range
+        target_pct = (min_dropout_pct + max_dropout_pct) / 2
+        best = min(candidates, key=lambda x: abs(x[1] - target_pct))
+        return best[0], best[1]
+
+    return None, 0.0
+
+
+def plot_scm_comparison(raw_data, mask, metadata, output_file, cpi_len=16, dpi=150, show=False):
+    """
+    Plot SCM comparison: one clean CPI and one CPI with dropouts.
+
+    Parameters
+    ----------
+    raw_data : np.ndarray
+        Complex raw data
+    mask : np.ndarray or None
+        Subswath mask
+    metadata : dict
+        Metadata
+    output_file : str
+        Output file path
+    cpi_len : int
+        CPI length (number of pulses)
+    dpi : int
+        DPI for saved figure
+    show : bool
+        Whether to display the plot interactively
+    """
+    num_pulses, num_range = raw_data.shape
+    num_cpi = num_pulses // cpi_len
+
+    # Get global offset coordinates from metadata
+    pulse_offset = metadata.get('pulse_start', 0)
+    range_offset = metadata.get('range_start', 0)
+
+    # Find a clean CPI (high valid fraction)
+    clean_cpi_idx = 0
+    if mask is not None:
+        best_valid_frac = 0
+        for i in range(min(num_cpi, 10)):  # Check first 10 CPIs
+            cpi_mask = mask[i*cpi_len:(i+1)*cpi_len, :]
+            valid_frac = cpi_mask.sum() / cpi_mask.size
+            if valid_frac > best_valid_frac:
+                best_valid_frac = valid_frac
+                clean_cpi_idx = i
+
+    # Find a CPI with dropouts
+    dropout_cpi_idx = None
+    dropout_pct = 0.0
+    if mask is not None:
+        dropout_cpi_idx, dropout_pct = find_cpi_with_dropouts(mask, cpi_len)
+        if dropout_cpi_idx is None:
+            print(f"  No CPI found with significant dropouts. Plotting only clean CPI.")
+            dropout_cpi_idx = clean_cpi_idx
+
+    # Create figure: 2 rows (clean vs dropout), 3 columns (SCM mag, SCM phase, eigenvalues)
+    fig = plt.figure(figsize=(18, 10))
+    gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+
+    def plot_scm_row(row_idx, cpi_idx, row_label):
+        """Helper to plot one row of SCM visualizations."""
+        # Extract CPI data
+        cpi_start = cpi_idx * cpi_len
+        cpi_data_raw = raw_data[cpi_start:cpi_start + cpi_len, :].copy()
+        cpi_data_masked = cpi_data_raw.copy()
+
+        # Apply mask if available
+        cpi_mask = None
+        valid_pct = 100.0
+        if mask is not None:
+            cpi_mask = mask[cpi_start:cpi_start + cpi_len, :]
+            cpi_data_masked = cpi_data_masked * cpi_mask
+            valid_pct = 100 * cpi_mask.sum() / cpi_mask.size
+
+        # Compute SCM using the same method as read_nisar_swaths_isce3.py
+        K = cpi_data_masked.shape[1]
+        SCM = (cpi_data_masked @ cpi_data_masked.conj().T) / K
+
+        # Compute eigenvalues
+        eigvals = np.linalg.eigvalsh(SCM)
+        eigvals_sorted = eigvals[::-1]
+
+        # Global coordinates (top-left of CPI block)
+        global_pulse = pulse_offset + cpi_start
+        global_range = range_offset
+        cpi_dims = f"{cpi_len}×{num_range}"
+
+        # Plot 1: SCM magnitude
+        ax1 = fig.add_subplot(gs[row_idx, 0])
+        scm_db = 10 * np.log10(np.abs(SCM) + 1e-12)
+        im1 = ax1.imshow(scm_db, aspect='auto', cmap='viridis', origin='lower')
+        ax1.set_xlabel('Pulse Index')
+        ax1.set_ylabel('Pulse Index')
+        ax1.set_title(f'{row_label}\nSCM Magnitude (dB) | [{global_pulse}, {global_range}] {cpi_dims} | Valid: {valid_pct:.1f}%')
+        plt.colorbar(im1, ax=ax1, label='Magnitude (dB)')
+
+        # Plot 2: SCM phase
+        ax2 = fig.add_subplot(gs[row_idx, 1])
+        scm_phase = np.angle(SCM)
+        im2 = ax2.imshow(scm_phase, aspect='auto', cmap='hsv', vmin=-np.pi, vmax=np.pi, origin='lower')
+        ax2.set_xlabel('Pulse Index')
+        ax2.set_ylabel('Pulse Index')
+        ax2.set_title(f'{row_label}\nSCM Phase | [{global_pulse}, {global_range}] {cpi_dims}')
+        plt.colorbar(im2, ax=ax2, label='Phase (radians)')
+
+        # Plot 3: Eigenvalue spectrum
+        ax3 = fig.add_subplot(gs[row_idx, 2])
+        eigvals_db = 10 * np.log10(np.maximum(eigvals_sorted, 1e-12))
+        ax3.plot(eigvals_db, 'o-', linewidth=2, markersize=6)
+        ax3.set_xlabel('Eigenvalue Index')
+        ax3.set_ylabel('Eigenvalue (dB)')
+        ax3.set_title(f'{row_label}\nEigenvalue Spectrum | [{global_pulse}, {global_range}] {cpi_dims}')
+        ax3.grid(True, alpha=0.3)
+
+        # Add statistics
+        max_ev = eigvals_sorted[0]
+        min_ev = eigvals_sorted[-1]
+        cond_num_db = 10 * np.log10(max_ev / max(min_ev, 1e-12))
+        ax3.text(0.05, 0.95, f'Condition #: {cond_num_db:.1f} dB',
+                transform=ax3.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Plot clean CPI
+    plot_scm_row(0, clean_cpi_idx, 'Clean CPI')
+
+    # Plot dropout CPI
+    if dropout_cpi_idx is not None:
+        label = f'CPI with Dropouts ({dropout_pct:.1f}%)' if dropout_pct > 0 else 'Reference CPI'
+        plot_scm_row(1, dropout_cpi_idx, label)
+
+    # Add overall title
+    freq = metadata.get('frequency', 'N/A')
+    pol = metadata.get('polarization', 'N/A')
+    fig.suptitle(f'SCM Comparison: Freq {freq}, Pol {pol} (CPI length={cpi_len})',
+                 fontsize=14, y=0.995)
+
+    plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
+    print(f"Saved SCM comparison plot to {output_file}")
+
+    # Clean CPI info
+    clean_global_pulse = pulse_offset + clean_cpi_idx * cpi_len
+    print(f"  Clean CPI:")
+    print(f"    Index: {clean_cpi_idx}")
+    print(f"    Global coords: [{clean_global_pulse}, {range_offset}]")
+    print(f"    Dimensions: {cpi_len}×{num_range}")
+    print(f"    Pulse range: {clean_global_pulse} to {clean_global_pulse + cpi_len - 1}")
+
+    # Dropout CPI info
+    if dropout_cpi_idx is not None:
+        dropout_global_pulse = pulse_offset + dropout_cpi_idx * cpi_len
+        if dropout_pct > 0:
+            print(f"  Dropout CPI:")
+            print(f"    Index: {dropout_cpi_idx}")
+            print(f"    Global coords: [{dropout_global_pulse}, {range_offset}]")
+            print(f"    Dimensions: {cpi_len}×{num_range}")
+            print(f"    Pulse range: {dropout_global_pulse} to {dropout_global_pulse + cpi_len - 1}")
+            print(f"    Dropout: {dropout_pct:.1f}%")
+        else:
+            print(f"  Reference CPI:")
+            print(f"    Index: {dropout_cpi_idx}")
+            print(f"    Global coords: [{dropout_global_pulse}, {range_offset}]")
+
+    if show:
+        plt.show()
+    plt.close()
+
+
 def plot_power_histogram(raw_data, mask, metadata, output_file, dpi=150, show=False):
     """
     Plot histogram of power values.
@@ -288,6 +499,7 @@ def main():
     pol = metadata.get('polarization', 'HH')
     output_file = output_dir / f'raw_power_and_mask_{freq}_{pol}.png'
     hist_file = output_dir / f'power_histogram_{freq}_{pol}.png'
+    scm_file = output_dir / f'scm_comparison_{freq}_{pol}.png'
 
     # Create visualizations
     print(f"\nCreating visualizations...")
@@ -295,6 +507,12 @@ def main():
                       vmin=args.vmin, vmax=args.vmax, dpi=args.dpi, show=args.show,
                       overlay_alpha=args.overlay_alpha)
     plot_power_histogram(raw_data, mask, metadata, str(hist_file), dpi=args.dpi, show=args.show)
+
+    # Plot SCM comparison if requested
+    if args.plot_scm:
+        print(f"\nCreating SCM comparison visualization...")
+        plot_scm_comparison(raw_data, mask, metadata, str(scm_file),
+                           cpi_len=args.cpi_len, dpi=args.dpi, show=args.show)
 
     print(f"\nDone! Plots saved to {output_dir}")
 

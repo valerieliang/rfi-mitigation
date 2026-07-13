@@ -592,13 +592,15 @@ def process_polarization(
                 # Zero out data outside valid subswath regions
                 cpi_data = cpi_data * cpi_mask
 
-            # Compute SCM
+            # Compute SCM using the same method as compute_evd_cpi.py
             M, K = cpi_data.shape
             SCM = (cpi_data @ cpi_data.conj().T) / K
 
-            # Eigenvalues (descending order)
+            # Eigenvalue decomposition using eigh for Hermitian matrix
+            # eigh returns eigenvalues in ASCENDING order, so reverse them
+            # This matches the eigen_decomp_sort() method in compute_evd_cpi.py
             eigvals = np.linalg.eigvalsh(SCM)
-            eig_val_sort[cpi_idx, :] = np.sort(eigvals)[::-1]
+            eig_val_sort[cpi_idx, :] = eigvals[::-1]  # Descending order
 
             # Diagonal power
             diag_power[cpi_idx, :] = np.abs(np.diag(SCM))
