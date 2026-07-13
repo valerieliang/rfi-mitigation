@@ -325,6 +325,83 @@ def save_cond_number_hist_png(cond_db_all, threshold, out_dir):
 
 
 # ---------------------------------------------------------------------------
+# PER-FILE REGION RESOLUTION
+# ---------------------------------------------------------------------------
+
+def load_region_manifest(manifest_path: str) -> dict:
+    """
+    Load a JSON manifest mapping input file paths (or basenames) to a
+    per-file pulse/range subset.
+
+    Manifest format
+    ---------------
+    {
+        "GRANULE_1.h5": {"pulse_start": 0,     "pulse_end": 50000,
+                          "range_start": 0,     "range_end": 20000},
+        "GRANULE_2.h5": {"pulse_start": 10000, "pulse_end": 90000}
+    }
+
+    Any of the four keys may be omitted for a given file; omitted keys fall
+    back to the global --pulse-start/--pulse-end/--range-start/--range-end
+    CLI arguments (which themselves default to the full extent of the file).
+
+    Keys may be given as either the exact path passed on the command line or
+    just the basename, so the manifest does not need to be rewritten if you
+    move files around; exact-path entries take precedence over basename
+    entries when both are present.
+
+    Parameters
+    ----------
+    manifest_path : str
+        Path to a JSON file with the format above.
+
+    Returns
+    -------
+    manifest : dict
+        Parsed JSON content, keyed by whatever strings were used in the file.
+    """
+    with open(manifest_path, 'r') as fh:
+        manifest = json.load(fh)
+    return manifest
+
+
+def resolve_region_for_file(l0b_path: str, manifest: dict, cli_args) -> dict:
+    """
+    Resolve the effective pulse/range window for one input file.
+
+    Lookup order: exact CLI path match in the manifest, then basename match
+    in the manifest, then the global --pulse-start/--pulse-end/--range-start/
+    --range-end CLI arguments as the final fallback. Any key still unset
+    after that resolves to None (full extent of the file).
+
+    Parameters
+    ----------
+    l0b_path : str
+        Path exactly as given on the command line for this file.
+    manifest : dict
+        Parsed region manifest (possibly empty dict if none was provided).
+    cli_args : argparse.Namespace
+        Parsed CLI arguments, used for the global fallback values.
+
+    Returns
+    -------
+    region : dict
+        Keys: pulse_start, pulse_end, range_start, range_end (each int or None).
+    """
+    entry = manifest.get(l0b_path)
+    if entry is None:
+        entry = manifest.get(os.path.basename(l0b_path), {})
+
+    region = {
+        'pulse_start': entry.get('pulse_start', cli_args.pulse_start),
+        'pulse_end': entry.get('pulse_end', cli_args.pulse_end),
+        'range_start': entry.get('range_start', cli_args.range_start),
+        'range_end': entry.get('range_end', cli_args.range_end),
+    }
+    return region
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
@@ -339,10 +416,25 @@ def parse_args():
                         help='Polarization to process (default: HV, RFI couples independently per receive chain)')
     parser.add_argument('--output-dir', type=str, default='models/anomaly_v1', help='Output directory')
 
-    parser.add_argument('--pulse-start', type=int, default=None)
-    parser.add_argument('--pulse-end', type=int, default=None)
-    parser.add_argument('--range-start', type=int, default=None)
-    parser.add_argument('--range-end', type=int, default=None)
+    parser.add_argument('--pulse-start', type=int, default=None,
+                        help='Global pulse start index, used as fallback for any file not covered '
+                             'by --region-manifest (default: 0)')
+    parser.add_argument('--pulse-end', type=int, default=None,
+                        help='Global pulse end index, used as fallback for any file not covered '
+                             'by --region-manifest (default: full extent)')
+    parser.add_argument('--range-start', type=int, default=None,
+                        help='Global range start index, used as fallback for any file not covered '
+                             'by --region-manifest (default: 0)')
+    parser.add_argument('--range-end', type=int, default=None,
+                        help='Global range end index, used as fallback for any file not covered '
+                             'by --region-manifest (default: full extent)')
+    parser.add_argument('--region-manifest', type=str, default=None,
+                        help='Path to a JSON file specifying a per-file pulse/range subset, so each '
+                             'input granule can use a different window. Keys are the input file paths '
+                             '(or basenames); values are objects with any of pulse_start, pulse_end, '
+                             'range_start, range_end. Files/keys not covered fall back to the global '
+                             '--pulse-start/--pulse-end/--range-start/--range-end flags.')
+
 
     parser.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT, help='CPI length in pulses (default: 16)')
     parser.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT, help='CPI width in range samples (default: 250)')
@@ -383,11 +475,23 @@ def main():
     print(f"Output dir: {args.output_dir}")
 
     # ------------------------------------------------------------------
-    # Step 1: Extract tiles from every input file
+    # Step 1: Extract tiles from every input file, using a per-file
+    # pulse/range window if a region manifest was provided
     # ------------------------------------------------------------------
+    region_manifest = {}
+    if args.region_manifest is not None:
+        region_manifest = load_region_manifest(args.region_manifest)
+        print(f"\nLoaded region manifest from {args.region_manifest} "
+              f"({len(region_manifest)} entries)")
+
     eigen_all, global_all, frac_all = [], [], []
 
     for l0b_path in args.l0b_files:
+        region = resolve_region_for_file(l0b_path, region_manifest, args)
+        print(f"\nRegion for {l0b_path}: "
+              f"pulses [{region['pulse_start']}:{region['pulse_end']}], "
+              f"range [{region['range_start']}:{region['range_end']}]")
+
         eigen_feats, global_feats, diag_valid_fracs = extract_tiles_from_file(
             l0b_path,
             freq=args.freq,
@@ -397,10 +501,10 @@ def main():
             n_keep=args.n_keep,
             off_diag_overlap_ratio=args.off_diag_overlap_ratio,
             diag_valid_ratio=args.diag_valid_ratio,
-            pulse_start=args.pulse_start,
-            pulse_end=args.pulse_end,
-            range_start=args.range_start,
-            range_end=args.range_end,
+            pulse_start=region['pulse_start'],
+            pulse_end=region['pulse_end'],
+            range_start=region['range_start'],
+            range_end=region['range_end'],
         )
         eigen_all.append(eigen_feats)
         global_all.append(global_feats)
