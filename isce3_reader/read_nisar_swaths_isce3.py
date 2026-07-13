@@ -34,6 +34,7 @@ import h5py
 import numpy as np
 import os
 import sys
+import warnings
 from pathlib import Path
 from datetime import datetime
 import time
@@ -43,6 +44,130 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Add project root to path for model imports
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
+
+# Standard CPI dimensions: 16 pulses x 250 range samples
+CPI_LEN_DEFAULT = 16
+CPI_WIDTH_DEFAULT = 250
+
+# Default gap-exclusion covariance thresholds
+# Off-diagonal terms need >= 25% overlapping valid samples
+# Diagonal terms need >= 20% valid samples
+OFF_DIAG_OVERLAP_RATIO_DEFAULT = 0.25
+DIAG_VALID_RATIO_DEFAULT = 0.20
+
+
+def compute_gap_exclusion_cov(
+    data: np.ndarray,
+    *,
+    mask_valid_cpi: np.ndarray = None,
+    off_diag_overlap_ratio: float = OFF_DIAG_OVERLAP_RATIO_DEFAULT,
+    diag_valid_ratio: float = DIAG_VALID_RATIO_DEFAULT,
+):
+    """
+    Compute a gap-excluded slow-time sample covariance matrix.
+
+    Refactored from compute_evd_cpi.py so this script is self-contained.
+
+    Parameters
+    ----------
+    data: (num_pulses, num_rng_samples) complex array
+        Slow-time block: K pulses x M range samples.
+        Pulses should be contiguous in slow time for ST-EVD.
+    mask_valid_cpi: (num_pulses, num_rng_samples) bool array, optional
+        True indicates valid samples. False indicates invalid samples or gaps.
+        If None, an all true boolean mask is created and all samples are
+        assumed to be valid.
+    off_diag_overlap_ratio: float, default = 0.25
+        Minimum fraction of overlapping valid range samples required to compute
+        an off-diagonal term in the sample covariance matrix entry R_ij.
+    diag_valid_ratio : float, default = 0.20
+        Minimum fraction of valid samples required to compute a diagonal term
+        in the sample covariance matrix entry R_ii.
+
+    Returns
+    -------
+    cov : (num_pulses, num_pulses) complex64
+        Gap-excluded sample covariance matrix.
+    diag_valid_idx : (num_pulses,) bool array
+        True where the diagonal term had enough valid samples.
+
+    Notes
+    -----
+    The number of range samples per pulse should be equal or larger than
+    2 x number of pulses to have a reliable sample covariance matrix estimate.
+    """
+
+    num_pulses, num_rng_samples = data.shape
+
+    if mask_valid_cpi is None:
+        mask_valid_cpi = np.ones(data.shape, dtype=bool)
+    else:
+        mask_valid_cpi = mask_valid_cpi.astype(bool, copy=False)
+
+    if mask_valid_cpi.shape != data.shape:
+        raise ValueError(f"CPI mask shape {mask_valid_cpi.shape} != CPI data shape {data.shape}")
+
+    if not (0.0 < off_diag_overlap_ratio <= 1.0):
+        raise ValueError("off_diag_overlap_ratio must be between 0 and 1.")
+
+    if not (0.0 < diag_valid_ratio <= 1.0):
+        raise ValueError("diag_valid_ratio must be between 0 and 1.")
+
+    # Minimum samples required to compute diagonal and off-diagonal terms
+    min_valid_off_diag = max(1, int(np.ceil(off_diag_overlap_ratio * num_rng_samples)))
+    min_valid_diag = max(1, int(np.ceil(diag_valid_ratio * num_rng_samples)))
+
+    # The number of range samples per pulse should be >= 2 x number of pulses
+    # for a reliable estimate; only warn to allow exploring the trade-off
+    rng_samples_min = 2 * num_pulses
+
+    if min_valid_off_diag < rng_samples_min:
+        warnings.warn(f"""
+            Minimum number of samples required per pulse to estimate sample covariance matrix
+            is {rng_samples_min}. The number of valid overlapping off-diagonal samples is
+            {min_valid_off_diag}.
+        """)
+
+    if min_valid_diag < rng_samples_min:
+        warnings.warn(f"""
+            Minimum number of samples required per pulse to estimate sample covariance matrix
+            is {rng_samples_min}. The number of valid diagonal samples is {min_valid_diag}.
+        """)
+
+    # Zero-out invalid samples
+    x_valid = data * mask_valid_cpi
+
+    # Count valid sample overlap count for each element of the covariance matrix
+    mask_int = mask_valid_cpi.astype(np.int32)
+    overlap_counts = mask_int @ mask_int.T  # shape (pulse x pulse)
+
+    # Sum of conjugate products over overlapping valid samples (unnormalized)
+    cov_sum = x_valid @ x_valid.conj().T
+
+    # Initialize gap-excluded sample covariance matrix
+    cov = np.zeros((num_pulses, num_pulses), dtype=np.complex64)
+
+    # Diagonal terms
+    diag_idx = np.diag_indices(num_pulses)
+    diag_counts = overlap_counts[diag_idx]
+    diag_cov_sum = cov_sum[diag_idx]
+
+    # Check if there are enough valid samples
+    diag_valid_idx = diag_counts >= min_valid_diag
+
+    diag_vals = np.zeros(num_pulses, dtype=np.complex64)
+    diag_vals[diag_valid_idx] = diag_cov_sum[diag_valid_idx] / diag_counts[diag_valid_idx]
+    cov[diag_idx] = diag_vals
+
+    # Off-diagonal terms: verify there are enough overlapping valid samples
+    off_diag_valid = overlap_counts >= min_valid_off_diag
+    np.fill_diagonal(off_diag_valid, False)
+    cov[off_diag_valid] = cov_sum[off_diag_valid] / overlap_counts[off_diag_valid]
+
+    # Ensure Hermitian numerically
+    cov = (0.5 * (cov + cov.conj().T)).astype(np.complex64)
+
+    return cov, diag_valid_idx
 
 
 def parse_args():
@@ -95,8 +220,14 @@ Examples:
                         help='Compute eigenvalue decomposition (EVD)')
     parser.add_argument('--compute-subswath-mask', action='store_true',
                         help='Generate subswath mask to identify valid data regions')
-    parser.add_argument('--cpi-len', type=int, default=16,
-                        help='CPI length for EVD (default: 16)')
+    parser.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT,
+                        help=f'CPI length (pulses) for EVD (default: {CPI_LEN_DEFAULT}, standard CPI size is {CPI_LEN_DEFAULT}x{CPI_WIDTH_DEFAULT})')
+    parser.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT,
+                        help=f'CPI width (range samples) for model prediction tiles (default: {CPI_WIDTH_DEFAULT})')
+    parser.add_argument('--off-diag-overlap-ratio', type=float, default=OFF_DIAG_OVERLAP_RATIO_DEFAULT,
+                        help=f'Minimum overlap ratio for off-diagonal SCM terms when using gap-exclusion (default: {OFF_DIAG_OVERLAP_RATIO_DEFAULT})')
+    parser.add_argument('--diag-valid-ratio', type=float, default=DIAG_VALID_RATIO_DEFAULT,
+                        help=f'Minimum valid ratio for diagonal SCM terms when using gap-exclusion (default: {DIAG_VALID_RATIO_DEFAULT})')
 
     # Saving options - what to save to disk
     parser.add_argument('--save-raw', action='store_true',
@@ -197,7 +328,7 @@ def get_dataset_info(raw: Raw):
             }
 
             print(f"\n  {pol}:")
-            print(f"    ISCE3 Raw shape: {shape} (pulses × range samples)")
+            print(f"    ISCE3 Raw shape: {shape} (pulses x range samples)")
             if f'{freq}-{pol}' in h5_shapes:
                 h5_shape = h5_shapes[f'{freq}-{pol}']
                 print(f"    Raw HDF5 shape: {h5_shape}")
@@ -218,10 +349,12 @@ def extract_model_features(cpi, n_global_features=2):
     """
     Extract features for model prediction from a CPI tile.
 
+    Standard CPI tile dimensions: 16x250 (16 pulses x 250 range samples)
+
     Parameters
     ----------
     cpi : np.ndarray
-        Complex CPI array of shape (M, K)
+        Complex CPI array of shape (M, K), typically 16x250
     n_global_features : int
         Number of global features (2 or 5)
 
@@ -439,7 +572,10 @@ def process_polarization(
     # What to compute
     compute_eigenvalues: bool = False,
     compute_subswath_mask: bool = False,
-    cpi_len: int = 16,
+    cpi_len: int = CPI_LEN_DEFAULT,
+    cpi_width: int = CPI_WIDTH_DEFAULT,
+    off_diag_overlap_ratio: float = OFF_DIAG_OVERLAP_RATIO_DEFAULT,
+    diag_valid_ratio: float = DIAG_VALID_RATIO_DEFAULT,
     # What to save
     save_raw: bool = False,
     save_eigenvalues: bool = False,
@@ -477,7 +613,15 @@ def process_polarization(
     compute_subswath_mask : bool
         Whether to generate subswath mask
     cpi_len : int
-        CPI length for EVD (default: 16)
+        CPI length in pulses for EVD (default: 16, standard CPI is 16x250)
+    cpi_width : int
+        CPI width in range samples for model prediction tiles (default: 250)
+    off_diag_overlap_ratio : float
+        Minimum overlap ratio for off-diagonal SCM terms when using
+        gap-exclusion covariance with the subswath mask (default: 0.25)
+    diag_valid_ratio : float
+        Minimum valid ratio for diagonal SCM terms when using
+        gap-exclusion covariance with the subswath mask (default: 0.20)
     save_raw : bool
         Whether to save raw data to HDF5
     save_eigenvalues : bool
@@ -574,7 +718,8 @@ def process_polarization(
 
     if compute_eigenvalues:
         num_cpi = n_pulses // cpi_len
-        print(f"  Computing eigenvalues for {num_cpi} CPIs...")
+        print(f"  Computing eigenvalues for {num_cpi} CPIs (using full range data)...")
+        print(f"  Note: Standard CPI size is {CPI_LEN_DEFAULT}x{CPI_WIDTH_DEFAULT}, but eigenvalues use all {n_range} range samples")
         evd_start = time.time()
 
         eig_val_sort = np.zeros((num_cpi, cpi_len), dtype=np.float32)
@@ -584,21 +729,28 @@ def process_polarization(
 
         for cpi_idx in range(num_cpi):
             cpi_start = cpi_idx * cpi_len
+            # Use all available range samples for SCM computation
+            # Model prediction tiles will be extracted as cpi_len x cpi_width blocks later
             cpi_data = raw_data[cpi_start:cpi_start + cpi_len, :].copy()
 
-            # Apply subswath mask if available
             if compute_subswath_mask and subswath_mask is not None:
+                # Gap-exclusion covariance: exclude invalid samples and
+                # normalize each SCM entry by its own valid overlap count
                 cpi_mask = subswath_mask[cpi_start:cpi_start + cpi_len, :]
-                # Zero out data outside valid subswath regions
-                cpi_data = cpi_data * cpi_mask
-
-            # Compute SCM using the same method as compute_evd_cpi.py
-            M, K = cpi_data.shape
-            SCM = (cpi_data @ cpi_data.conj().T) / K
+                SCM, cpi_diag_valid = compute_gap_exclusion_cov(
+                    cpi_data,
+                    mask_valid_cpi=cpi_mask,
+                    off_diag_overlap_ratio=off_diag_overlap_ratio,
+                    diag_valid_ratio=diag_valid_ratio,
+                )
+                diag_valid[cpi_idx, :] = cpi_diag_valid
+            else:
+                # Standard SCM without mask
+                M, K = cpi_data.shape
+                SCM = (cpi_data @ cpi_data.conj().T) / K
 
             # Eigenvalue decomposition using eigh for Hermitian matrix
             # eigh returns eigenvalues in ASCENDING order, so reverse them
-            # This matches the eigen_decomp_sort() method in compute_evd_cpi.py
             eigvals = np.linalg.eigvalsh(SCM)
             eig_val_sort[cpi_idx, :] = eigvals[::-1]  # Descending order
 
@@ -613,10 +765,10 @@ def process_polarization(
     predictions = None
     if model is not None and compute_eigenvalues:
         n_range_data = raw_data.shape[1]
-        cpi_width = 250  # Standard CPI width
+        # cpi_width defaults to 250 range samples (standard CPI is 16x250)
         n_range_tiles = n_range_data // cpi_width
 
-        print(f"  Running model predictions on {num_cpi} CPIs × {n_range_tiles} range tiles = {num_cpi * n_range_tiles} total tiles...")
+        print(f"  Running model predictions on {num_cpi} CPIs x {n_range_tiles} range tiles = {num_cpi * n_range_tiles} total tiles...")
         pred_start = time.time()
 
         eigen_list = []
@@ -645,7 +797,7 @@ def process_polarization(
         # Predict
         probs = model.predict([eigen_batch, global_batch], verbose=0)
 
-        # Extract predictions and reshape to 2D (pulse_tiles × range_tiles)
+        # Extract predictions and reshape to 2D (pulse_tiles x range_tiles)
         knee_indices = np.argmax(probs, axis=-1).astype(np.int32).reshape(num_cpi, n_range_tiles)
         confidences = np.max(probs, axis=-1).astype(np.float32).reshape(num_cpi, n_range_tiles)
 
@@ -659,7 +811,7 @@ def process_polarization(
 
         pred_time = time.time() - pred_start
         print(f"  Predictions computed in {pred_time:.2f}s")
-        print(f"  Prediction shape: {knee_indices.shape} (pulse_tiles × range_tiles)")
+        print(f"  Prediction shape: {knee_indices.shape} (pulse_tiles x range_tiles)")
 
         # Print summary statistics
         unique, counts = np.unique(knee_indices, return_counts=True)
@@ -741,6 +893,10 @@ def process_polarization(
             meta_grp.attrs['frequency'] = freq
             meta_grp.attrs['polarization'] = pol
             meta_grp.attrs['cpi_len'] = cpi_len
+            meta_grp.attrs['cpi_width'] = cpi_width
+            meta_grp.attrs['off_diag_overlap_ratio'] = off_diag_overlap_ratio
+            meta_grp.attrs['diag_valid_ratio'] = diag_valid_ratio
+            meta_grp.attrs['gap_exclusion_used'] = bool(compute_subswath_mask and subswath_mask is not None)
             meta_grp.attrs['num_cpi'] = num_cpi
             meta_grp.attrs['pulse_start'] = p_start
             meta_grp.attrs['pulse_end'] = p_end
@@ -775,7 +931,7 @@ def process_polarization(
                 pred_grp.attrs['n_predictions'] = predictions['knee_indices'].size
                 pred_grp.attrs['mean_confidence'] = float(np.mean(predictions['confidences']))
                 pred_grp.attrs['prediction_time_s'] = pred_time
-                pred_grp.attrs['cpi_width'] = 250  # Standard tile width
+                pred_grp.attrs['cpi_width'] = cpi_width
 
     total_time = time.time() - start_time
 
@@ -836,7 +992,10 @@ def main():
     print(f"\nProcessing configuration:")
     print(f"  Compute eigenvalues: {compute_eigenvalues}")
     if compute_eigenvalues:
-        print(f"    CPI length: {args.cpi_len}")
+        print(f"    CPI size: {args.cpi_len}x{args.cpi_width}")
+        if compute_subswath_mask:
+            print(f"    Gap-exclusion off-diagonal overlap ratio: {args.off_diag_overlap_ratio}")
+            print(f"    Gap-exclusion diagonal valid ratio: {args.diag_valid_ratio}")
     print(f"  Compute subswath mask: {compute_subswath_mask}")
     print(f"  Model predictions: {args.model is not None}")
     print(f"\nSaving configuration:")
@@ -885,6 +1044,9 @@ def main():
                 compute_eigenvalues=compute_eigenvalues,
                 compute_subswath_mask=compute_subswath_mask,
                 cpi_len=args.cpi_len,
+                cpi_width=args.cpi_width,
+                off_diag_overlap_ratio=args.off_diag_overlap_ratio,
+                diag_valid_ratio=args.diag_valid_ratio,
                 save_raw=args.save_raw,
                 save_eigenvalues=save_eigenvalues,
                 save_subswath_mask=args.save_subswath_mask,
