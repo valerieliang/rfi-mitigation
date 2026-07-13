@@ -46,8 +46,6 @@ def parse_args():
                         help='Start range sample index for subset visualization')
     parser.add_argument('--range-end', type=int, default=None,
                         help='End range sample index for subset visualization')
-    parser.add_argument('--overlay-alpha', type=float, default=0.6,
-                        help='Opacity of black overlay on originally-invalid regions (default: 0.6)')
     parser.add_argument('--dpi', type=int, default=150,
                         help='DPI for saved figures (default: 150)')
     parser.add_argument('--show', action='store_true',
@@ -116,9 +114,10 @@ def compute_power_db(data):
 
 
 def plot_padded_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=None,
-                          dpi=150, show=False, overlay_alpha=0.6):
+                          dpi=150, show=False):
     """
-    Plot padded raw data power and the original subswath mask side by side.
+    Plot padded data power and the subswath mask side by side (two panels,
+    no overlay).
 
     Parameters
     ----------
@@ -131,65 +130,47 @@ def plot_padded_and_mask(raw_data, mask, metadata, output_file, vmin=None, vmax=
     output_file : str
         Output file path
     vmin, vmax : float, optional
-        Color scale limits in dB for the raw power panels
+        Color scale limits in dB for the padded power panel
     dpi : int
         DPI for saved figure
     show : bool
         Whether to display the plot interactively
-    overlay_alpha : float
-        Opacity of the black overlay marking originally-invalid regions in
-        the third panel (0 = fully transparent, 1 = solid black)
     """
-    power_db = compute_power_db(raw_data)
+    padded_power_db = compute_power_db(raw_data)
 
     if mask is not None:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        ax_power, ax_mask, ax_overlay = axes
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        ax_padded, ax_mask = axes
     else:
-        fig, ax_power = plt.subplots(1, 1, figsize=(8, 6))
+        fig, ax_padded = plt.subplots(1, 1, figsize=(6, 6))
 
     if vmin is None:
-        vmin = np.percentile(power_db[np.isfinite(power_db)], 1)
+        vmin = np.percentile(padded_power_db[np.isfinite(padded_power_db)], 1)
     if vmax is None:
-        vmax = np.percentile(power_db[np.isfinite(power_db)], 99)
+        vmax = np.percentile(padded_power_db[np.isfinite(padded_power_db)], 99)
 
-    # Panel 1: padded raw power (fully filled, no gaps)
-    im_power = ax_power.imshow(power_db, aspect='auto', cmap='viridis',
-                                vmin=vmin, vmax=vmax, origin='lower')
-    ax_power.set_xlabel('Range Sample')
-    ax_power.set_ylabel('Pulse (Slow Time)')
-    ax_power.set_title('Padded Data Power (dB)')
-    plt.colorbar(im_power, ax=ax_power, label='Power (dB)')
+    # Panel: padded data power
+    im_padded = ax_padded.imshow(padded_power_db, aspect='auto', cmap='viridis',
+                                  vmin=vmin, vmax=vmax, origin='upper')
+    ax_padded.set_xlabel('Range Sample')
+    ax_padded.set_ylabel('Pulse (Slow Time)')
+    ax_padded.set_title('Padded Data Power (dB)')
+    plt.colorbar(im_padded, ax=ax_padded, label='Power (dB)')
 
+    # Panel: subswath mask
     if mask is not None:
-        # Panel 2: original subswath mask (before padding)
         im_mask = ax_mask.imshow(mask, aspect='auto', cmap='gray',
-                                  vmin=0, vmax=1, origin='lower')
+                                  vmin=0, vmax=1, origin='upper')
         ax_mask.set_xlabel('Range Sample')
         ax_mask.set_ylabel('Pulse (Slow Time)')
-        ax_mask.set_title('Original Subswath Mask (Pre-Padding)')
+        ax_mask.set_title('Subswath Mask (Pre-Padding)')
         plt.colorbar(im_mask, ax=ax_mask, label='Valid (1) / Gap (0)')
-
-        # Panel 3: padded power with a transparent overlay marking regions
-        # that were originally invalid and are now filled.
-        im_overlay = ax_overlay.imshow(power_db, aspect='auto', cmap='viridis',
-                                        vmin=vmin, vmax=vmax, origin='lower')
-
-        overlay = np.zeros((*mask.shape, 4), dtype=np.float32)
-        overlay[~mask] = [0.0, 0.0, 0.0, overlay_alpha]
-        ax_overlay.imshow(overlay, aspect='auto', origin='lower',
-                           interpolation='nearest')
-
-        ax_overlay.set_xlabel('Range Sample')
-        ax_overlay.set_ylabel('Pulse (Slow Time)')
-        ax_overlay.set_title('Padded Power with Originally-Invalid Regions Overlaid')
-        plt.colorbar(im_overlay, ax=ax_overlay, label='Power (dB)')
 
     freq = metadata.get('frequency', 'N/A')
     pol = metadata.get('polarization', 'N/A')
     shape = raw_data.shape
     num_filled = metadata.get('num_samples_filled', None)
-    title = f'NISAR Padded Data: Freq {freq}, Pol {pol}, Shape {shape}'
+    title = f'NISAR Data: Freq {freq}, Pol {pol}, Shape {shape}'
     if num_filled is not None:
         title += f', Samples Filled: {num_filled}'
     fig.suptitle(title, fontsize=14, y=0.98)
@@ -319,15 +300,10 @@ def plot_scm_comparison(raw_data, mask, metadata, output_file,
         eigvals = np.linalg.eigvalsh(SCM)
         return SCM, eigvals[::-1]  # Descending order
 
-    _, clean_eigvals = compute_scm_and_eigvals(clean_cpi_idx)
-    _, dropout_eigvals = compute_scm_and_eigvals(dropout_cpi_idx) if dropout_cpi_idx is not None else (None, clean_eigvals)
-
-    clean_eigvals_db = 10 * np.log10(np.maximum(clean_eigvals, 1e-12))
-    dropout_eigvals_db = 10 * np.log10(np.maximum(dropout_eigvals, 1e-12))
-    eigval_ymin = min(clean_eigvals_db.min(), dropout_eigvals_db.min())
-    eigval_ymax = max(clean_eigvals_db.max(), dropout_eigvals_db.max())
-    eigval_yrange = eigval_ymax - eigval_ymin
-    eigval_ylim = (eigval_ymin - 0.05 * eigval_yrange, eigval_ymax + 0.05 * eigval_yrange)
+    # Eigenvalue spectrum y-axis is fixed to 0-60 dB (only the eigenvalue
+    # profile plots are constrained this way; the SCM magnitude color scale
+    # is handled separately via SCM_DB_VMIN/SCM_DB_VMAX)
+    eigval_ylim = (0.0, 60.0)
 
     # Create figure: 2 rows (clean vs padded), 2 columns (SCM magnitude, eigenvalues)
     fig = plt.figure(figsize=(12, 10))
@@ -353,7 +329,7 @@ def plot_scm_comparison(raw_data, mask, metadata, output_file,
         ax1 = fig.add_subplot(gs[row_idx, 0])
         scm_db = 10 * np.log10(np.abs(SCM) + 1e-12)
         im1 = ax1.imshow(scm_db, aspect='auto', cmap='viridis',
-                          vmin=SCM_DB_VMIN, vmax=SCM_DB_VMAX, origin='lower')
+                          vmin=SCM_DB_VMIN, vmax=SCM_DB_VMAX, origin='upper')
         ax1.set_xlabel('Pulse Index')
         ax1.set_ylabel('Pulse Index')
         ax1.set_title(f'{row_label}\nSCM Magnitude (dB) | [{global_pulse}, {global_range}] {cpi_dims} | Originally Valid: {valid_pct:.1f}%')
@@ -507,8 +483,7 @@ def main():
 
     print("\nCreating visualizations...")
     plot_padded_and_mask(raw_data, mask, metadata, str(output_file),
-                         vmin=args.vmin, vmax=args.vmax, dpi=args.dpi, show=args.show,
-                         overlay_alpha=args.overlay_alpha)
+                         vmin=args.vmin, vmax=args.vmax, dpi=args.dpi, show=args.show)
     plot_power_histogram(raw_data, mask, metadata, str(hist_file), dpi=args.dpi, show=args.show)
 
     print(f"\nCreating SCM comparison visualization (CPI size: {args.cpi_len}x{args.cpi_width})...")
