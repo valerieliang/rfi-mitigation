@@ -1,0 +1,22 @@
+{
+  "l0b_files": [
+    "/scratch2/bohuang/amazon/NISAR_L0_PR_RRSD_010_017_A_148S_20260110T101338_20260110T102252_X05009_N_J_001.h5"
+  ],
+  "freq": "A",
+  "pol": "HV",
+  "cpi_len": 16,
+  "cpi_width": 250,
+  "n_keep": 12,
+  "off_diag_overlap_ratio": 0.03,
+  "diag_valid_ratio": 0.02,
+  "n_tiles_total": 427156,
+  "cond_db_filter": 25.0,
+  "n_tiles_clean_corpus": 427156,
+  "n_tiles_excluded": 0,
+  "n_train": 384440,
+  "n_val": 42716,
+  "final_train_loss": 0.018140016123652458,
+  "final_val_loss": 0.01672854833304882,
+  "recommended_threshold_p95": 0.04107276722788811,
+  "recommended_threshold_p99": 0.07373074665665626
+}
