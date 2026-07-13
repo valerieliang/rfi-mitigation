@@ -1,33 +1,45 @@
 """
 read_nisar_swaths_padded_isce3.py
 
-Efficient NISAR L0B data reader using ISCE3's Raw reader, extended to pad
-invalid raw data samples (as identified by the subswath mask) with valid
-data taken from directly beneath them in the pulse (slow time) dimension.
+NISAR L0B data reader using ISCE3's Raw reader, extended with an optional
+padding step that fills invalid raw data samples (as identified by the
+subswath mask) with valid data taken from directly beneath them in the
+pulse (slow time) dimension.
 
-For every invalid sample at pulse index i and range index j, the fill value
-is the nearest valid sample at pulse index k >= i in the same range column
-(i.e. the sample "directly beneath" it, since increasing pulse index is
-further down the pulse dimension). If no valid sample exists below a given
-position (for example near the very last pulses of a column), the nearest
-valid sample above the position is used instead as a fallback.
+This script's flags mirror read_nisar_swaths_isce3.py's behavior for
+raw/mask handling: nothing is computed or saved unless you ask for it.
+Two additional flags control padding:
+
+    --pad-invalid   Fill invalid samples using the value directly beneath
+                     them (requires the subswath mask, which is computed
+                     automatically if not already requested)
+    --save-padded    Save the padded data to nisar_padded_<freq>_<pol>.h5
+                     (requires --pad-invalid)
+
+For every invalid sample at pulse index i and range index j, the fill
+value is the nearest valid sample at pulse index k >= i in the same range
+column (i.e. the sample "directly beneath" it, since increasing pulse
+index is further down the pulse dimension). If no valid sample exists
+below a given position (for example near the very last pulses of a
+column), the nearest valid sample above the position is used instead as a
+fallback.
 
 Usage:
-    python read_nisar_swaths_padded_isce3.py input.h5 --output-dir ./output
+    # Match the original script: just save raw data, no mask, no padding
+    python read_nisar_swaths_padded_isce3.py input.h5 --save-raw --output-dir ./output
+
+    # Compute and save the subswath mask alongside raw data
+    python read_nisar_swaths_padded_isce3.py input.h5 --save-raw \\
+        --compute-subswath-mask --save-subswath-mask --output-dir ./output
+
+    # Pad invalid samples and save the padded result
+    python read_nisar_swaths_padded_isce3.py input.h5 \\
+        --pad-invalid --save-padded --output-dir ./output
 
     # Process a specific frequency/polarization with range subsetting
-    python read_nisar_swaths_padded_isce3.py input.h5 --freq A --pol HV \
-        --range-start 0 --range-end 25000 --output-dir ./output
-
-Output:
-    For each frequency/polarization processed, a file named
-    nisar_padded_<freq>_<pol>.h5 is written to the output directory,
-    containing:
-      - raw_data: the padded (fully filled) complex raw data
-      - subswath_mask/mask: the original boolean mask, before padding,
-        so downstream tools can see which samples were originally invalid
-      - metadata: frequency, polarization, index ranges, chirp parameters,
-        fill statistics, and processing date
+    python read_nisar_swaths_padded_isce3.py input.h5 --freq A --pol HV \\
+        --range-start 0 --range-end 25000 --pad-invalid --save-padded \\
+        --output-dir ./output
 """
 
 import argparse
@@ -44,16 +56,23 @@ from nisar.products.readers.Raw import Raw
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Read NISAR L0B data and pad invalid samples using the subswath mask',
+        description='Read NISAR L0B data, optionally padding invalid samples using the subswath mask',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Pad all frequencies/polarizations in a file
-  python read_nisar_swaths_padded_isce3.py input.h5 --output-dir ./output
+  # Save raw data only (no mask, no padding)
+  python read_nisar_swaths_padded_isce3.py input.h5 --save-raw
+
+  # Compute and save subswath mask alongside raw data
+  python read_nisar_swaths_padded_isce3.py input.h5 --save-raw \\
+      --compute-subswath-mask --save-subswath-mask
+
+  # Pad invalid samples and save the padded result
+  python read_nisar_swaths_padded_isce3.py input.h5 --pad-invalid --save-padded
 
   # Process a specific frequency/pol with range subsetting
   python read_nisar_swaths_padded_isce3.py input.h5 --freq A --pol HV \\
-      --range-start 0 --range-end 25000 --output-dir ./output
+      --range-start 0 --range-end 25000 --pad-invalid --save-padded
         """
     )
 
@@ -63,7 +82,7 @@ Examples:
     parser.add_argument('--pol', choices=['HH', 'HV', 'VH', 'VV'], default=None,
                         help='Process only this polarization (default: all)')
     parser.add_argument('--output-dir', type=str, default='./nisar_output',
-                        help='Output directory for padded data (default: ./nisar_output)')
+                        help='Output directory for processed data (default: ./nisar_output)')
 
     # Subsetting options
     parser.add_argument('--pulse-start', type=int, default=None,
@@ -74,6 +93,21 @@ Examples:
                         help='Start range sample index (default: 0)')
     parser.add_argument('--range-end', type=int, default=None,
                         help='End range sample index (default: all)')
+
+    # Processing options - what to compute
+    parser.add_argument('--compute-subswath-mask', action='store_true',
+                        help='Generate subswath mask to identify valid data regions')
+    parser.add_argument('--pad-invalid', action='store_true',
+                        help='Pad invalid samples using the value directly beneath them '
+                             '(automatically enables --compute-subswath-mask)')
+
+    # Saving options - what to save to disk
+    parser.add_argument('--save-raw', action='store_true',
+                        help='Save unpadded raw data to nisar_<freq>_<pol>_raw.h5')
+    parser.add_argument('--save-subswath-mask', action='store_true',
+                        help='Save subswath mask (requires --compute-subswath-mask)')
+    parser.add_argument('--save-padded', action='store_true',
+                        help='Save padded data to nisar_padded_<freq>_<pol>.h5 (requires --pad-invalid)')
 
     return parser.parse_args()
 
@@ -272,11 +306,16 @@ def process_polarization(
     pulse_end: int = None,
     range_start: int = None,
     range_end: int = None,
+    # What to compute
+    compute_subswath_mask: bool = False,
+    pad_invalid: bool = False,
+    # What to save
+    save_raw: bool = False,
+    save_subswath_mask: bool = False,
+    save_padded: bool = False,
 ):
     """
-    Read raw data for one frequency/polarization, compute its subswath
-    mask, pad invalid samples, and save the result to an HDF5 file named
-    nisar_padded_<freq>_<pol>.h5.
+    Unified processing function for a single polarization.
 
     Parameters
     ----------
@@ -292,6 +331,18 @@ def process_polarization(
         Pulse range to process
     range_start, range_end : int, optional
         Range sample limits
+    compute_subswath_mask : bool
+        Whether to generate the subswath mask
+    pad_invalid : bool
+        Whether to pad invalid samples using the subswath mask (requires
+        compute_subswath_mask=True)
+    save_raw : bool
+        Whether to save unpadded raw data to nisar_<freq>_<pol>_raw.h5
+    save_subswath_mask : bool
+        Whether to save the subswath mask (requires compute_subswath_mask=True)
+    save_padded : bool
+        Whether to save padded data to nisar_padded_<freq>_<pol>.h5 (requires
+        pad_invalid=True)
 
     Returns
     -------
@@ -327,80 +378,130 @@ def process_polarization(
     if raw_data.size == 0:
         raise ValueError(f"No data read! Check range limits. Dataset shape: {dataset.shape}")
 
-    print("  Generating subswath mask...")
-    mask_start = time.time()
-    pulse_indices = np.arange(p_start, p_end)
-    range_indices = np.arange(r_start, r_end)
-    subswath_mask = get_subswath_mask(raw, freq, pol, pulse_indices, range_indices)
-    mask_time = time.time() - mask_start
+    # Generate subswath mask if requested
+    subswath_mask = None
+    if compute_subswath_mask:
+        print("  Generating subswath mask...")
+        mask_start = time.time()
+        pulse_indices = np.arange(p_start, p_end)
+        range_indices = np.arange(r_start, r_end)
+        subswath_mask = get_subswath_mask(raw, freq, pol, pulse_indices, range_indices)
+        mask_time = time.time() - mask_start
 
-    valid_pct = 100 * subswath_mask.sum() / subswath_mask.size
-    print(f"  Subswath mask generated in {mask_time:.2f}s")
-    print(f"  Valid data within subswaths: {valid_pct:.1f}%")
+        valid_pct = 100 * subswath_mask.sum() / subswath_mask.size
+        print(f"  Subswath mask generated in {mask_time:.2f}s")
+        print(f"  Valid data within subswaths: {valid_pct:.1f}%")
 
-    print("  Padding invalid samples using data directly beneath...")
-    pad_start = time.time()
-    padded_data, num_filled, num_unfilled = fill_invalid_with_valid_below(raw_data, subswath_mask)
-    pad_time = time.time() - pad_start
-    print(f"  Padding complete in {pad_time:.2f}s")
-    print(f"  Samples filled: {num_filled}")
-    if num_unfilled > 0:
-        print(f"  WARNING: {num_unfilled} samples could not be filled (no valid sample in column)")
+    # Pad invalid samples if requested
+    padded_data = None
+    num_filled = None
+    num_unfilled = None
+    if pad_invalid:
+        print("  Padding invalid samples using data directly beneath...")
+        pad_start = time.time()
+        padded_data, num_filled, num_unfilled = fill_invalid_with_valid_below(raw_data, subswath_mask)
+        pad_time = time.time() - pad_start
+        print(f"  Padding complete in {pad_time:.2f}s")
+        print(f"  Samples filled: {num_filled}")
+        if num_unfilled > 0:
+            print(f"  WARNING: {num_unfilled} samples could not be filled (no valid sample in column)")
 
     # Get chirp parameters for metadata
     pol_tx = pol[0]
     fc, fs, _, _ = raw.getChirpParameters(freq, pol_tx)
     bandwidth = raw.getRangeBandwidth(freq, pol_tx)
 
-    output_file = os.path.join(output_dir, f'nisar_padded_{freq}_{pol}.h5')
-    print(f"  Saving padded data to {output_file}...")
+    # Save raw (unpadded) data if requested
+    if save_raw:
+        output_file = os.path.join(output_dir, f'nisar_{freq}_{pol}_raw.h5')
+        print(f"  Saving raw data to {output_file}...")
 
-    save_start = time.time()
-    with h5py.File(output_file, 'w') as f:
-        # Save padded raw data
-        f.create_dataset('raw_data', data=padded_data, compression='gzip', compression_opts=4)
+        save_start = time.time()
+        with h5py.File(output_file, 'w') as f:
+            f.create_dataset('raw_data', data=raw_data, compression='gzip', compression_opts=4)
 
-        # Save the original (pre-padding) subswath mask for reference
-        mask_grp = f.create_group('subswath_mask')
-        mask_grp.create_dataset('mask', data=subswath_mask, compression='gzip')
-        mask_grp.attrs['description'] = (
-            'Original boolean mask indicating valid data within subswath '
-            'boundaries, prior to padding'
-        )
-        mask_grp.attrs['shape'] = subswath_mask.shape
-        mask_grp.attrs['valid_fraction'] = float(subswath_mask.sum() / subswath_mask.size)
+            meta_grp = f.create_group('metadata')
+            meta_grp.attrs['frequency'] = freq
+            meta_grp.attrs['polarization'] = pol
+            meta_grp.attrs['pulse_start'] = p_start
+            meta_grp.attrs['pulse_end'] = p_end
+            meta_grp.attrs['range_start'] = r_start
+            meta_grp.attrs['range_end'] = r_end
+            meta_grp.attrs['shape'] = raw_data.shape
+            meta_grp.attrs['dtype'] = str(raw_data.dtype)
+            meta_grp.attrs['center_frequency_hz'] = fc
+            meta_grp.attrs['sample_rate_hz'] = fs
+            meta_grp.attrs['bandwidth_hz'] = bandwidth
+            meta_grp.attrs['processing_date'] = datetime.now().isoformat()
 
-        # Save metadata
-        meta_grp = f.create_group('metadata')
-        meta_grp.attrs['frequency'] = freq
-        meta_grp.attrs['polarization'] = pol
-        meta_grp.attrs['pulse_start'] = p_start
-        meta_grp.attrs['pulse_end'] = p_end
-        meta_grp.attrs['range_start'] = r_start
-        meta_grp.attrs['range_end'] = r_end
-        meta_grp.attrs['shape'] = padded_data.shape
-        meta_grp.attrs['dtype'] = str(padded_data.dtype)
-        meta_grp.attrs['center_frequency_hz'] = fc
-        meta_grp.attrs['sample_rate_hz'] = fs
-        meta_grp.attrs['bandwidth_hz'] = bandwidth
-        meta_grp.attrs['fill_method'] = 'nearest_valid_pulse_below_with_above_fallback'
-        meta_grp.attrs['num_samples_filled'] = num_filled
-        meta_grp.attrs['num_samples_unfilled'] = num_unfilled
-        meta_grp.attrs['processing_date'] = datetime.now().isoformat()
+            stats = {
+                'mean': np.mean(np.abs(raw_data)),
+                'std': np.std(np.abs(raw_data)),
+                'max': np.max(np.abs(raw_data)),
+                'min': np.min(np.abs(raw_data)),
+            }
+            stats_grp = f.create_group('statistics')
+            for key, val in stats.items():
+                stats_grp.attrs[key] = val
 
-        # Compute and save statistics on the padded data
-        stats = {
-            'mean': np.mean(np.abs(padded_data)),
-            'std': np.std(np.abs(padded_data)),
-            'max': np.max(np.abs(padded_data)),
-            'min': np.min(np.abs(padded_data)),
-        }
-        stats_grp = f.create_group('statistics')
-        for key, val in stats.items():
-            stats_grp.attrs[key] = val
+            if save_subswath_mask and subswath_mask is not None:
+                mask_grp = f.create_group('subswath_mask')
+                mask_grp.create_dataset('mask', data=subswath_mask, compression='gzip')
+                mask_grp.attrs['description'] = 'Boolean mask indicating valid data within subswath boundaries'
+                mask_grp.attrs['shape'] = subswath_mask.shape
+                mask_grp.attrs['valid_fraction'] = float(subswath_mask.sum() / subswath_mask.size)
 
-    save_time = time.time() - save_start
-    print(f"  Padded data saved in {save_time:.2f}s")
+        save_time = time.time() - save_start
+        print(f"  Raw data saved in {save_time:.2f}s")
+
+    # Save padded data if requested
+    if save_padded and padded_data is not None:
+        output_file = os.path.join(output_dir, f'nisar_padded_{freq}_{pol}.h5')
+        print(f"  Saving padded data to {output_file}...")
+
+        save_start = time.time()
+        with h5py.File(output_file, 'w') as f:
+            f.create_dataset('raw_data', data=padded_data, compression='gzip', compression_opts=4)
+
+            # Save the original (pre-padding) subswath mask for reference
+            mask_grp = f.create_group('subswath_mask')
+            mask_grp.create_dataset('mask', data=subswath_mask, compression='gzip')
+            mask_grp.attrs['description'] = (
+                'Original boolean mask indicating valid data within subswath '
+                'boundaries, prior to padding'
+            )
+            mask_grp.attrs['shape'] = subswath_mask.shape
+            mask_grp.attrs['valid_fraction'] = float(subswath_mask.sum() / subswath_mask.size)
+
+            meta_grp = f.create_group('metadata')
+            meta_grp.attrs['frequency'] = freq
+            meta_grp.attrs['polarization'] = pol
+            meta_grp.attrs['pulse_start'] = p_start
+            meta_grp.attrs['pulse_end'] = p_end
+            meta_grp.attrs['range_start'] = r_start
+            meta_grp.attrs['range_end'] = r_end
+            meta_grp.attrs['shape'] = padded_data.shape
+            meta_grp.attrs['dtype'] = str(padded_data.dtype)
+            meta_grp.attrs['center_frequency_hz'] = fc
+            meta_grp.attrs['sample_rate_hz'] = fs
+            meta_grp.attrs['bandwidth_hz'] = bandwidth
+            meta_grp.attrs['fill_method'] = 'nearest_valid_pulse_below_with_above_fallback'
+            meta_grp.attrs['num_samples_filled'] = num_filled
+            meta_grp.attrs['num_samples_unfilled'] = num_unfilled
+            meta_grp.attrs['processing_date'] = datetime.now().isoformat()
+
+            stats = {
+                'mean': np.mean(np.abs(padded_data)),
+                'std': np.std(np.abs(padded_data)),
+                'max': np.max(np.abs(padded_data)),
+                'min': np.min(np.abs(padded_data)),
+            }
+            stats_grp = f.create_group('statistics')
+            for key, val in stats.items():
+                stats_grp.attrs[key] = val
+
+        save_time = time.time() - save_start
+        print(f"  Padded data saved in {save_time:.2f}s")
 
     total_time = time.time() - start_time
     print(f"  Total time: {total_time:.2f}s")
@@ -408,10 +509,9 @@ def process_polarization(
     return {
         'frequency': freq,
         'polarization': pol,
-        'shape': padded_data.shape,
-        'num_filled': num_filled,
-        'num_unfilled': num_unfilled,
-        'output_file': output_file,
+        'shape': raw_data.shape,
+        'num_filled': num_filled if num_filled is not None else 0,
+        'num_unfilled': num_unfilled if num_unfilled is not None else 0,
         'total_time': total_time,
         'data_size_gb': data_gb,
     }
@@ -428,11 +528,36 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Handle dependent flags, same pattern as read_nisar_swaths_isce3.py
+    compute_subswath_mask = args.compute_subswath_mask
+    pad_invalid = args.pad_invalid
+
+    if args.pad_invalid and not compute_subswath_mask:
+        print("NOTE: --pad-invalid requires the subswath mask. Enabling --compute-subswath-mask.")
+        compute_subswath_mask = True
+
+    if args.save_subswath_mask and not compute_subswath_mask:
+        print("WARNING: --save-subswath-mask requires --compute-subswath-mask. Enabling mask computation.")
+        compute_subswath_mask = True
+
+    if args.save_padded and not pad_invalid:
+        print("WARNING: --save-padded requires --pad-invalid. Enabling padding.")
+        pad_invalid = True
+        if not compute_subswath_mask:
+            compute_subswath_mask = True
+
     print("\n" + "=" * 70)
-    print("NISAR L0B Padded Data Reader (ISCE3)")
+    print("NISAR L0B Data Reader (ISCE3) with Optional Padding")
     print("=" * 70)
     print(f"Input file: {args.input_file}")
     print(f"Output directory: {args.output_dir}")
+    print("\nProcessing configuration:")
+    print(f"  Compute subswath mask: {compute_subswath_mask}")
+    print(f"  Pad invalid samples: {pad_invalid}")
+    print("\nSaving configuration:")
+    print(f"  Save raw data: {args.save_raw}")
+    print(f"  Save subswath mask: {args.save_subswath_mask}")
+    print(f"  Save padded data: {args.save_padded}")
 
     print("\nInitializing ISCE3 Raw reader...")
     start_time = time.time()
@@ -455,6 +580,11 @@ def main():
                 pulse_end=args.pulse_end,
                 range_start=args.range_start,
                 range_end=args.range_end,
+                compute_subswath_mask=compute_subswath_mask,
+                pad_invalid=pad_invalid,
+                save_raw=args.save_raw,
+                save_subswath_mask=args.save_subswath_mask,
+                save_padded=args.save_padded,
             )
             all_results.append(results)
 
@@ -468,9 +598,10 @@ def main():
     print("=" * 70)
     print(f"Total datasets processed: {len(all_results)}")
     print(f"Total data processed: {total_data_gb:.3f} GB")
-    print(f"Total samples filled: {total_filled}")
-    if total_unfilled > 0:
-        print(f"Total samples unfilled: {total_unfilled}")
+    if pad_invalid:
+        print(f"Total samples filled: {total_filled}")
+        if total_unfilled > 0:
+            print(f"Total samples unfilled: {total_unfilled}")
     print(f"Total time: {total_time:.2f}s ({total_time / 60:.2f} min)")
     print(f"Output directory: {args.output_dir}")
     print("=" * 70 + "\n")
