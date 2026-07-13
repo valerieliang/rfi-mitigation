@@ -7,6 +7,23 @@ corpus itself).
 
 Standard CPI size: 16 pulses x 250 range samples.
 
+Polarization handling (default: HH and HV pooled)
+----------------------------------------------------
+By default this script trains a SINGLE unified model on tiles pooled from
+BOTH HH and HV (--pol HH HV). The model has no polarization input, so it
+learns one shared notion of "what a clean eigenvalue spectrum looks like"
+across both receive chains, rather than a separate model per polarization.
+
+This is a deliberate choice: RFI couples independently into each receive
+chain, so HH cleanliness is not a valid proxy for HV cleanliness (or vice
+versa) -- but that is a statement about using one polarization to LABEL the
+other, not about whether a shared reconstruction model can generalize across
+both. Pooling both into one training corpus gives the autoencoder more
+examples of "clean" to learn the shared spectral shape from.
+
+To train on a single polarization only (matching the original behavior),
+pass --pol HV or --pol HH explicitly.
+
 Why train on real data directly
 ---------------------------------
 The previous classifier was trained on synthetic clean/RFI data and failed
@@ -20,19 +37,29 @@ Clean corpus self-filtering (important caveat)
 -------------------------------------------------
 Real L0B data has no ground-truth RFI labels. This script assumes the BULK
 of tiles in a typical granule are RFI-free, and self-filters obvious outliers
-before training using a condition-number-in-dB threshold
-(--cond-db-filter, default 25.0 dB). This is a heuristic, not ground truth:
+before training using a SINGLE condition-number-in-dB threshold applied
+across all requested polarizations (--cond-db-filter, default 25.0 dB).
+This is a heuristic, not ground truth:
 - Too low a threshold discards legitimately clean but naturally sharp-kneed
   tiles (false exclusion).
 - Too high a threshold lets contaminated tiles leak into the "clean"
   training corpus (fewer exclusions, dirtier corpus).
-Inspect the printed condition-number percentiles and the saved histogram
-plot, and adjust --cond-db-filter for your data before committing to a run.
+- A single threshold assumes HH and HV have broadly similar condition-number
+  distributions. The saved condition-number histogram breaks this down by
+  polarization so you can check that assumption before trusting a run.
+Inspect the printed condition-number percentiles (overall and per
+polarization) and the saved histogram plot, and adjust --cond-db-filter for
+your data before committing to a run.
 
 Usage
 -----
-    python train_anomaly.py file1.h5 file2.h5 --freq A --pol HV \
+    # Default: pool HH and HV into one training corpus
+    python train_anomaly.py file1.h5 file2.h5 --freq A \
         --output-dir models/anomaly_v1 --cond-db-filter 25.0
+
+    # Single polarization only
+    python train_anomaly.py file1.h5 --freq A --pol HV \
+        --output-dir models/anomaly_v1_hv_only
 
 Outputs (in --output-dir)
 --------------------------
@@ -40,9 +67,11 @@ Outputs (in --output-dir)
     norm_stats.npz         -- per-feature mean/std used to normalize eigen/global
     training_curves.png    -- loss vs epoch (train/val)
     recon_error_hist.png   -- train/val reconstruction error histograms
-    cond_number_hist.png   -- condition number distribution used for filtering
-    run_summary.json       -- tile counts, filter threshold, recommended anomaly
-                               threshold (95th/99th percentile of val error)
+    cond_number_hist.png   -- condition number distribution used for filtering,
+                               broken down by polarization
+    run_summary.json       -- tile counts (overall and per polarization), filter
+                               threshold, recommended anomaly threshold
+                               (95th/99th percentile of val error)
 """
 
 import os
@@ -303,17 +332,38 @@ def save_recon_error_hist_png(train_scores, val_scores, out_dir):
     print(f"  Saved {path}")
 
 
-def save_cond_number_hist_png(cond_db_all, threshold, out_dir):
+def save_cond_number_hist_png(cond_db_all, pol_all, threshold, out_dir):
+    """
+    Save an overlaid condition-number histogram, broken down by polarization,
+    so the shared --cond-db-filter threshold can be sanity-checked against
+    each polarization's own distribution rather than only the pooled one.
+
+    Parameters
+    ----------
+    cond_db_all : (N,) float array
+        Condition number (dB) for every extracted tile, pooled across
+        polarizations.
+    pol_all : (N,) str array
+        Polarization label ('HH', 'HV', etc.) for each tile in cond_db_all.
+    threshold : float
+        The single --cond-db-filter threshold applied to all polarizations.
+    out_dir : str
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.hist(cond_db_all, bins=80, alpha=0.8)
+
+    unique_pols = sorted(set(pol_all.tolist()))
+    for pol in unique_pols:
+        pol_mask = pol_all == pol
+        ax.hist(cond_db_all[pol_mask], bins=80, alpha=0.6, label=f'{pol} (n={int(pol_mask.sum())})')
+
     ax.axvline(threshold, color='red', linestyle='--', label=f'Filter threshold = {threshold:.1f} dB')
     ax.set_xlabel('Condition number (dB), max - 12th eigenvalue')
     ax.set_ylabel('Tile count')
-    ax.set_title('Condition Number Distribution (Clean-Corpus Self-Filter)')
+    ax.set_title('Condition Number Distribution by Polarization (Clean-Corpus Self-Filter)')
     ax.legend()
     ax.grid(True, linestyle='--', alpha=0.5)
 
@@ -412,8 +462,10 @@ def parse_args():
     )
     parser.add_argument('l0b_files', nargs='+', help='One or more input NISAR L0B HDF5 files')
     parser.add_argument('--freq', choices=['A', 'B'], default='A', help='Frequency to process (default: A)')
-    parser.add_argument('--pol', choices=['HH', 'HV', 'VH', 'VV'], default='HV',
-                        help='Polarization to process (default: HV, RFI couples independently per receive chain)')
+    parser.add_argument('--pol', choices=['HH', 'HV', 'VH', 'VV'], nargs='+', default=['HH', 'HV'],
+                        help='Polarization(s) to pool into the training corpus (default: HH HV, both pooled '
+                             'into one unified model). Pass a single value (e.g. --pol HV) to train on one '
+                             'polarization only.')
     parser.add_argument('--output-dir', type=str, default='models/anomaly_v1', help='Output directory')
 
     parser.add_argument('--pulse-start', type=int, default=None,
@@ -469,14 +521,17 @@ def main():
     print("RFI Anomaly Autoencoder Training")
     print("=" * 70)
     print(f"Files: {args.l0b_files}")
-    print(f"Freq/Pol: {args.freq}/{args.pol}")
+    print(f"Freq: {args.freq}, Polarizations (pooled): {args.pol}")
     print(f"CPI size: {args.cpi_len}x{args.cpi_width}, n_keep={args.n_keep}")
     print(f"Gap-exclusion ratios: off_diag={args.off_diag_overlap_ratio}, diag={args.diag_valid_ratio}")
     print(f"Output dir: {args.output_dir}")
 
     # ------------------------------------------------------------------
-    # Step 1: Extract tiles from every input file, using a per-file
-    # pulse/range window if a region manifest was provided
+    # Step 1: Extract tiles from every (file, polarization) combination,
+    # using a per-file pulse/range window if a region manifest was provided.
+    # Tiles from all requested polarizations are POOLED into one training
+    # corpus (see module docstring); pol_all is kept only for diagnostics
+    # and reporting, it is never fed to the model.
     # ------------------------------------------------------------------
     region_manifest = {}
     if args.region_manifest is not None:
@@ -484,7 +539,9 @@ def main():
         print(f"\nLoaded region manifest from {args.region_manifest} "
               f"({len(region_manifest)} entries)")
 
-    eigen_all, global_all, frac_all = [], [], []
+    print(f"\nPolarizations to pool into training corpus: {args.pol}")
+
+    eigen_all, global_all, frac_all, pol_all = [], [], [], []
 
     for l0b_path in args.l0b_files:
         region = resolve_region_for_file(l0b_path, region_manifest, args)
@@ -492,51 +549,80 @@ def main():
               f"pulses [{region['pulse_start']}:{region['pulse_end']}], "
               f"range [{region['range_start']}:{region['range_end']}]")
 
-        eigen_feats, global_feats, diag_valid_fracs = extract_tiles_from_file(
-            l0b_path,
-            freq=args.freq,
-            pol=args.pol,
-            cpi_len=args.cpi_len,
-            cpi_width=args.cpi_width,
-            n_keep=args.n_keep,
-            off_diag_overlap_ratio=args.off_diag_overlap_ratio,
-            diag_valid_ratio=args.diag_valid_ratio,
-            pulse_start=region['pulse_start'],
-            pulse_end=region['pulse_end'],
-            range_start=region['range_start'],
-            range_end=region['range_end'],
-        )
-        eigen_all.append(eigen_feats)
-        global_all.append(global_feats)
-        frac_all.append(diag_valid_fracs)
+        for pol in args.pol:
+            eigen_feats, global_feats, diag_valid_fracs = extract_tiles_from_file(
+                l0b_path,
+                freq=args.freq,
+                pol=pol,
+                cpi_len=args.cpi_len,
+                cpi_width=args.cpi_width,
+                n_keep=args.n_keep,
+                off_diag_overlap_ratio=args.off_diag_overlap_ratio,
+                diag_valid_ratio=args.diag_valid_ratio,
+                pulse_start=region['pulse_start'],
+                pulse_end=region['pulse_end'],
+                range_start=region['range_start'],
+                range_end=region['range_end'],
+            )
+            eigen_all.append(eigen_feats)
+            global_all.append(global_feats)
+            frac_all.append(diag_valid_fracs)
+            pol_all.append(np.full(eigen_feats.shape[0], pol, dtype='<U2'))
 
     eigen_all = np.concatenate(eigen_all, axis=0)
     global_all = np.concatenate(global_all, axis=0)
     frac_all = np.concatenate(frac_all, axis=0)
+    pol_all = np.concatenate(pol_all, axis=0)
 
     n_total = eigen_all.shape[0]
-    print(f"\nTotal tiles extracted across all files: {n_total}")
+    print(f"\nTotal tiles extracted across all files/polarizations: {n_total}")
     if n_total == 0:
         print("ERROR: No tiles extracted. Check input files and freq/pol arguments.")
         sys.exit(1)
 
+    for pol in args.pol:
+        n_pol = int(np.sum(pol_all == pol))
+        print(f"  {pol}: {n_pol} tiles")
+
     # ------------------------------------------------------------------
     # Step 2: Clean-corpus self-filter on condition number (heuristic)
+    # A single threshold is applied across all polarizations; the saved
+    # histogram breaks the distribution down per polarization so that
+    # assumption can be checked.
     # ------------------------------------------------------------------
     cond_db_all = global_all[:, 0]
     percentiles = [50, 75, 90, 95, 99]
     pct_vals = np.percentile(cond_db_all, percentiles)
-    print("\nCondition number (dB) percentiles across all extracted tiles:")
+    print("\nCondition number (dB) percentiles, pooled across all polarizations:")
     for p, v in zip(percentiles, pct_vals):
         print(f"  {p}th percentile: {v:.2f} dB")
 
-    save_cond_number_hist_png(cond_db_all, args.cond_db_filter, args.output_dir)
+    for pol in args.pol:
+        pol_mask = pol_all == pol
+        pol_pct_vals = np.percentile(cond_db_all[pol_mask], percentiles)
+        print(f"\nCondition number (dB) percentiles, {pol} only:")
+        for p, v in zip(percentiles, pol_pct_vals):
+            print(f"  {p}th percentile: {v:.2f} dB")
+
+    save_cond_number_hist_png(cond_db_all, pol_all, args.cond_db_filter, args.output_dir)
 
     clean_mask = cond_db_all <= args.cond_db_filter
     n_clean = int(clean_mask.sum())
     n_excluded = n_total - n_clean
     print(f"\nClean-corpus self-filter: keeping {n_clean}/{n_total} tiles "
           f"(cond_db <= {args.cond_db_filter} dB), excluding {n_excluded}")
+
+    per_pol_counts = {}
+    for pol in args.pol:
+        pol_mask = pol_all == pol
+        n_pol_total = int(pol_mask.sum())
+        n_pol_clean = int(np.sum(pol_mask & clean_mask))
+        per_pol_counts[pol] = {
+            'n_total': n_pol_total,
+            'n_clean': n_pol_clean,
+            'n_excluded': n_pol_total - n_pol_clean,
+        }
+        print(f"  {pol}: keeping {n_pol_clean}/{n_pol_total}, excluding {n_pol_total - n_pol_clean}")
 
     if n_clean < 100:
         print("WARNING: Very few tiles survived the clean-corpus filter. "
@@ -659,6 +745,7 @@ def main():
         'off_diag_overlap_ratio': args.off_diag_overlap_ratio,
         'diag_valid_ratio': args.diag_valid_ratio,
         'n_tiles_total': int(n_total),
+        'per_polarization_counts': per_pol_counts,
         'cond_db_filter': args.cond_db_filter,
         'n_tiles_clean_corpus': int(n_clean),
         'n_tiles_excluded': int(n_excluded),
