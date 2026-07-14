@@ -8,3 +8,5 @@ rfi_gen.egg-info
 *.npy
 *.h5
 *.keras
+
+*.kmz
