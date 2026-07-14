@@ -71,6 +71,8 @@ Outputs (per channel unless noted)
     power_vs_knee_<freq>_<pol>.png  tile baseline power by predicted class
     confidence_by_knee_<freq>_<pol>.png  confidence + entropy by predicted class
     eigen_profiles_<freq>_<pol>.png mean eigenvalue profile by predicted class
+    selected_predictions_<freq>_<pol>.png  individual tiles: profile + what the
+                                           model called it, one row per class
     pred_hist.png                   prediction histogram, all channels
     results.json                    summary statistics
 """
@@ -295,11 +297,13 @@ def plot_knee_map(rec, out_dir):
     grid = rec['knee'].reshape(rec['n_pt'], rec['n_rt'])
 
     fig, ax = plt.subplots(figsize=(13, 6))
-    im = ax.imshow(grid, aspect='auto', cmap='inferno', origin='lower',
+    # origin='upper' plus a top-down extent puts the FIRST pulse at the top of the
+    # axis and runs time downward, matching how a radar swath is normally read.
+    im = ax.imshow(grid, aspect='auto', cmap='inferno', origin='upper',
                    vmin=0, vmax=max(rec['n_classes'] - 1, 1),
                    interpolation='nearest',
                    extent=[rec['range_window'][0], rec['range_window'][1],
-                           rec['pulse_window'][0], rec['pulse_window'][1]])
+                           rec['pulse_window'][1], rec['pulse_window'][0]])
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label('Predicted knee (0 = clean)')
 
@@ -331,10 +335,11 @@ def plot_confidence_map(rec, out_dir):
     grid = rec['confidence'].reshape(rec['n_pt'], rec['n_rt'])
 
     fig, ax = plt.subplots(figsize=(13, 6))
-    im = ax.imshow(grid, aspect='auto', cmap='viridis', origin='lower',
+    # Same top-down pulse axis as the knee map so the two can be read side by side
+    im = ax.imshow(grid, aspect='auto', cmap='viridis', origin='upper',
                    vmin=0, vmax=1, interpolation='nearest',
                    extent=[rec['range_window'][0], rec['range_window'][1],
-                           rec['pulse_window'][0], rec['pulse_window'][1]])
+                           rec['pulse_window'][1], rec['pulse_window'][0]])
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label('Max softmax probability')
 
@@ -530,6 +535,111 @@ def plot_eigen_profiles_by_class(rec, out_dir):
     print(f"  Saved {path}")
 
 
+def plot_selected_predictions(rec, out_dir, n_per_class, seed):
+    """
+    Grid of individual tiles: eigenvalue profile + what the model called it.
+
+    The mean-profile plot shows the model is right ON AVERAGE. This shows what
+    single tiles actually look like, which is where the failures live -- a mean
+    curve happily hides a class whose members are half convincing and half
+    nonsense.
+
+    One row per predicted class, n_per_class randomly chosen examples across the
+    row (fixed seed, so the selection is reproducible). Each panel draws the
+    tile's normalized eigenvalue profile with a red marker at the predicted knee
+    index. The panel is believable when the drop-off sits right after that
+    marker, and suspicious when it does not.
+
+    Panel titles carry the numbers needed to triage a detection without labels:
+    confidence, tile baseline power, and the tile's (pulse, range) origin so it
+    can be found in the knee map and pulled out of the predictions HDF5.
+
+    Args:
+        rec (dict): scored channel record.
+        out_dir (str): output directory.
+        n_per_class (int): examples per predicted class (grid columns).
+        seed (int): selection seed, independent of everything else.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    import matplotlib.colors as mcolors
+
+    n_classes = rec['n_classes']
+    knee = rec['knee']
+    rng = np.random.default_rng(seed)
+
+    # Same normalization the model sees: linear / lambda_max, then dB
+    ev = np.maximum(rec['eigvals'][:, :N_KEEP], EPS)
+    ev_db = 10.0 * np.log10(ev / np.maximum(ev[:, :1], EPS))
+    idx = np.arange(1, N_KEEP + 1)
+
+    present = [k for k in range(n_classes) if (knee == k).sum() > 0]
+    if not present:
+        return
+
+    norm = mcolors.Normalize(vmin=0, vmax=max(n_classes - 1, 1))
+    cmap = cm.plasma
+
+    # Shared y-range so panels are directly comparable to each other
+    sample_all = ev_db[rng.choice(len(knee), size=min(5000, len(knee)), replace=False)]
+    ylim = [float(np.percentile(sample_all, 0.5)) - 3.0, 3.0]
+
+    n_rows, n_cols = len(present), n_per_class
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(2.9 * n_cols, 2.5 * n_rows),
+                             squeeze=False)
+
+    for ri, k in enumerate(present):
+        pool = np.where(knee == k)[0]
+        pick = rng.choice(pool, size=min(n_per_class, len(pool)), replace=False)
+
+        for ci in range(n_cols):
+            ax = axes[ri][ci]
+
+            if ci >= len(pick):
+                ax.axis('off')
+                continue
+
+            t = int(pick[ci])
+            ax.plot(idx, ev_db[t], color=cmap(norm(k)), linewidth=1.6)
+
+            if k > 0:
+                # Red marker at the predicted knee: the drop-off should follow it
+                ax.plot(k, ev_db[t, k - 1], 'rx', markersize=8, markeredgewidth=2)
+                ax.axvline(x=k, color='red', linestyle='--', alpha=0.35, linewidth=1)
+
+            label = 'CLEAN' if k == 0 else f'knee@{k}'
+            ax.set_title(
+                f"{label}  conf={rec['confidence'][t]:.2f}\n"
+                f"p={rec['tile_pulse'][t]} r={rec['tile_range'][t]}  "
+                f"pow={rec['power_db'][t]:.1f} dB",
+                fontsize=7,
+            )
+            ax.set_ylim(ylim)
+            ax.set_xticks([1, 4, 8, 12])
+            ax.tick_params(labelsize=6)
+            ax.grid(True, linestyle='--', alpha=0.35)
+
+            if ci == 0:
+                ax.set_ylabel('EV (dB)', fontsize=8)
+            if ri == n_rows - 1:
+                ax.set_xlabel('EV index', fontsize=8)
+
+    fig.suptitle(
+        f"Selected predictions -- {rec['chan']}  "
+        f"({n_per_class} random tiles per predicted class, seed={seed})\n"
+        f"red x = predicted knee; the profile should drop off just after it",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    path = os.path.join(out_dir, f"selected_predictions_{rec['freq']}_{rec['pol']}.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
 def plot_pred_hist(recs, out_dir):
     """Prediction histogram across channels."""
     import matplotlib
@@ -677,6 +787,11 @@ def parse_args():
     parser.add_argument('--diag-valid-ratio', type=float,
                         default=DIAG_VALID_RATIO_DEFAULT)
 
+    parser.add_argument('--n-examples-per-class', type=int, default=6,
+                        help='Tiles per predicted class in the selected-predictions grid.')
+    parser.add_argument('--example-seed', type=int, default=42,
+                        help='Fixed seed for choosing which tiles to show.')
+
     parser.add_argument('--batch-size', type=int, default=4096)
     parser.add_argument('--output-dir', default='results/scene')
     return parser.parse_args()
@@ -739,6 +854,8 @@ def main():
         plot_power_vs_knee(rec, args.output_dir)
         plot_confidence_by_knee(rec, args.output_dir)
         plot_eigen_profiles_by_class(rec, args.output_dir)
+        plot_selected_predictions(rec, args.output_dir,
+                                  args.n_examples_per_class, args.example_seed)
 
     plot_pred_hist(recs, args.output_dir)
     report(recs, results)
