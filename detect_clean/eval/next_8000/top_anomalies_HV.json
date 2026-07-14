@@ -1,0 +1,502 @@
+[
+  {
+    "rank": 1,
+    "pol": "HV",
+    "pulse_start": 894478,
+    "range_start": 12500,
+    "total_score": 0.7240512371063232,
+    "eigen_err": 0.7200660109519958,
+    "global_err": 0.007970462553203106,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 2,
+    "pol": "HV",
+    "pulse_start": 891438,
+    "range_start": 22000,
+    "total_score": 0.6220934391021729,
+    "eigen_err": 0.6208248734474182,
+    "global_err": 0.002537172520533204,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 3,
+    "pol": "HV",
+    "pulse_start": 889374,
+    "range_start": 7750,
+    "total_score": 0.6116836667060852,
+    "eigen_err": 0.6097051501274109,
+    "global_err": 0.003957021981477737,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 4,
+    "pol": "HV",
+    "pulse_start": 892334,
+    "range_start": 7750,
+    "total_score": 0.4948654770851135,
+    "eigen_err": 0.4946049153804779,
+    "global_err": 0.0005211488460190594,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 5,
+    "pol": "HV",
+    "pulse_start": 895630,
+    "range_start": 7750,
+    "total_score": 0.49346908926963806,
+    "eigen_err": 0.490865021944046,
+    "global_err": 0.0052081202156841755,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 6,
+    "pol": "HV",
+    "pulse_start": 889790,
+    "range_start": 7750,
+    "total_score": 0.4745110869407654,
+    "eigen_err": 0.4725048243999481,
+    "global_err": 0.004012538585811853,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 7,
+    "pol": "HV",
+    "pulse_start": 890174,
+    "range_start": 12500,
+    "total_score": 0.4482221007347107,
+    "eigen_err": 0.44721701741218567,
+    "global_err": 0.0020101675763726234,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 8,
+    "pol": "HV",
+    "pulse_start": 892510,
+    "range_start": 7750,
+    "total_score": 0.4336240589618683,
+    "eigen_err": 0.433551549911499,
+    "global_err": 0.00014500813267659396,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 9,
+    "pol": "HV",
+    "pulse_start": 892574,
+    "range_start": 23500,
+    "total_score": 0.4256686866283417,
+    "eigen_err": 0.4248429834842682,
+    "global_err": 0.0016513861482962966,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 10,
+    "pol": "HV",
+    "pulse_start": 888974,
+    "range_start": 7750,
+    "total_score": 0.3917900025844574,
+    "eigen_err": 0.3913441598415375,
+    "global_err": 0.0008916610386222601,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 11,
+    "pol": "HV",
+    "pulse_start": 893038,
+    "range_start": 7750,
+    "total_score": 0.3882894515991211,
+    "eigen_err": 0.38826337456703186,
+    "global_err": 5.212987889535725e-05,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 12,
+    "pol": "HV",
+    "pulse_start": 890846,
+    "range_start": 14500,
+    "total_score": 0.3488873839378357,
+    "eigen_err": 0.3479757606983185,
+    "global_err": 0.001823248341679573,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 13,
+    "pol": "HV",
+    "pulse_start": 891646,
+    "range_start": 18750,
+    "total_score": 0.32787030935287476,
+    "eigen_err": 0.32701265811920166,
+    "global_err": 0.0017153184162452817,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 14,
+    "pol": "HV",
+    "pulse_start": 892446,
+    "range_start": 23750,
+    "total_score": 0.3246523439884186,
+    "eigen_err": 0.32432982325553894,
+    "global_err": 0.000645043037366122,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 15,
+    "pol": "HV",
+    "pulse_start": 896078,
+    "range_start": 11500,
+    "total_score": 0.30930134654045105,
+    "eigen_err": 0.30806058645248413,
+    "global_err": 0.002481498522683978,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 16,
+    "pol": "HV",
+    "pulse_start": 894174,
+    "range_start": 7750,
+    "total_score": 0.3027994632720947,
+    "eigen_err": 0.30220508575439453,
+    "global_err": 0.0011887745931744576,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 17,
+    "pol": "HV",
+    "pulse_start": 891598,
+    "range_start": 12500,
+    "total_score": 0.29163727164268494,
+    "eigen_err": 0.29160094261169434,
+    "global_err": 7.267471664818004e-05,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 18,
+    "pol": "HV",
+    "pulse_start": 891406,
+    "range_start": 17250,
+    "total_score": 0.27702927589416504,
+    "eigen_err": 0.27681800723075867,
+    "global_err": 0.0004225205921102315,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 19,
+    "pol": "HV",
+    "pulse_start": 892590,
+    "range_start": 7750,
+    "total_score": 0.27430832386016846,
+    "eigen_err": 0.27226999402046204,
+    "global_err": 0.004076684359461069,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 20,
+    "pol": "HV",
+    "pulse_start": 888782,
+    "range_start": 7750,
+    "total_score": 0.2632637321949005,
+    "eigen_err": 0.26308757066726685,
+    "global_err": 0.0003523329214658588,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 21,
+    "pol": "HV",
+    "pulse_start": 894942,
+    "range_start": 11750,
+    "total_score": 0.24050834774971008,
+    "eigen_err": 0.24038583040237427,
+    "global_err": 0.00024503396707586944,
+    "diag_valid_frac": 0.9375
+  },
+  {
+    "rank": 22,
+    "pol": "HV",
+    "pulse_start": 892878,
+    "range_start": 7750,
+    "total_score": 0.239342600107193,
+    "eigen_err": 0.2386864870786667,
+    "global_err": 0.0013122267555445433,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 23,
+    "pol": "HV",
+    "pulse_start": 893086,
+    "range_start": 14750,
+    "total_score": 0.23648954927921295,
+    "eigen_err": 0.23456864058971405,
+    "global_err": 0.0038418215699493885,
+    "diag_valid_frac": 0.875
+  },
+  {
+    "rank": 24,
+    "pol": "HV",
+    "pulse_start": 895470,
+    "range_start": 7750,
+    "total_score": 0.22272832691669464,
+    "eigen_err": 0.22222302854061127,
+    "global_err": 0.001010607578791678,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 25,
+    "pol": "HV",
+    "pulse_start": 895518,
+    "range_start": 7750,
+    "total_score": 0.21570833027362823,
+    "eigen_err": 0.21419847011566162,
+    "global_err": 0.0030197100713849068,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 26,
+    "pol": "HV",
+    "pulse_start": 894766,
+    "range_start": 7750,
+    "total_score": 0.20724919438362122,
+    "eigen_err": 0.2057797908782959,
+    "global_err": 0.002938804216682911,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 27,
+    "pol": "HV",
+    "pulse_start": 895806,
+    "range_start": 7750,
+    "total_score": 0.20660267770290375,
+    "eigen_err": 0.20624558627605438,
+    "global_err": 0.0007141709211282432,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 28,
+    "pol": "HV",
+    "pulse_start": 894302,
+    "range_start": 14750,
+    "total_score": 0.2035849541425705,
+    "eigen_err": 0.2034398764371872,
+    "global_err": 0.00029016402550041676,
+    "diag_valid_frac": 0.9375
+  },
+  {
+    "rank": 29,
+    "pol": "HV",
+    "pulse_start": 888366,
+    "range_start": 19750,
+    "total_score": 0.20324809849262238,
+    "eigen_err": 0.2032427340745926,
+    "global_err": 1.0735465366451535e-05,
+    "diag_valid_frac": 0.875
+  },
+  {
+    "rank": 30,
+    "pol": "HV",
+    "pulse_start": 894750,
+    "range_start": 9250,
+    "total_score": 0.20253808796405792,
+    "eigen_err": 0.20207051932811737,
+    "global_err": 0.0009351475164294243,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 31,
+    "pol": "HV",
+    "pulse_start": 892734,
+    "range_start": 10750,
+    "total_score": 0.20227459073066711,
+    "eigen_err": 0.20160351693630219,
+    "global_err": 0.0013421353651210666,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 32,
+    "pol": "HV",
+    "pulse_start": 893102,
+    "range_start": 7750,
+    "total_score": 0.20168708264827728,
+    "eigen_err": 0.2006351202726364,
+    "global_err": 0.002103938953951001,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 33,
+    "pol": "HV",
+    "pulse_start": 893214,
+    "range_start": 10750,
+    "total_score": 0.1979101449251175,
+    "eigen_err": 0.19789129495620728,
+    "global_err": 3.769806062337011e-05,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 34,
+    "pol": "HV",
+    "pulse_start": 891854,
+    "range_start": 10250,
+    "total_score": 0.19723409414291382,
+    "eigen_err": 0.19722604751586914,
+    "global_err": 1.6094232705654576e-05,
+    "diag_valid_frac": 0.875
+  },
+  {
+    "rank": 35,
+    "pol": "HV",
+    "pulse_start": 889406,
+    "range_start": 15750,
+    "total_score": 0.19566501677036285,
+    "eigen_err": 0.19493238627910614,
+    "global_err": 0.0014652477111667395,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 36,
+    "pol": "HV",
+    "pulse_start": 892110,
+    "range_start": 21250,
+    "total_score": 0.19324061274528503,
+    "eigen_err": 0.19308017194271088,
+    "global_err": 0.00032087473664432764,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 37,
+    "pol": "HV",
+    "pulse_start": 891310,
+    "range_start": 7750,
+    "total_score": 0.1893172562122345,
+    "eigen_err": 0.18928508460521698,
+    "global_err": 6.43297826172784e-05,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 38,
+    "pol": "HV",
+    "pulse_start": 893198,
+    "range_start": 20500,
+    "total_score": 0.18632565438747406,
+    "eigen_err": 0.1860450953245163,
+    "global_err": 0.000561131804715842,
+    "diag_valid_frac": 0.9375
+  },
+  {
+    "rank": 39,
+    "pol": "HV",
+    "pulse_start": 893550,
+    "range_start": 7750,
+    "total_score": 0.18523554503917694,
+    "eigen_err": 0.18499179184436798,
+    "global_err": 0.0004875208833254874,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 40,
+    "pol": "HV",
+    "pulse_start": 888382,
+    "range_start": 10750,
+    "total_score": 0.1838388890028,
+    "eigen_err": 0.18299710750579834,
+    "global_err": 0.001683562994003296,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 41,
+    "pol": "HV",
+    "pulse_start": 894142,
+    "range_start": 7750,
+    "total_score": 0.183540940284729,
+    "eigen_err": 0.1793643683195114,
+    "global_err": 0.008353146724402905,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 42,
+    "pol": "HV",
+    "pulse_start": 894750,
+    "range_start": 18500,
+    "total_score": 0.182245671749115,
+    "eigen_err": 0.18218141794204712,
+    "global_err": 0.00012850697385147214,
+    "diag_valid_frac": 0.9375
+  },
+  {
+    "rank": 43,
+    "pol": "HV",
+    "pulse_start": 889310,
+    "range_start": 12500,
+    "total_score": 0.1792745292186737,
+    "eigen_err": 0.17920231819152832,
+    "global_err": 0.0001444367808289826,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 44,
+    "pol": "HV",
+    "pulse_start": 889950,
+    "range_start": 10750,
+    "total_score": 0.1792343556880951,
+    "eigen_err": 0.17919331789016724,
+    "global_err": 8.207179052988067e-05,
+    "diag_valid_frac": 0.9375
+  },
+  {
+    "rank": 45,
+    "pol": "HV",
+    "pulse_start": 889646,
+    "range_start": 7750,
+    "total_score": 0.17872801423072815,
+    "eigen_err": 0.17671184241771698,
+    "global_err": 0.004032349679619074,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 46,
+    "pol": "HV",
+    "pulse_start": 890846,
+    "range_start": 24750,
+    "total_score": 0.17855799198150635,
+    "eigen_err": 0.17746438086032867,
+    "global_err": 0.002187213860452175,
+    "diag_valid_frac": 0.9375
+  },
+  {
+    "rank": 47,
+    "pol": "HV",
+    "pulse_start": 895710,
+    "range_start": 14500,
+    "total_score": 0.17777934670448303,
+    "eigen_err": 0.17739085853099823,
+    "global_err": 0.0007769817602820694,
+    "diag_valid_frac": 0.875
+  },
+  {
+    "rank": 48,
+    "pol": "HV",
+    "pulse_start": 892478,
+    "range_start": 20500,
+    "total_score": 0.1775817573070526,
+    "eigen_err": 0.1768917590379715,
+    "global_err": 0.0013799852458760142,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 49,
+    "pol": "HV",
+    "pulse_start": 891998,
+    "range_start": 7750,
+    "total_score": 0.17597830295562744,
+    "eigen_err": 0.17556142807006836,
+    "global_err": 0.0008337465114891529,
+    "diag_valid_frac": 1.0
+  },
+  {
+    "rank": 50,
+    "pol": "HV",
+    "pulse_start": 890718,
+    "range_start": 14250,
+    "total_score": 0.17404641211032867,
+    "eigen_err": 0.17376087605953217,
+    "global_err": 0.0005710587138310075,
+    "diag_valid_frac": 1.0
+  }
+]
