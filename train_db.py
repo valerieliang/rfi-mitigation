@@ -93,6 +93,7 @@ Outputs
 -------
     models/<run>/best_model.keras
     models/<run>/training_curves.png
+    models/<run>/clean_check.png         -- check 1: predictions on clean tiles
     models/<run>/confusion_matrix.png    -- full 0..6 grid, clean row included
     models/<run>/metrics.png
     models/<run>/accuracy_vs_jsr.png
@@ -444,6 +445,48 @@ def save_training_curves_png(history, out_dir):
     print(f"  Saved {path}")
 
 
+def save_clean_check_png(pred_clean, channels_clean, n_classes, out_dir):
+    """
+    CHECK 1 figure: prediction histogram on the clean tiles -> clean_check.png.
+
+    Every tile here is real, unmodified data, so the correct answer is knee = 0
+    for all of them. The bar over "clean" is the recall; everything to the right
+    of it is a false positive. Split per channel, since HH and HV have different
+    backscatter floors and can fail very differently.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    chans = sorted(set(channels_clean.tolist()))
+    x = np.arange(n_classes)
+    width = 0.8 / max(len(chans), 1)
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+
+    for i, ch in enumerate(chans):
+        sel = (channels_clean == ch)
+        counts = np.bincount(pred_clean[sel], minlength=n_classes)[:n_classes]
+        frac = counts / max(counts.sum(), 1)
+        ax.bar(x + i * width - 0.4 + width / 2, frac, width, label=f'{ch} (n={int(sel.sum())})')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(['clean'] + [f'knee@{k}' for k in range(1, n_classes)])
+    ax.set_ylabel('Fraction of clean tiles')
+    ax.set_xlabel('Predicted class')
+    ax.set_ylim(0, 1.02)
+    ax.grid(True, axis='y', linestyle='--', alpha=0.5)
+    ax.legend()
+    ax.set_title('Check 1: predictions on CLEAN tiles (unmodified data)\n'
+                 'every tile is truly clean; anything right of "clean" is a false positive')
+
+    fig.tight_layout()
+    path = os.path.join(out_dir, 'clean_check.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
 def save_confusion_matrix_png(y_true, y_pred, n_classes, out_dir, title):
     """
     Row-normalised knee confusion matrix -> out_dir/confusion_matrix.png.
@@ -497,12 +540,12 @@ def save_metrics_png(results, out_dir):
 
     names, values = [], []
     for label, key in (
-        ('Exact accuracy', 'exact_acc'),
-        ('Tol-1 accuracy', 'tol1_acc'),
-        ('RFI exact', 'exact_rfi'),
-        ('RFI tol-1', 'tol1_rfi'),
-        ('Clean recall', 'clean_recall'),
-        ('Detection rate', 'detection_rate'),
+        ('Overall exact', 'exact_acc'),
+        ('Overall tol-1', 'tol1_acc'),
+        ('Check 1: clean recall', 'clean_recall'),
+        ('Check 2: RFI exact', 'exact_rfi'),
+        ('Check 2: RFI tol-1', 'tol1_rfi'),
+        ('Check 2: detection rate', 'detection_rate'),
     ):
         if key in results and results[key] == results[key]:   # skip NaN
             names.append(label)
@@ -599,17 +642,170 @@ def save_accuracy_vs_jsr_png(y_true, y_pred, jsr, out_dir):
 # EVALUATION
 # ---------------------------------------------------------------------------
 
+def clean_check(y_true, y_pred, channels, n_classes, out_dir, results):
+    """
+    CHECK 1 -- clean data: does the model leave untouched tiles alone?
+
+    Runs on the label == 0 subset of the test region: real CPI tiles that drew
+    zero bands and were therefore never modified. The correct answer for every
+    one of them is knee = 0, so the only thing being measured here is the
+    false-positive rate.
+
+    Reported per channel because HH and HV have very different backscatter
+    floors, and a model can easily be clean-safe on one while triggering
+    constantly on the other -- an aggregate number would average that away.
+
+    Also records WHERE the false positives land: a model that mostly errs to
+    knee@1 is far healthier than one that errs to knee@6.
+
+    Args:
+        y_true, y_pred (np.ndarray): (N,) over the FULL test set.
+        channels (np.ndarray): (N,) channel name per tile.
+        n_classes (int): label space size.
+        out_dir (str): output directory.
+        results (dict): mutated in place with the clean metrics.
+    """
+    clean = (y_true == 0)
+
+    if not clean.any():
+        print("\n=== CHECK 1: CLEAN DATA ===")
+        print("  SKIPPED: the test set contains no clean tiles. It should have been "
+              "generated with --min-bands 0 so clean tiles stay interspersed.")
+        results['clean_recall'] = float('nan')
+        results['false_positive_rate'] = float('nan')
+        return
+
+    pred_clean = y_pred[clean]
+    n = int(clean.sum())
+
+    recall = float(np.mean(pred_clean == 0))
+    fpr = float(np.mean(pred_clean > 0))
+
+    per_channel = {}
+    for ch in sorted(set(channels.tolist())):
+        sel = clean & (channels == ch)
+        if sel.any():
+            per_channel[ch] = {
+                'n': int(sel.sum()),
+                'clean_recall': float(np.mean(y_pred[sel] == 0)),
+                'false_positive_rate': float(np.mean(y_pred[sel] > 0)),
+            }
+
+    fp_counts = np.bincount(pred_clean[pred_clean > 0], minlength=n_classes)[:n_classes]
+    fp_dist = {str(k): int(v) for k, v in enumerate(fp_counts) if k > 0 and v > 0}
+
+    results['clean_n'] = n
+    results['clean_recall'] = recall
+    results['false_positive_rate'] = fpr
+    results['clean_per_channel'] = per_channel
+    results['clean_false_positive_distribution'] = fp_dist
+
+    print("\n=== CHECK 1: CLEAN DATA (unmodified tiles, knee = 0) ===")
+    print(f"  N clean tiles  : {n}")
+    print(f"  Clean recall   : {recall:.4f}   <- fraction correctly called clean")
+    print(f"  False positives: {fpr:.4f}")
+    for ch, s in per_channel.items():
+        print(f"    {ch}: recall={s['clean_recall']:.4f}  FPR={s['false_positive_rate']:.4f}  "
+              f"(n={s['n']})")
+    if fp_dist:
+        print("  False positives land on: "
+              + ", ".join(f"knee@{k}:{v}" for k, v in fp_dist.items()))
+
+    save_clean_check_png(pred_clean, channels[clean], n_classes, out_dir)
+
+
+def contaminated_check(y_true, y_pred, channels, jsr, n_classes, out_dir, results):
+    """
+    CHECK 2 -- contaminated data: does the model count the bands correctly?
+
+    Runs on the label > 0 subset of the test region. Reports the counting task
+    (exact / tol-1 knee accuracy) and the detection task (contaminated called
+    contaminated at all) separately, because a model can be a strong detector
+    while still confusing adjacent knee counts -- and only the detection number
+    matters if the downstream use is "flag this CPI for mitigation".
+
+    Per-class rows include called_clean, the miss mode that actually hurts: an
+    RFI tile silently passed through as clean.
+
+    Args:
+        y_true, y_pred (np.ndarray): (N,) over the FULL test set.
+        channels (np.ndarray): (N,) channel name per tile.
+        jsr (np.ndarray|None): (N, max_bands) realized per-band JSR.
+        n_classes (int): label space size.
+        out_dir (str): output directory.
+        results (dict): mutated in place with the contaminated metrics.
+    """
+    rfi = (y_true > 0)
+
+    if not rfi.any():
+        print("\n=== CHECK 2: CONTAMINATED DATA ===")
+        print("  SKIPPED: the test set contains no contaminated tiles.")
+        return
+
+    exact = float(np.mean(y_pred[rfi] == y_true[rfi]))
+    tol1 = float(np.mean(np.abs(y_pred[rfi] - y_true[rfi]) <= 1))
+    detection = float(np.mean(y_pred[rfi] > 0))
+    missed = float(np.mean(y_pred[rfi] == 0))
+
+    per_class = {}
+    for k in range(1, n_classes):
+        sel = (y_true == k)
+        if sel.any():
+            per_class[str(k)] = {
+                'n': int(sel.sum()),
+                'recall': float(np.mean(y_pred[sel] == k)),
+                'tol1': float(np.mean(np.abs(y_pred[sel] - k) <= 1)),
+                'called_clean': float(np.mean(y_pred[sel] == 0)),
+            }
+
+    per_channel = {}
+    for ch in sorted(set(channels.tolist())):
+        sel = rfi & (channels == ch)
+        if sel.any():
+            per_channel[ch] = {
+                'n': int(sel.sum()),
+                'exact_acc': float(np.mean(y_pred[sel] == y_true[sel])),
+                'tol1_acc': float(np.mean(np.abs(y_pred[sel] - y_true[sel]) <= 1)),
+                'detection_rate': float(np.mean(y_pred[sel] > 0)),
+            }
+
+    results['rfi_n'] = int(rfi.sum())
+    results['exact_rfi'] = exact
+    results['tol1_rfi'] = tol1
+    results['detection_rate'] = detection
+    results['missed_as_clean'] = missed
+    results['rfi_per_class'] = per_class
+    results['rfi_per_channel'] = per_channel
+
+    print(f"\n=== CHECK 2: CONTAMINATED DATA (knee 1..{n_classes - 1}) ===")
+    print(f"  N RFI tiles    : {int(rfi.sum())}")
+    print(f"  Exact knee acc : {exact:.4f}")
+    print(f"  Tol-1 knee acc : {tol1:.4f}")
+    print(f"  Detection rate : {detection:.4f}   <- called contaminated at all")
+    print(f"  Missed as clean: {missed:.4f}")
+    for k, s in per_class.items():
+        print(f"    knee@{k}: recall={s['recall']:.3f}  tol1={s['tol1']:.3f}  "
+              f"called clean={s['called_clean']:.3f}  (n={s['n']})")
+    for ch, s in per_channel.items():
+        print(f"    {ch}: exact={s['exact_acc']:.4f}  tol1={s['tol1_acc']:.4f}  "
+              f"detection={s['detection_rate']:.4f}")
+
+    save_accuracy_vs_jsr_png(y_true, y_pred, jsr, out_dir)
+
+
 def evaluate(model, data, n_classes, run_name, out_dir):
     """
-    Evaluate on the held-out test region.
+    Evaluate on the held-out test region, as TWO explicit checks.
 
-    Clean tiles are part of this set (they are the tiles that drew 0 bands), so
-    clean recall and the false-positive rate come out of the same pass as the
-    knee-counting metrics -- row 0 of the confusion matrix.
+    The test set contains both kinds of tile -- clean ones are simply those that
+    drew 0 bands -- so a single forward pass covers both, and the two checks are
+    two views of the same predictions:
 
-    Reports the counting task (exact / tol-1 knee accuracy) and the detection
-    task (contaminated vs not, ignoring the count) separately, because a model
-    can be a strong detector while still confusing adjacent knee counts.
+        CHECK 1  clean data        -> can it leave untouched tiles alone?
+        CHECK 2  contaminated data -> can it count the bands?
+
+    The confusion matrix spans the full 0..n_classes grid, so both checks are
+    also visible there: row 0 is the clean check, rows 1..6 the contaminated one.
 
     Args:
         model: trained Keras model.
@@ -624,47 +820,7 @@ def evaluate(model, data, n_classes, run_name, out_dir):
     y_true = data['labels']
     y_pred = np.argmax(model.predict([data['eigen'], data['global']], verbose=0),
                        axis=-1)
-
-    exact = float(np.mean(y_pred == y_true))
-    tol1 = float(np.mean(np.abs(y_pred - y_true) <= 1))
-
-    rfi_mask = y_true > 0
-    clean_mask = y_true == 0
-
-    exact_rfi = float(np.mean(y_pred[rfi_mask] == y_true[rfi_mask])) \
-        if rfi_mask.any() else float('nan')
-    tol1_rfi = float(np.mean(np.abs(y_pred[rfi_mask] - y_true[rfi_mask]) <= 1)) \
-        if rfi_mask.any() else float('nan')
-
-    # Clean recall and FPR are just row 0 of the confusion matrix
-    clean_recall = float(np.mean(y_pred[clean_mask] == 0)) \
-        if clean_mask.any() else float('nan')
-    fpr = float(np.mean(y_pred[clean_mask] > 0)) if clean_mask.any() else float('nan')
-    detection = float(np.mean(y_pred[rfi_mask] > 0)) if rfi_mask.any() else float('nan')
-
-    per_class = {}
-    for k in range(n_classes):
-        sel = (y_true == k)
-        if sel.any():
-            per_class[str(k)] = {
-                'n': int(sel.sum()),
-                'recall': float(np.mean(y_pred[sel] == k)),
-                'tol1': float(np.mean(np.abs(y_pred[sel] - k) <= 1)),
-                'called_clean': float(np.mean(y_pred[sel] == 0)),
-            }
-
-    per_channel = {}
-    for ch in sorted(set(data['channels'].tolist())):
-        sel = (data['channels'] == ch)
-        c_clean = sel & clean_mask
-        c_rfi = sel & rfi_mask
-        per_channel[ch] = {
-            'n': int(sel.sum()),
-            'exact_acc': float(np.mean(y_pred[sel] == y_true[sel])),
-            'clean_recall': float(np.mean(y_pred[c_clean] == 0)) if c_clean.any() else float('nan'),
-            'false_positive_rate': float(np.mean(y_pred[c_clean] > 0)) if c_clean.any() else float('nan'),
-            'detection_rate': float(np.mean(y_pred[c_rfi] > 0)) if c_rfi.any() else float('nan'),
-        }
+    channels = data['channels']
 
     results = {
         'run': run_name,
@@ -672,40 +828,30 @@ def evaluate(model, data, n_classes, run_name, out_dir):
         'n_keep': N_KEEP,
         'n_classes': n_classes,
         'test_pulse_window': data['meta'].get('pulse_window'),
-        'exact_acc': exact,
-        'tol1_acc': tol1,
-        'exact_rfi': exact_rfi,
-        'tol1_rfi': tol1_rfi,
-        'clean_recall': clean_recall,
-        'false_positive_rate': fpr,
-        'detection_rate': detection,
-        'per_class': per_class,
-        'per_channel': per_channel,
+        # Overall, across clean and contaminated together
+        'exact_acc': float(np.mean(y_pred == y_true)),
+        'tol1_acc': float(np.mean(np.abs(y_pred - y_true) <= 1)),
     }
 
-    print(f"\n=== HELD-OUT TEST REGION {data['meta'].get('pulse_window')} ===")
-    print(f"  N tiles        : {len(y_true)}  (features: top {N_KEEP} eigenvalues)")
-    print(f"  Exact knee acc : {exact:.4f}")
-    print(f"  Tol-1 knee acc : {tol1:.4f}")
-    print(f"  RFI exact / tol-1 : {exact_rfi:.4f} / {tol1_rfi:.4f}")
-    print(f"  Clean recall   : {clean_recall:.4f}   (false positives: {fpr:.4f})")
-    print(f"  Detection rate : {detection:.4f}   (contaminated called contaminated)")
-    for k, s in per_class.items():
-        tag = 'clean' if k == '0' else f'knee@{k}'
-        print(f"    {tag}: recall={s['recall']:.3f}  tol1={s['tol1']:.3f}  "
-              f"called clean={s['called_clean']:.3f}  (n={s['n']})")
-    for ch, s in per_channel.items():
-        print(f"    {ch}: exact={s['exact_acc']:.4f}  clean_recall={s['clean_recall']:.4f}  "
-              f"FPR={s['false_positive_rate']:.4f}  detection={s['detection_rate']:.4f}")
-    print("  Saving evaluation plots ...")
+    print(f"\n{'='*60}")
+    print(f"HELD-OUT TEST REGION  pulses {data['meta'].get('pulse_window')}")
+    print(f"  N tiles: {len(y_true)}   features: top {N_KEEP} eigenvalues")
+    print(f"  Overall exact: {results['exact_acc']:.4f}   "
+          f"tol-1: {results['tol1_acc']:.4f}")
+    print(f"{'='*60}")
 
+    clean_check(y_true, y_pred, channels, n_classes, out_dir, results)
+    contaminated_check(y_true, y_pred, channels, data['jsr'], n_classes,
+                       out_dir, results)
+
+    print("\n  Saving confusion matrix and metrics ...")
     save_confusion_matrix_png(
         y_true, y_pred, n_classes, out_dir,
         f"Knee Confusion Matrix -- held-out region "
-        f"(pulses {data['meta'].get('pulse_window')})",
+        f"(pulses {data['meta'].get('pulse_window')})\n"
+        f"row 0 = clean check, rows 1+ = contaminated check",
     )
     save_metrics_png(results, out_dir)
-    save_accuracy_vs_jsr_png(y_true, y_pred, data['jsr'], out_dir)
 
     return results
 
