@@ -750,14 +750,6 @@ def report(recs, results):
         print(f"    busiest slow-time block: {100 * s['max_slowtime_block_flag_rate']:.1f}% "
               f"of its range tiles flagged")
 
-    print("\n  Reading the result:")
-    print("    - Coherent range columns or slow-time blocks  -> likely REAL RFI.")
-    print("    - Scattered, isolated, low-confidence hits    -> likely model noise.")
-    print("    - knee-vs-power correlation far from 0        -> the model is riding")
-    print("      backscatter brightness; distrust everything on this scene.")
-    print("    For a hard number on this scene, overlay synthetic RFI on it with")
-    print("    generate_rfi_data.py and retest -- real background, known labels.")
-
 
 # ---------------------------------------------------------------------------
 # CLI
