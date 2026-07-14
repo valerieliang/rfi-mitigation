@@ -154,6 +154,7 @@ def plot_one_cpi_sample(
     global_feat: np.ndarray,
     title_info: dict,
     out_path: str,
+    extra_title: str = None,
 ):
     """
     Build and save the 4-panel diagnostic figure for one CPI tile.
@@ -176,6 +177,10 @@ def plot_one_cpi_sample(
         Metadata for the figure title (file, freq, pol, pulse/range start).
     out_path : str
         PNG output path.
+    extra_title : str, optional
+        Extra text appended as a second title line (e.g. anomaly rank/score
+        when plotting from a top_anomalies_<pol>.json file). Omitted from
+        the figure entirely if None.
     """
     M, K = cpi_data.shape
     n_keep = eigen_feat.shape[0]
@@ -220,12 +225,14 @@ def plot_one_cpi_sample(
     ax_eig.legend(loc='upper right')
 
     # ---- Figure title and text report ----
-    fig.suptitle(
+    title_str = (
         f"{title_info['file']}  |  {title_info['freq']}-{title_info['pol']}  |  "
         f"pulse [{title_info['pulse_start']}:{title_info['pulse_start'] + M}]  "
-        f"range [{title_info['range_start']}:{title_info['range_start'] + K}]",
-        fontsize=11,
+        f"range [{title_info['range_start']}:{title_info['range_start'] + K}]"
     )
+    if extra_title:
+        title_str = title_str + "\n" + extra_title
+    fig.suptitle(title_str, fontsize=11)
 
     normalized_vec_str = ", ".join(f"{v:.2f}" for v in eigen_feat[:, 0])
     report_text = (
