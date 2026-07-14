@@ -72,6 +72,11 @@ Usage
 
 Outputs (in --output-dir)
 --------------------------
+    anomaly_score_map_<pol>.png -- full-region spatial anomaly score map
+                                   for the REAL data (no injection), same
+                                   convention as score_anomaly.py: one cell
+                                   per CPI tile, pulse 0 at top, dark=clean,
+                                   bright=anomalous
     jsr_sweep_scores.npz       -- raw per-tile scores: baseline and every
                                    (pol, jsr_db, n_bands) combination
     jsr_sweep_curve_<pol>.png  -- score vs JSR, one line per n_bands, with
@@ -91,7 +96,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from anomaly_features import extract_anomaly_features
+from anomaly_features import extract_anomaly_features, tile_and_extract_features
 from model_anomaly import compute_anomaly_scores
 
 from nisar.products.readers.Raw import Raw
@@ -281,6 +286,31 @@ def score_tiles(tiles, model, norm_stats, eigen_loss_weight, global_loss_weight)
 # ---------------------------------------------------------------------------
 # PLOTS
 # ---------------------------------------------------------------------------
+
+def save_score_map_png(total_score, n_pulse_tiles, n_range_tiles, pol, out_dir):
+    """
+    Full-grid anomaly score map for the real (no-injection) data over the
+    requested region -- identical convention to score_anomaly.py's map, so
+    it can be read the same way and compared directly:
+    each cell = one 16x250 CPI tile (not a pixel), pulse index 0 at top,
+    dark (inferno colormap) = low score = clean-like, bright = high score
+    = anomalous.
+    """
+    score_grid = total_score.reshape(n_pulse_tiles, n_range_tiles)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    im = ax.imshow(score_grid, aspect='auto', origin='upper', cmap='inferno')
+    ax.set_xlabel('Range Tile Index (one cell = one 250-sample-wide CPI tile)')
+    ax.set_ylabel('Pulse Tile Index (one cell = one 16-pulse CPI; pulse 0 at top)')
+    ax.set_title(f'Anomaly Score Map - {pol} (real data, no injection; dark=clean-like, bright=anomalous)')
+    fig.colorbar(im, ax=ax, label='Anomaly score (low=clean-like, high=anomalous)')
+
+    fig.tight_layout()
+    path = os.path.join(out_dir, f'anomaly_score_map_{pol}.png')
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved {path}")
+
 
 def save_jsr_curve_png(jsr_list, n_bands_list, contaminated_scores, baseline_scores, threshold_p95, threshold_p99, pol, out_dir):
     """
@@ -510,8 +540,39 @@ def main():
         mask_valid = get_subswath_mask(raw, args.freq, pol, pulse_indices, range_indices)
 
         # ------------------------------------------------------------------
-        # Step 3: Sample real background tiles (same set reused for every
-        # JSR/n_bands combination, for a fair paired comparison)
+        # Step 3a: Full-grid scoring of the REAL data (no injection) over
+        # the whole requested region, to produce a spatial map like
+        # score_anomaly.py's -- gives spatial context alongside the JSR
+        # calibration curves below.
+        # ------------------------------------------------------------------
+        full_eigen, full_global, _, _, _ = tile_and_extract_features(
+            raw_data,
+            mask_valid=mask_valid,
+            cpi_len=cpi_len,
+            cpi_width=cpi_width,
+            n_keep=norm_stats['n_keep'],
+            off_diag_overlap_ratio=norm_stats['off_diag_overlap_ratio'],
+            diag_valid_ratio=norm_stats['diag_valid_ratio'],
+            min_tile_valid_frac=0.0,
+        )
+        n_full_tiles = full_eigen.shape[0]
+
+        if n_full_tiles == n_pulse_tiles * n_range_tiles:
+            full_eigen_norm = ((full_eigen - norm_stats['eigen_mean']) / norm_stats['eigen_std']).astype(np.float32)
+            full_global_norm = ((full_global - norm_stats['global_mean']) / norm_stats['global_std']).astype(np.float32)
+            _, _, full_grid_scores = compute_anomaly_scores(
+                model, full_eigen_norm, full_global_norm,
+                eigen_weight=eigen_loss_weight, global_weight=global_loss_weight,
+            )
+            save_score_map_png(full_grid_scores, n_pulse_tiles, n_range_tiles, pol, args.output_dir)
+        else:
+            print(f"  NOTE: full-grid tile count ({n_full_tiles}) != expected grid "
+                  f"({n_pulse_tiles * n_range_tiles}); skipping score map for {pol}")
+
+        # ------------------------------------------------------------------
+        # Step 3b: Sample real background tiles for the JSR sweep (same set
+        # reused for every JSR/n_bands combination, for a fair paired
+        # comparison)
         # ------------------------------------------------------------------
         background_tiles = sample_background_tiles(
             raw_data, mask_valid, cpi_len, cpi_width, args.n_background_tiles, rng,
