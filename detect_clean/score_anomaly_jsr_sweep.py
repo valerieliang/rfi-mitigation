@@ -3,8 +3,8 @@ score_anomaly_jsr_sweep.py
 
 Empirically calibrates the anomaly autoencoder's score-to-severity mapping
 using REAL background CPI tiles (not idealized synthetic spectra), by
-overlaying synthetic RFI bands directly on top of real L0B data and sweeping
-the jammer-to-signal ratio (JSR).
+overlaying synthetic RFI bands directly on top of real L0B data across a
+jammer-to-signal ratio (JSR) range.
 
 Why JSR instead of JNR
 ------------------------
@@ -18,21 +18,36 @@ ratio), where "signal" means the real tile's own average power over its
 valid samples. A JSR of 0 dB means the injected RFI has the same average
 power as the real background it's being added to.
 
-Per project convention, JSR is swept starting at a minimum of 3 dB (weaker
-injections are considered below the threshold of practical interest for
-this study, though the script does not hard-fail if you pass lower values).
+Two different uses of the JSR range / max bands
+------------------------------------------------------------------
+1. Full-grid map (--jsr-min-db/--jsr-max-db/--max-bands): every tile in the
+   requested region gets its OWN independently randomized injection --
+   n_bands drawn uniformly from [1, max_bands], and each band's own JSR
+   drawn uniformly from [jsr_min_db, jsr_max_db] -- matching exactly how
+   generate_synthetic_data.py randomizes per block (n_bands per block,
+   independent JNR per band). This produces a realistic, non-uniform
+   contamination pattern across the image rather than one fixed severity
+   painted everywhere, and is used for the spatial score-and-power map.
+
+2. Calibration sweep (same --jsr-min-db/--jsr-max-db/--max-bands): to build
+   a controlled score-vs-severity curve, the same range is instead used to
+   generate a small number of DISCRETE, FIXED severities
+   (--jsr-steps points linearly spaced across [jsr_min_db, jsr_max_db],
+   crossed with n_bands = 1..max_bands), each applied uniformly to the same
+   set of sampled real background tiles. This is a controlled experiment,
+   not the randomized-per-tile injection used for the map.
 
 RFI injection model (adapted from generate_synthetic_data.py)
 ------------------------------------------------------------------
-For each background CPI tile and each requested band count n_bands:
+For each band injected into a tile:
   1. Estimate the tile's own signal power from its valid (mask=True) samples.
-  2. Compute the total injected RFI power as signal_power * 10^(JSR_db/10).
-  3. Choose n_bands random pulse rows within the tile (with replacement, so
-     two bands may land on the same row and sum incoherently, matching the
-     original generator's convention).
-  4. Each band gets an independent complex Gaussian range-coefficient vector
-     scaled to the per-band power, modulated by a random Doppler phase
-     across the tile's local pulse index.
+  2. Compute the band's RFI power as signal_power * 10^(JSR_db/10).
+  3. Choose a random pulse row within the tile (rows may repeat across
+     bands, so two bands may land on the same row and sum incoherently,
+     matching the original generator's convention).
+  4. The band gets an independent complex Gaussian range-coefficient vector
+     scaled to its power, modulated by a random Doppler phase across the
+     tile's local pulse index.
   5. Add the resulting RFI matrix directly onto the real complex CPI tile.
 
 This produces a REAL-background, REAL-noise-floor contaminated tile whose
@@ -47,9 +62,9 @@ region:
   - "baseline" scores: the same tiles, scored as-is (no injection). This is
     a proxy for "real clean-like data", not verified ground truth -- see
     caveat below.
-  - "contaminated" scores: the SAME tiles, with RFI injected at each
-    (JSR, n_bands) combination in the sweep, scored again. Because it's the
-    same underlying background, this isolates the injected RFI's
+  - "contaminated" scores: the SAME tiles, with RFI injected at each fixed
+    (JSR, n_bands) combination in the discrete sweep, scored again. Because
+    it's the same underlying background, this isolates the injected RFI's
     contribution to the score rather than confounding it with tile-to-tile
     scene variation.
 
@@ -67,23 +82,28 @@ Usage
         --range-start 2000 --range-end 25000 \
         --model-dir models/anomaly_v1 \
         --output-dir eval/jsr_sweep \
-        --jsr-db-list 3 6 10 15 20 25 30 \
-        --n-bands-list 1 2
+        --jsr-min-db 3 --jsr-max-db 30 \
+        --max-bands 6
 
 Outputs (in --output-dir)
 --------------------------
-    anomaly_score_map_<pol>.png -- full-region spatial anomaly score map
-                                   AFTER synthetic RFI has been injected
-                                   into every tile at a single severity
-                                   (--map-jsr-db / --map-n-bands, default:
-                                   the weakest values in the sweep). Same
-                                   visual convention as score_anomaly.py's
-                                   map: one cell per CPI tile, pulse 0 at
-                                   top, dark=clean-like, bright=anomalous.
+    anomaly_score_map_<pol>.png -- side-by-side spatial maps for the full
+                                   requested region: LEFT panel is the
+                                   anomaly score after independently
+                                   randomized RFI injection per tile (JSR in
+                                   [jsr_min_db, jsr_max_db], up to max_bands
+                                   bands per tile); RIGHT panel is the max
+                                   injected JSR actually realized per tile,
+                                   so you can visually check whether the
+                                   score tracks the actual injected
+                                   severity. One cell per CPI tile, pulse 0
+                                   at top on both panels.
     jsr_sweep_scores.npz       -- raw per-tile scores: baseline and every
-                                   (pol, jsr_db, n_bands) combination
-    jsr_sweep_curve_<pol>.png  -- score vs JSR, one line per n_bands, with
-                                   IQR shading and baseline reference lines
+                                   (pol, jsr_db, n_bands) combination from
+                                   the discrete calibration sweep
+    jsr_sweep_curve_<pol>.png  -- score vs JSR, one line per n_bands
+                                   (1..max_bands), with IQR shading and
+                                   baseline reference lines
     jsr_sweep_hist_<pol>.png   -- baseline vs weakest-JSR contaminated score
                                    histogram (the hardest detection case)
     jsr_sweep_summary.json     -- percentile tables and threshold
@@ -107,9 +127,10 @@ from nisar.products.readers.Raw import Raw
 EIGEN_LOSS_WEIGHT_DEFAULT = 1.0
 GLOBAL_LOSS_WEIGHT_DEFAULT = 0.5
 
-JSR_DB_LIST_DEFAULT = [3, 6, 10, 15, 20, 25, 30]
-JSR_MIN_DB = 3.0
-N_BANDS_LIST_DEFAULT = [1]
+JSR_MIN_DB_DEFAULT = 3.0
+JSR_MAX_DB_DEFAULT = 30.0
+JSR_STEPS_DEFAULT = 7
+MAX_BANDS_DEFAULT = 6
 N_BACKGROUND_TILES_DEFAULT = 300
 
 EPS = 1e-12
@@ -157,10 +178,12 @@ def get_subswath_mask(raw: Raw, freq: str, pol: str, pulse_indices: np.ndarray, 
 # RFI INJECTION (JSR-parameterized, adapted from generate_synthetic_data.py)
 # ---------------------------------------------------------------------------
 
-def inject_rfi_bands(cpi_data: np.ndarray, cpi_mask: np.ndarray, jsr_db: float, n_bands: int, rng: np.random.Generator):
+def _inject_bands_core(cpi_data: np.ndarray, cpi_mask: np.ndarray, band_jsr_db_list, rng: np.random.Generator):
     """
-    Overlay n_bands synthetic RFI bands onto a real CPI tile at the
-    requested jammer-to-signal ratio.
+    Overlay one independent RFI band per entry in band_jsr_db_list onto a
+    real CPI tile. This is the shared core used by both the fixed-severity
+    injection (calibration sweep) and the randomized-per-tile injection
+    (spatial map).
 
     Parameters
     ----------
@@ -169,21 +192,19 @@ def inject_rfi_bands(cpi_data: np.ndarray, cpi_mask: np.ndarray, jsr_db: float, 
     cpi_mask : (M, K) bool array
         Valid-sample mask; only valid samples are used to estimate the
         tile's own signal power (so gap/dropout regions don't bias it).
-    jsr_db : float
-        Jammer-to-signal ratio in dB: injected RFI power relative to the
-        tile's own average power.
-    n_bands : int
-        Number of independent RFI bands to inject (pulse rows chosen with
-        replacement, so bands may coincide and sum incoherently).
+    band_jsr_db_list : list[float]
+        One JSR value (dB) per band to inject; len() sets the band count.
     rng : np.random.Generator
 
     Returns
     -------
     contaminated : (M, K) complex64 array
-        cpi_data with the RFI matrix added on top.
     affected_rows : list[int]
-        Local pulse row indices that received at least one band (for
-        diagnostics; duplicates collapsed).
+        Local pulse row indices that received at least one band.
+    max_jsr_db : float
+        The largest JSR among the injected bands (-inf if band_jsr_db_list
+        is empty), i.e. the strongest interferer actually placed in this
+        tile -- used for the "max power" map.
     """
     M, K = cpi_data.shape
 
@@ -191,50 +212,85 @@ def inject_rfi_bands(cpi_data: np.ndarray, cpi_mask: np.ndarray, jsr_db: float, 
     signal_power_linear = float(np.mean(np.abs(cpi_data[valid]) ** 2))
     signal_power_linear = max(signal_power_linear, EPS)
 
-    rfi_power_linear = signal_power_linear * (10.0 ** (jsr_db / 10.0))
-    sigma = np.sqrt(rfi_power_linear / 2.0)
-
     rfi_matrix = np.zeros((M, K), dtype=np.complex64)
-    local_indices = rng.integers(0, M, size=n_bands)
+    affected_rows = []
 
-    for local_idx in local_indices:
+    for jsr_db in band_jsr_db_list:
+        rfi_power_linear = signal_power_linear * (10.0 ** (jsr_db / 10.0))
+        sigma = np.sqrt(rfi_power_linear / 2.0)
+
+        local_idx = int(rng.integers(0, M))
         doppler_freq = rng.uniform(-0.5, 0.5)
         range_coeff = (
             rng.standard_normal(K) + 1j * rng.standard_normal(K)
         ) * sigma
         phase = np.exp(1j * 2.0 * np.pi * doppler_freq * local_idx)
         rfi_matrix[local_idx, :] += (phase * range_coeff).astype(np.complex64)
+        affected_rows.append(local_idx)
 
     contaminated = (cpi_data + rfi_matrix).astype(np.complex64)
-    affected_rows = sorted(set(int(i) for i in local_indices))
+    max_jsr_db = float(max(band_jsr_db_list)) if band_jsr_db_list else float('-inf')
+    return contaminated, sorted(set(affected_rows)), max_jsr_db
+
+
+def inject_rfi_bands(cpi_data: np.ndarray, cpi_mask: np.ndarray, jsr_db: float, n_bands: int, rng: np.random.Generator):
+    """
+    Overlay n_bands synthetic RFI bands onto a real CPI tile, all at the
+    SAME fixed jammer-to-signal ratio. Used by the controlled discrete
+    calibration sweep (see module docstring, use 2).
+
+    Returns
+    -------
+    contaminated : (M, K) complex64 array
+    affected_rows : list[int]
+    """
+    contaminated, affected_rows, _ = _inject_bands_core(cpi_data, cpi_mask, [jsr_db] * n_bands, rng)
     return contaminated, affected_rows
 
 
-def inject_rfi_into_full_grid(raw_data, mask_valid, cpi_len, cpi_width, jsr_db, n_bands, rng):
+def inject_rfi_bands_randomized(cpi_data: np.ndarray, cpi_mask: np.ndarray, jsr_min_db: float, jsr_max_db: float,
+                                 max_bands: int, rng: np.random.Generator):
     """
-    Inject synthetic RFI into every non-overlapping CPI tile of a full
-    (pulses, range) array, at a single (jsr_db, n_bands) severity, so the
-    resulting array can be scored and mapped the same way as real data.
+    Overlay a RANDOM number of bands (uniform integer in [1, max_bands]) at
+    RANDOM, independently-drawn JSR values (uniform in [jsr_min_db,
+    jsr_max_db]) onto a real CPI tile -- matching how
+    generate_synthetic_data.py randomizes RFI per block. Used by the
+    spatial map (see module docstring, use 1).
 
-    Parameters
-    ----------
-    raw_data : (n_pulses, n_range) complex array
-    mask_valid : (n_pulses, n_range) bool array
-    cpi_len, cpi_width : int
-    jsr_db : float
-    n_bands : int
-    rng : np.random.Generator
+    Returns
+    -------
+    contaminated : (M, K) complex64 array
+    affected_rows : list[int]
+    max_jsr_db : float
+        The strongest band's JSR actually drawn for this tile.
+    """
+    n_bands = int(rng.integers(1, max_bands + 1))
+    band_jsr_db_list = [float(rng.uniform(jsr_min_db, jsr_max_db)) for _ in range(n_bands)]
+    return _inject_bands_core(cpi_data, cpi_mask, band_jsr_db_list, rng)
+
+
+def inject_rfi_into_full_grid_randomized(raw_data, mask_valid, cpi_len, cpi_width, jsr_min_db, jsr_max_db, max_bands, rng):
+    """
+    Inject independently randomized RFI into every non-overlapping CPI tile
+    of a full (pulses, range) array: each tile gets its own random band
+    count (1..max_bands) and each band its own random JSR
+    (jsr_min_db..jsr_max_db), matching generate_synthetic_data.py's
+    per-block randomization. Also records the strongest JSR actually
+    realized in each tile, for a side-by-side "max power" map.
 
     Returns
     -------
     contaminated : (n_pulses, n_range) complex64 array
         Copy of raw_data with RFI injected into every tile.
+    max_power_grid : (n_pulse_tiles, n_range_tiles) float32 array
+        Max injected JSR (dB) realized in each tile.
     """
     n_pulses, n_range = raw_data.shape
     n_pulse_tiles = n_pulses // cpi_len
     n_range_tiles = n_range // cpi_width
 
     contaminated = raw_data.copy()
+    max_power_grid = np.zeros((n_pulse_tiles, n_range_tiles), dtype=np.float32)
 
     for pt in range(n_pulse_tiles):
         p0, p1 = pt * cpi_len, pt * cpi_len + cpi_len
@@ -242,10 +298,13 @@ def inject_rfi_into_full_grid(raw_data, mask_valid, cpi_len, cpi_width, jsr_db, 
             r0, r1 = rt * cpi_width, rt * cpi_width + cpi_width
             cpi_data = contaminated[p0:p1, r0:r1]
             cpi_mask = mask_valid[p0:p1, r0:r1]
-            contaminated_cpi, _ = inject_rfi_bands(cpi_data, cpi_mask, jsr_db, n_bands, rng)
+            contaminated_cpi, _, max_jsr_db = inject_rfi_bands_randomized(
+                cpi_data, cpi_mask, jsr_min_db, jsr_max_db, max_bands, rng,
+            )
             contaminated[p0:p1, r0:r1] = contaminated_cpi
+            max_power_grid[pt, rt] = max_jsr_db
 
-    return contaminated
+    return contaminated, max_power_grid
 
 
 # ---------------------------------------------------------------------------
@@ -328,28 +387,40 @@ def score_tiles(tiles, model, norm_stats, eigen_loss_weight, global_loss_weight)
 # PLOTS
 # ---------------------------------------------------------------------------
 
-def save_score_map_png(total_score, n_pulse_tiles, n_range_tiles, pol, jsr_db, n_bands, out_dir):
+def save_score_and_power_map_png(total_score, max_power_grid, n_pulse_tiles, n_range_tiles, pol,
+                                  jsr_min_db, jsr_max_db, max_bands, out_dir):
     """
-    Full-grid anomaly score map AFTER synthetic RFI has been injected into
-    every tile at the given (jsr_db, n_bands) severity -- same visual
-    convention as score_anomaly.py's map so it can be read the same way:
-    each cell = one 16x250 CPI tile (not a pixel), pulse index 0 at top,
-    dark (inferno colormap) = low score = clean-like, bright = high score
-    = anomalous.
+    Side-by-side spatial maps for the full requested region:
+      LEFT  : anomaly score after independently randomized RFI injection
+              per tile (dark=clean-like, bright=anomalous, inferno colormap)
+      RIGHT : the strongest injected JSR (dB) actually realized per tile
+              (viridis colormap), so the score map can be visually checked
+              against the actual injected severity.
+    Same convention as score_anomaly.py otherwise: one cell = one 16x250
+    CPI tile (not a pixel), pulse index 0 at top on both panels.
     """
     score_grid = total_score.reshape(n_pulse_tiles, n_range_tiles)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    im = ax.imshow(score_grid, aspect='auto', origin='upper', cmap='inferno')
-    ax.set_xlabel('Range Tile Index (one cell = one 250-sample-wide CPI tile)')
-    ax.set_ylabel('Pulse Tile Index (one cell = one 16-pulse CPI; pulse 0 at top)')
-    ax.set_title(
-        f'Anomaly Score Map - {pol} (AFTER injecting JSR={jsr_db} dB, n_bands={n_bands} '
-        f'into every tile; dark=clean-like, bright=anomalous)'
-    )
-    fig.colorbar(im, ax=ax, label='Anomaly score (low=clean-like, high=anomalous)')
+    fig, (ax_score, ax_power) = plt.subplots(1, 2, figsize=(18, 6), sharex=True, sharey=True)
 
-    fig.tight_layout()
+    im0 = ax_score.imshow(score_grid, aspect='auto', origin='upper', cmap='inferno')
+    ax_score.set_xlabel('Range Tile Index (one cell = one 250-sample-wide CPI tile)')
+    ax_score.set_ylabel('Pulse Tile Index (one cell = one 16-pulse CPI; pulse 0 at top)')
+    ax_score.set_title('Anomaly score (dark=clean-like, bright=anomalous)')
+    fig.colorbar(im0, ax=ax_score, label='Anomaly score')
+
+    im1 = ax_power.imshow(max_power_grid, aspect='auto', origin='upper', cmap='viridis')
+    ax_power.set_xlabel('Range Tile Index (one cell = one 250-sample-wide CPI tile)')
+    ax_power.set_title('Max injected JSR per tile (dB)')
+    fig.colorbar(im1, ax=ax_power, label='Max JSR (dB)')
+
+    fig.suptitle(
+        f'{pol} -- RFI overlaid per tile: JSR range [{jsr_min_db:g}, {jsr_max_db:g}] dB, '
+        f'up to {max_bands} bands/tile (each tile randomized independently)',
+        fontsize=12,
+    )
+
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     path = os.path.join(out_dir, f'anomaly_score_map_{pol}.png')
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -478,20 +549,21 @@ def parse_args():
                         help='Directory containing best_model.keras and norm_stats.npz from training')
     parser.add_argument('--output-dir', type=str, default='eval/jsr_sweep', help='Output directory')
 
-    parser.add_argument('--jsr-db-list', type=float, nargs='+', default=JSR_DB_LIST_DEFAULT,
-                        help=f'JSR sweep values in dB (default: {JSR_DB_LIST_DEFAULT}). Values below '
-                             f'{JSR_MIN_DB} dB are allowed but are below this study\'s minimum JSR of interest.')
-    parser.add_argument('--n-bands-list', type=int, nargs='+', default=N_BANDS_LIST_DEFAULT,
-                        help=f'Number of independent RFI bands to inject per tile (default: {N_BANDS_LIST_DEFAULT})')
+    parser.add_argument('--jsr-min-db', type=float, default=JSR_MIN_DB_DEFAULT,
+                        help=f'Minimum JSR in dB, used both for the randomized per-tile map injection and as '
+                             f'the low end of the calibration sweep (default: {JSR_MIN_DB_DEFAULT})')
+    parser.add_argument('--jsr-max-db', type=float, default=JSR_MAX_DB_DEFAULT,
+                        help=f'Maximum JSR in dB, used both for the randomized per-tile map injection and as '
+                             f'the high end of the calibration sweep (default: {JSR_MAX_DB_DEFAULT})')
+    parser.add_argument('--jsr-steps', type=int, default=JSR_STEPS_DEFAULT,
+                        help=f'Number of discrete JSR points linearly spaced across [jsr-min-db, jsr-max-db] '
+                             f'for the calibration sweep curve (default: {JSR_STEPS_DEFAULT})')
+    parser.add_argument('--max-bands', type=int, default=MAX_BANDS_DEFAULT,
+                        help=f'Maximum number of RFI bands per tile. The map draws a random band count in '
+                             f'[1, max_bands] independently per tile; the calibration sweep tests every '
+                             f'n_bands from 1 to max_bands (default: {MAX_BANDS_DEFAULT})')
     parser.add_argument('--n-background-tiles', type=int, default=N_BACKGROUND_TILES_DEFAULT,
                         help=f'Number of real background tiles to sample for the sweep (default: {N_BACKGROUND_TILES_DEFAULT})')
-
-    parser.add_argument('--map-jsr-db', type=float, default=None,
-                        help='JSR (dB) used to inject RFI into every tile for the full-grid score map '
-                             '(default: the weakest/minimum value in --jsr-db-list)')
-    parser.add_argument('--map-n-bands', type=int, default=None,
-                        help='Number of RFI bands used to inject into every tile for the full-grid score map '
-                             '(default: the weakest/minimum value in --n-bands-list)')
 
     parser.add_argument('--eigen-loss-weight', type=float, default=None)
     parser.add_argument('--global-loss-weight', type=float, default=None)
@@ -510,9 +582,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
-    if min(args.jsr_db_list) < JSR_MIN_DB:
-        print(f"WARNING: --jsr-db-list contains values below the study minimum of {JSR_MIN_DB} dB; "
-              f"these represent RFI weaker than this project's threshold of interest.")
+    if args.jsr_min_db >= args.jsr_max_db:
+        raise ValueError(f"--jsr-min-db ({args.jsr_min_db}) must be less than --jsr-max-db ({args.jsr_max_db})")
+    if args.jsr_min_db < JSR_MIN_DB_DEFAULT:
+        print(f"NOTE: --jsr-min-db is below this study's usual floor of interest ({JSR_MIN_DB_DEFAULT} dB); "
+              f"proceeding anyway.")
+
+    # Discrete points for the controlled calibration sweep, derived from the
+    # same range/max-bands the map's randomized injection uses.
+    jsr_db_list = [float(v) for v in np.linspace(args.jsr_min_db, args.jsr_max_db, args.jsr_steps)]
+    n_bands_list = list(range(1, args.max_bands + 1))
 
     # ------------------------------------------------------------------
     # Step 1: Load trained model and normalization stats (no training here)
@@ -554,8 +633,8 @@ def main():
             threshold_p99 = run_summary.get('recommended_threshold_p99')
         print(f"  Auto-loaded thresholds from run_summary.json: p95={threshold_p95}, p99={threshold_p99}")
 
-    print(f"\nJSR sweep: {args.jsr_db_list} dB")
-    print(f"n_bands sweep: {args.n_bands_list}")
+    print(f"\nJSR range: [{args.jsr_min_db}, {args.jsr_max_db}] dB, max_bands={args.max_bands}")
+    print(f"Calibration sweep points: JSR={[round(v, 2) for v in jsr_db_list]} dB, n_bands={n_bands_list}")
     print(f"Background tiles per polarization: {args.n_background_tiles}")
 
     # ------------------------------------------------------------------
@@ -591,18 +670,17 @@ def main():
         mask_valid = get_subswath_mask(raw, args.freq, pol, pulse_indices, range_indices)
 
         # ------------------------------------------------------------------
-        # Step 3a: Full-grid scoring AFTER injecting synthetic RFI into
-        # every tile at the map's chosen severity, to produce a spatial map
-        # showing what widespread contamination at this severity would look
-        # like -- gives spatial context alongside the JSR calibration
-        # curves below.
+        # Step 3a: Full-grid scoring AFTER independently randomized RFI
+        # injection per tile (random band count up to max_bands, random
+        # per-band JSR within [jsr_min_db, jsr_max_db]) -- produces a
+        # realistic, non-uniform contamination pattern across the region,
+        # plus the max injected JSR per tile for a side-by-side comparison.
         # ------------------------------------------------------------------
-        map_jsr_db = args.map_jsr_db if args.map_jsr_db is not None else min(args.jsr_db_list)
-        map_n_bands = args.map_n_bands if args.map_n_bands is not None else min(args.n_bands_list)
-        print(f"  Injecting RFI into every tile for the map (JSR={map_jsr_db} dB, n_bands={map_n_bands}) ...")
+        print(f"  Injecting randomized RFI into every tile for the map "
+              f"(JSR in [{args.jsr_min_db}, {args.jsr_max_db}] dB, up to {args.max_bands} bands/tile) ...")
 
-        contaminated_raw_data = inject_rfi_into_full_grid(
-            raw_data, mask_valid, cpi_len, cpi_width, map_jsr_db, map_n_bands, rng,
+        contaminated_raw_data, max_power_grid = inject_rfi_into_full_grid_randomized(
+            raw_data, mask_valid, cpi_len, cpi_width, args.jsr_min_db, args.jsr_max_db, args.max_bands, rng,
         )
 
         full_eigen, full_global, _, _, _ = tile_and_extract_features(
@@ -624,7 +702,10 @@ def main():
                 model, full_eigen_norm, full_global_norm,
                 eigen_weight=eigen_loss_weight, global_weight=global_loss_weight,
             )
-            save_score_map_png(full_grid_scores, n_pulse_tiles, n_range_tiles, pol, map_jsr_db, map_n_bands, args.output_dir)
+            save_score_and_power_map_png(
+                full_grid_scores, max_power_grid, n_pulse_tiles, n_range_tiles, pol,
+                args.jsr_min_db, args.jsr_max_db, args.max_bands, args.output_dir,
+            )
         else:
             print(f"  NOTE: full-grid tile count ({n_full_tiles}) != expected grid "
                   f"({n_pulse_tiles * n_range_tiles}); skipping score map for {pol}")
@@ -652,8 +733,8 @@ def main():
         # the SAME background tiles
         # ------------------------------------------------------------------
         contaminated_scores = {}
-        for n_bands in args.n_bands_list:
-            for jsr_db in args.jsr_db_list:
+        for n_bands in n_bands_list:
+            for jsr_db in jsr_db_list:
                 contaminated_tiles = []
                 for cpi_data, cpi_mask, p0, r0 in background_tiles:
                     contaminated_cpi, _ = inject_rfi_bands(cpi_data, cpi_mask, jsr_db, n_bands, rng)
@@ -669,12 +750,12 @@ def main():
         # Step 6: Plots
         # ------------------------------------------------------------------
         save_jsr_curve_png(
-            args.jsr_db_list, args.n_bands_list, contaminated_scores, baseline_scores,
+            jsr_db_list, n_bands_list, contaminated_scores, baseline_scores,
             threshold_p95, threshold_p99, pol, args.output_dir,
         )
 
-        weakest_jsr = min(args.jsr_db_list)
-        weakest_n_bands = min(args.n_bands_list)
+        weakest_jsr = min(jsr_db_list)
+        weakest_n_bands = min(n_bands_list)
         weakest_scores = contaminated_scores[(weakest_n_bands, weakest_jsr)]
         save_weakest_jsr_hist_png(baseline_scores, weakest_scores, weakest_jsr, weakest_n_bands, pol, args.output_dir)
 
@@ -747,9 +828,12 @@ def main():
         'range_start': r_start,
         'range_end': r_end,
         'model_dir': args.model_dir,
-        'jsr_db_list': args.jsr_db_list,
-        'n_bands_list': args.n_bands_list,
-        'jsr_min_db_of_interest': JSR_MIN_DB,
+        'jsr_min_db': args.jsr_min_db,
+        'jsr_max_db': args.jsr_max_db,
+        'jsr_steps': args.jsr_steps,
+        'max_bands': args.max_bands,
+        'calibration_sweep_jsr_db_list': jsr_db_list,
+        'calibration_sweep_n_bands_list': n_bands_list,
         'threshold_p95_from_training': threshold_p95,
         'threshold_p99_from_training': threshold_p99,
         'per_polarization': all_summaries,
