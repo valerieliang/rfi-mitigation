@@ -1,42 +1,40 @@
 """
 generate_rfi_data.py
 
-Builds two CPI-tile test sets from REAL NISAR L0B data:
+Builds ONE labeled CPI training set from real NISAR L0B data by overlaying
+synthetic Gaussian RFI bands on top of real CPI tiles.
 
-  1. clean/       -- real CPI tiles taken as-is, every tile labeled knee = 0.
-                     This is the "current data" set: no injection at all, and
-                     the whole region is assumed clean by construction of the
-                     label (see CAVEAT below).
-
-  2. contaminated/-- the SAME real CPI tiles with synthetic RFI overlaid.
-                     Each tile independently draws n_bands uniformly from
-                     [MIN_BANDS, MAX_BANDS] = [0, 6]; the label (knee) is
-                     exactly that drawn number. A tile that draws 0 bands is
-                     an in-set clean tile (knee = 0).
+Labeling
+--------
+Every tile independently draws n_bands uniformly from [MIN_BANDS, MAX_BANDS]
+= [0, 6], and that drawn number IS the label (knee). A tile that draws 0 gets
+no injection at all, so clean tiles are randomly interspersed through the set
+rather than living in a separate file. With a uniform draw over 7 values the
+classes come out balanced at roughly 1/7 each.
 
 Why JSR (not JNR)
 -----------------
 generate_synthetic_data.py builds fully synthetic frames (synthetic noise +
-synthetic signal), so RFI strength is naturally expressed relative to a
-synthetic noise floor (JNR). Here the background is real L0B data: there is
-no separate synthetic noise component to reference. The only meaningful
-reference is the tile's own observed baseline power, so RFI strength is
-expressed as JSR = jammer-to-signal ratio, where "signal" is the mean power
-of the real CPI matrix over its valid (non-gap) samples.
+synthetic signal), so RFI strength is naturally expressed against a synthetic
+noise floor (JNR). Here the background is real L0B data: there is no separate
+synthetic noise component to reference. The only meaningful reference is the
+tile's own observed baseline power, so RFI strength is expressed as
+JSR = jammer-to-signal ratio, where "signal" is the mean power of the real CPI
+matrix over its valid (non-gap) samples.
 
-Per the requested configuration the JSR is FIXED at JSR_DB = 3.0 dB, i.e.
-every injected band carries 3 dB more power than the tile's own baseline.
+Per the requested configuration JSR is FIXED at JSR_DB = 3.0 dB: every injected
+band carries 3 dB more power than the tile's own baseline.
 
 RFI injection model (adapted from generate_synthetic_data.py and
 score_anomaly_jsr_sweep.py)
----------------------------------------------------------------------
+--------------------------------------------------------------------
 For each band injected into a tile:
   1. Estimate the tile's baseline power from its valid samples:
          signal_power = mean(|x|^2) over mask == True
   2. Band power = signal_power * 10^(JSR_DB / 10).
-  3. Pick a random local pulse row in [0, cpi_len) (rows may repeat across
+  3. Pick a random local pulse row in [0, cpi_len). Rows may repeat across
      bands; two bands on the same row sum incoherently because they use
-     independent range-coefficient vectors and independent Doppler phases).
+     independent range-coefficient vectors and independent Doppler phases.
   4. Draw an independent complex Gaussian range-coefficient vector scaled to
      the band power, modulate by a random Doppler phase, add onto the tile.
 
@@ -45,65 +43,69 @@ SCM / eigenvalue convention
 All covariance and eigenvalue math follows read_nisar_isce3.py:
   - SCM is the gap-exclusion slow-time sample covariance
     (compute_gap_exclusion_cov), which normalizes each entry by its own
-    valid-overlap count using the ISCE3 subswath mask. This is what keeps
-    the inter-subswath gaps from poisoning the covariance.
+    valid-overlap count using the ISCE3 subswath mask, so inter-subswath gaps
+    do not poison the covariance.
   - Eigenvalues come from np.linalg.eigvalsh on that Hermitian SCM, sorted
-    descending.
-  - When no subswath mask is available/requested, the SCM degrades to the
-    plain (M @ M^H) / K estimate.
+    descending. They are stored in LINEAR scale (not dB); take
+    10 * log10(.) downstream if a dB profile is wanted.
+  - Without --compute-subswath-mask the SCM degrades to (M @ M^H) / K.
 
 Seeding / uncorrelation
 -----------------------
-Every random stream is derived from a SeedSequence whose entropy tuple
-uniquely identifies its role, so no two streams share state:
+Every random stream comes from a SeedSequence whose entropy tuple uniquely
+identifies its role, so no two streams can share state:
 
-    injection structure (n_bands, band rows) : [seed, SET_INJECT, pt, rt]
-    per-band coefficients + Doppler          : spawned children of the above
-    plot tile selection                      : [plot_seed, SALT_PLOT]
+    band count for tile (pt, rt)  : child of [seed, SALT_INJECT, pt, rt]
+    band rows for tile (pt, rt)   : [seed, SALT_INJECT, pt, rt] itself
+    per-band Doppler + coeffs     : spawned children of the same
+    plot tile selection           : [plot_seed, SALT_PLOT]
 
-The plot RNG is a completely separate stream, so drawing plot tiles cannot
-perturb the injection draws. The injection stream for tile (pt, rt) depends
-only on (seed, pt, rt), so a tile's contamination is reproducible regardless
-of how many bands any other tile drew.
+A tile's contamination depends only on (seed, pt, rt), so it is reproducible
+regardless of what any other tile drew. The plot stream is disjoint, so
+selecting blocks to plot cannot perturb the injection draws.
 
-CAVEAT
-------
-The "clean" set is only clean by assumption: the background region is
-presumed mostly RFI-free, it is not independently verified ground truth. Any
-real RFI already present in the region will show up as a false positive
-against the knee = 0 label.
+Storage
+-------
+By default only compact per-tile records are stored (about 100 bytes/tile):
 
-HDF5 layout (one file per polarization per set)
------------------------------------------------
-Root attributes : region config (pulse/range window, cpi dims, jsr, seed,
-                  set name, freq, pol, gap-exclusion ratios, ...)
-Dataset         : "subswath_mask" (bool, region-sized, gzip) if computed
-Per CPI tile at absolute (pulse p0, range r0):
-    "cpi_{p0}_{r0}"              complex64 (cpi_len, cpi_width)
-        attr 'rfi_bands' (str, JSON):
-            knee            (int)       : number of injected bands, 0..6
-            pulse_positions (list[int]) : 1-based local pulse rows of bands
-            jsr_db_list     (list[float]): per-band JSR in dB
-            n_distinct_rows (int)       : distinct rows actually hit
-            signal_power_db (float)     : tile baseline power, 10*log10
-            valid_fraction  (float)     : fraction of valid (unmasked) samples
-    "cpi_{p0}_{r0}_eigenvalues"  float32 (cpi_len,)  descending, linear
-    "cpi_{p0}_{r0}_diagonal"     float32 (cpi_len,)  |diag(SCM)|
-    "cpi_{p0}_{r0}_scm"          complex64 (cpi_len, cpi_len)  [--save-scm]
+    labels          int8      (N,)              knee = number of RFI bands, 0..6
+    jsr_db          float32   (N, max_bands)    per-band JSR, NaN-padded;
+                                                all-NaN row for a clean tile
+    band_rows       int8      (N, max_bands)    local pulse row per band, -1 pad
+    eigenvalues     float32   (N, cpi_len)      descending, LINEAR scale
+    signal_power_db float32   (N,)              tile baseline power, 10*log10
+    valid_fraction  float32   (N,)              fraction of valid samples
+    tile_pulse      int32     (N,)              absolute pulse index of tile row 0
+    tile_range      int32     (N,)              absolute range index of tile col 0
+
+With --save-cpi the raw complex tiles are stored as well:
+
+    cpi             complex64 (N, cpi_len, cpi_width)   gzip, chunked per tile
+
+That array is roughly 32 kB/tile (about 13.7 GB for the full default window),
+so it is off by default.
+
+Root attributes carry the full generation config: seed, plot seed, pulse and
+range windows, CPI dimensions, JSR, band range, gap-exclusion ratios, granule
+name, frequency, polarization, and the final label histogram.
 
 Usage
 -----
     python generate_rfi_data.py granule.h5 --freq A --pol HH \
-        --pulse-start 888222 --pulse-end 896222 \
+        --pulse-start 813924 --pulse-end 888222 \
         --range-start 2000 --range-end 25000 \
-        --output-dir data/real_testsets \
         --compute-subswath-mask \
+        --output-dir data/rfi_train \
         --seed 1234 --plot-seed 20240101
+
+    # Same, but also keep the complex CPI tiles
+    python generate_rfi_data.py granule.h5 --save-cpi
 """
 
 import os
 import json
 import argparse
+from datetime import datetime
 from dataclasses import dataclass
 from typing import List
 
@@ -121,12 +123,17 @@ from nisar.products.readers.Raw import Raw
 CPI_LEN_DEFAULT = 16
 CPI_WIDTH_DEFAULT = 250
 
-# Test region (slow time). Matches the region used by score_anomaly_jsr_sweep.
-PULSE_START_DEFAULT = 888222
-PULSE_END_DEFAULT = 896222
+# Valid training region (slow time): 74298 pulses -> 4643 pulse tiles
+PULSE_START_DEFAULT = 813924
+PULSE_END_DEFAULT = 888222
 
-# RFI band count drawn per tile in the contaminated set (both ends inclusive).
-# The drawn count IS the label.
+# Default range window (fast time): 23000 samples -> 92 range tiles
+RANGE_START_DEFAULT = 2000
+RANGE_END_DEFAULT = 25000
+
+# RFI band count drawn per tile (both ends inclusive). The drawn count IS the
+# label; drawing 0 leaves the tile untouched, which is how clean tiles get
+# randomly interspersed through the set.
 MIN_BANDS_DEFAULT = 0
 MAX_BANDS_DEFAULT = 6
 
@@ -142,7 +149,7 @@ DIAG_VALID_RATIO_DEFAULT = 0.20
 SALT_INJECT = 0xA1
 SALT_PLOT = 0xB2
 
-# Number of pulses read per chunk (must be a multiple of cpi_len; enforced).
+# Pulses read per chunk; snapped down to a whole number of CPI tiles.
 PULSE_CHUNK_DEFAULT = 1600
 
 N_PLOT_BLOCKS_DEFAULT = 12
@@ -163,7 +170,7 @@ class BandMeta:
 
 @dataclass
 class TileMeta:
-    """Label + provenance for one CPI tile."""
+    """Label and provenance for one CPI tile."""
     knee: int                       # number of injected bands (0..MAX_BANDS)
     bands: List[BandMeta]
     signal_power_db: float          # tile baseline power, 10*log10(mean|x|^2)
@@ -171,7 +178,7 @@ class TileMeta:
 
 
 # ---------------------------------------------------------------------------
-# GAP-EXCLUSION COVARIANCE (verbatim convention from read_nisar_isce3.py)
+# GAP-EXCLUSION COVARIANCE (convention taken from read_nisar_isce3.py)
 # ---------------------------------------------------------------------------
 
 def compute_gap_exclusion_cov(
@@ -250,7 +257,7 @@ def compute_gap_exclusion_cov(
 
 def compute_scm_and_eigs(cpi, cpi_mask, off_diag_overlap_ratio, diag_valid_ratio):
     """
-    Compute the SCM and its descending eigenvalues for one CPI tile.
+    Compute the SCM and its descending LINEAR eigenvalues for one CPI tile.
 
     Uses the gap-exclusion covariance when a mask is supplied, otherwise the
     plain (M @ M^H) / K estimate.
@@ -259,7 +266,6 @@ def compute_scm_and_eigs(cpi, cpi_mask, off_diag_overlap_ratio, diag_valid_ratio
     -------
     scm : (M, M) complex64
     eigvals : (M,) float32, descending, linear scale
-    diag_power : (M,) float32, |diag(SCM)|
     """
     if cpi_mask is not None:
         scm, _ = compute_gap_exclusion_cov(
@@ -274,9 +280,8 @@ def compute_scm_and_eigs(cpi, cpi_mask, off_diag_overlap_ratio, diag_valid_ratio
 
     eigvals = np.linalg.eigvalsh(scm)          # ascending, real
     eigvals = np.sort(eigvals)[::-1]           # descending
-    diag_power = np.abs(np.diag(scm))
 
-    return scm, eigvals.astype(np.float32), diag_power.astype(np.float32)
+    return scm, eigvals.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +353,17 @@ def make_tile_seed_seq(seed: int, pulse_tile: int, range_tile: int) -> np.random
     return np.random.SeedSequence([int(seed), SALT_INJECT, int(pulse_tile), int(range_tile)])
 
 
+def draw_n_bands(tile_seed_seq, min_bands, max_bands):
+    """
+    Draw the band count (== the label) for one tile from a dedicated child of
+    the tile stream, so the count draw is decoupled from the band-row and
+    coefficient draws.
+    """
+    count_seed = tile_seed_seq.spawn(1)[0]
+    rng_count = np.random.default_rng(count_seed)
+    return int(rng_count.integers(min_bands, max_bands + 1))
+
+
 def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_db, tile_seed_seq):
     """
     Overlay n_bands synthetic Gaussian RFI bands onto a real CPI tile.
@@ -356,17 +372,12 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_db, tile_seed_seq):
     gets its own spawned RNG child stream, so bands are mutually uncorrelated;
     the structural draws (band rows) come from the tile's own stream.
 
-    Parameters
-    ----------
-    cpi : (M, K) complex array          real background tile
-    cpi_mask : (M, K) bool or None      valid-sample mask
-    n_bands : int                       number of bands to inject (may be 0)
-    jsr_db : float                      fixed JSR per band, in dB
-    tile_seed_seq : np.random.SeedSequence
+    n_bands == 0 returns the tile untouched with a knee = 0 label: that is the
+    clean case, interspersed at random through the set.
 
     Returns
     -------
-    contaminated : (M, K) complex64
+    tile : (M, K) complex64
     meta : TileMeta
     """
     M, K = cpi.shape
@@ -405,125 +416,213 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_db, tile_seed_seq):
         rfi[local_row, :] += (phase * range_coeff).astype(np.complex64)
         bands.append(BandMeta(local_row=local_row, jsr_db=float(jsr_db)))
 
-    contaminated = (cpi + rfi).astype(np.complex64)
+    tile = (cpi + rfi).astype(np.complex64)
     meta = TileMeta(knee=n_bands, bands=bands,
                     signal_power_db=signal_power_db,
                     valid_fraction=valid_fraction)
-    return contaminated, meta
-
-
-def draw_n_bands(tile_seed_seq, min_bands, max_bands):
-    """
-    Draw the band count (== the label) for one tile from its own stream.
-
-    Uses a dedicated child of the tile seed sequence so that the count draw is
-    decoupled from the band-row / coefficient draws.
-    """
-    count_seed = tile_seed_seq.spawn(1)[0]
-    rng_count = np.random.default_rng(count_seed)
-    return int(rng_count.integers(min_bands, max_bands + 1))
+    return tile, meta
 
 
 # ---------------------------------------------------------------------------
-# TEST SET GENERATION
+# HDF5 WRITER
 # ---------------------------------------------------------------------------
 
-def tile_meta_json(meta: TileMeta) -> str:
-    """Serialize a TileMeta to the 'rfi_bands' JSON attribute string."""
-    rows = [b.local_row for b in meta.bands]
-    return json.dumps({
-        'knee': meta.knee,
-        'pulse_positions': [r + 1 for r in rows],   # 1-based, as in the synthetic generator
-        'jsr_db_list': [b.jsr_db for b in meta.bands],
-        'n_distinct_rows': len(set(rows)),
-        'signal_power_db': meta.signal_power_db,
-        'valid_fraction': meta.valid_fraction,
-    })
+class TileWriter:
+    """
+    Append-as-you-go writer for the per-tile record arrays.
+
+    Every dataset is resizable along the tile axis so the region can be
+    streamed in pulse chunks without ever holding the whole set in memory.
+    """
+
+    def __init__(self, f, cpi_len, cpi_width, max_bands, save_cpi):
+        self.f = f
+        self.n = 0
+        self.save_cpi = save_cpi
+
+        def mk(name, shape, dtype, chunks, **kw):
+            return f.create_dataset(
+                name,
+                shape=(0,) + shape,
+                maxshape=(None,) + shape,
+                dtype=dtype,
+                chunks=(chunks,) + shape,
+                **kw,
+            )
+
+        self.labels = mk('labels', (), np.int8, 4096)
+        self.jsr_db = mk('jsr_db', (max_bands,), np.float32, 4096)
+        self.band_rows = mk('band_rows', (max_bands,), np.int8, 4096)
+        self.eigenvalues = mk('eigenvalues', (cpi_len,), np.float32, 2048)
+        self.signal_power_db = mk('signal_power_db', (), np.float32, 4096)
+        self.valid_fraction = mk('valid_fraction', (), np.float32, 4096)
+        self.tile_pulse = mk('tile_pulse', (), np.int32, 4096)
+        self.tile_range = mk('tile_range', (), np.int32, 4096)
+
+        self.labels.attrs['description'] = 'knee: number of injected RFI bands (0 = clean)'
+        self.jsr_db.attrs['description'] = (
+            'per-band JSR in dB, NaN-padded to max_bands; all-NaN row means clean tile'
+        )
+        self.band_rows.attrs['description'] = 'local pulse row of each band, -1 padded'
+        self.eigenvalues.attrs['description'] = (
+            'SCM eigenvalues, descending, LINEAR scale (take 10*log10 for dB)'
+        )
+
+        if save_cpi:
+            self.cpi = f.create_dataset(
+                'cpi',
+                shape=(0, cpi_len, cpi_width),
+                maxshape=(None, cpi_len, cpi_width),
+                dtype=np.complex64,
+                chunks=(16, cpi_len, cpi_width),
+                compression='gzip',
+                compression_opts=4,
+            )
+            self.cpi.attrs['description'] = 'complex CPI tile, RFI already overlaid'
+        else:
+            self.cpi = None
+
+    def append(self, labels, jsr_db, band_rows, eigenvalues,
+               signal_power_db, valid_fraction, tile_pulse, tile_range, cpi=None):
+        """Append one batch of tile records (arrays with a leading tile axis)."""
+        m = len(labels)
+        new_n = self.n + m
+
+        for dset, arr in (
+            (self.labels, labels),
+            (self.jsr_db, jsr_db),
+            (self.band_rows, band_rows),
+            (self.eigenvalues, eigenvalues),
+            (self.signal_power_db, signal_power_db),
+            (self.valid_fraction, valid_fraction),
+            (self.tile_pulse, tile_pulse),
+            (self.tile_range, tile_range),
+        ):
+            dset.resize(new_n, axis=0)
+            dset[self.n:new_n] = arr
+
+        if self.cpi is not None and cpi is not None:
+            self.cpi.resize(new_n, axis=0)
+            self.cpi[self.n:new_n] = cpi
+
+        self.n = new_n
 
 
-def write_root_attrs(f, args, freq, pol, set_name, p_start, p_end, r_start, r_end,
-                     cpi_len, cpi_width, n_pulse_tiles, n_range_tiles, use_mask):
-    """File-level configuration attributes."""
-    f.attrs['set_name'] = set_name
-    f.attrs['is_clean_set'] = (set_name == 'clean')
-    f.attrs['l0b_file'] = os.path.basename(args.l0b_file)
+def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
+                     n_pulse_tiles, n_range_tiles, use_mask):
+    """File-level generation config: everything needed to reproduce this set."""
+    f.attrs['granule'] = os.path.basename(args.l0b_file)
+    f.attrs['granule_path'] = args.l0b_file
     f.attrs['frequency'] = freq
     f.attrs['polarization'] = pol
+
     f.attrs['pulse_start'] = p_start
     f.attrs['pulse_end'] = p_end
     f.attrs['range_start'] = r_start
     f.attrs['range_end'] = r_end
-    f.attrs['cpi_len'] = cpi_len
-    f.attrs['cpi_width'] = cpi_width
     f.attrs['n_pulse_tiles'] = n_pulse_tiles
     f.attrs['n_range_tiles'] = n_range_tiles
+    f.attrs['n_tiles'] = n_pulse_tiles * n_range_tiles
+
+    f.attrs['cpi_len'] = args.cpi_len
+    f.attrs['cpi_width'] = args.cpi_width
+
+    f.attrs['min_bands'] = args.min_bands
+    f.attrs['max_bands'] = args.max_bands
+    f.attrs['n_classes'] = args.max_bands - args.min_bands + 1
     f.attrs['jsr_db'] = args.jsr_db
-    f.attrs['min_bands'] = 0 if set_name == 'clean' else args.min_bands
-    f.attrs['max_bands'] = 0 if set_name == 'clean' else args.max_bands
+    f.attrs['jsr_reference'] = 'tile baseline power, mean(|x|^2) over valid samples'
+
     f.attrs['seed'] = args.seed
     f.attrs['plot_seed'] = args.plot_seed
+    f.attrs['salt_inject'] = SALT_INJECT
+    f.attrs['salt_plot'] = SALT_PLOT
+    f.attrs['seed_scheme'] = (
+        'per-tile SeedSequence entropy = [seed, salt_inject, pulse_tile, range_tile]; '
+        'band count from a spawned child; each band coeff/Doppler from its own spawned child'
+    )
+
     f.attrs['gap_exclusion_used'] = bool(use_mask)
     f.attrs['off_diag_overlap_ratio'] = args.off_diag_overlap_ratio
     f.attrs['diag_valid_ratio'] = args.diag_valid_ratio
-    f.attrs['jsr_reference'] = 'tile baseline power over valid samples'
+
+    f.attrs['eigenvalue_scale'] = 'linear, descending'
+    f.attrs['cpi_stored'] = bool(args.save_cpi)
+    f.attrs['generated_utc'] = datetime.utcnow().isoformat()
 
 
-def generate_set(raw, freq, pol, args, set_name, plot_tiles, out_dir):
+# ---------------------------------------------------------------------------
+# SET GENERATION
+# ---------------------------------------------------------------------------
+
+def resolve_window(args, total_pulses, total_range):
+    """Resolve the pulse/range window and snap it down to whole CPI tiles."""
+    p_start = args.pulse_start
+    p_end = min(args.pulse_end, total_pulses)
+    r_start = args.range_start
+    r_end = min(args.range_end, total_range) if args.range_end is not None else total_range
+
+    n_pulse_tiles = (p_end - p_start) // args.cpi_len
+    n_range_tiles = (r_end - r_start) // args.cpi_width
+    p_end = p_start + n_pulse_tiles * args.cpi_len
+    r_end = r_start + n_range_tiles * args.cpi_width
+
+    if n_pulse_tiles <= 0 or n_range_tiles <= 0:
+        raise ValueError(
+            f"Window is smaller than one CPI tile ({args.cpi_len} x {args.cpi_width})"
+        )
+
+    return p_start, p_end, r_start, r_end, n_pulse_tiles, n_range_tiles
+
+
+def generate_dataset(raw, freq, pol, args, out_dir):
     """
-    Build one test set (clean or contaminated) for one polarization.
+    Build the labeled training set for one polarization.
 
-    The region is streamed in pulse chunks so the full window never has to sit
-    in memory at once. Tiles are written to HDF5 as they are produced.
+    Streams the region in pulse chunks, injects RFI per tile, computes the
+    gap-exclusion SCM and its eigenvalues, and appends the per-tile records to
+    HDF5 as it goes.
 
     Returns
     -------
-    plot_records : list[dict]
-        Per-selected-tile records (cpi, scm, eigenvalues, meta) for plotting.
+    plot_records : list[dict]   selected tiles retained for plotting
     knee_counts : dict[int, int]
-        Label histogram for this set.
+    out_path : str
     """
     cpi_len = args.cpi_len
     cpi_width = args.cpi_width
+    max_bands = args.max_bands
 
     dataset = raw.getRawDataset(freq, pol)
     total_pulses, total_range = dataset.shape
 
-    p_start = args.pulse_start
-    p_end = min(args.pulse_end, total_pulses)
-    r_start = args.range_start if args.range_start is not None else 0
-    r_end = args.range_end if args.range_end is not None else total_range
+    p_start, p_end, r_start, r_end, n_pulse_tiles, n_range_tiles = resolve_window(
+        args, total_pulses, total_range
+    )
+    n_tiles = n_pulse_tiles * n_range_tiles
 
-    # Truncate the window to whole CPI tiles
-    n_pulse_tiles = (p_end - p_start) // cpi_len
-    n_range_tiles = (r_end - r_start) // cpi_width
-    p_end = p_start + n_pulse_tiles * cpi_len
-    r_end = r_start + n_range_tiles * cpi_width
+    plot_tiles = select_plot_tiles(
+        args.plot_seed, n_pulse_tiles, n_range_tiles, args.n_plot_blocks
+    )
+    plot_lookup = set(plot_tiles)
 
-    if n_pulse_tiles == 0 or n_range_tiles == 0:
-        raise ValueError(
-            f"Requested window is smaller than one CPI tile "
-            f"({cpi_len} x {cpi_width})"
-        )
-
-    out_path = os.path.join(out_dir, f"testset_{set_name}_{freq}_{pol}.h5")
-    print(f"\n[{set_name}] {freq}-{pol}")
+    out_path = os.path.join(out_dir, f"rfi_data_{freq}_{pol}.h5")
+    print(f"\n[{freq}-{pol}]")
     print(f"  pulses [{p_start}:{p_end}]  range [{r_start}:{r_end}]")
-    print(f"  tile grid: {n_pulse_tiles} pulse tiles x {n_range_tiles} range tiles "
-          f"= {n_pulse_tiles * n_range_tiles} tiles")
+    print(f"  tile grid: {n_pulse_tiles} x {n_range_tiles} = {n_tiles} tiles")
+    print(f"  storing CPI tiles: {args.save_cpi}")
     print(f"  -> {out_path}")
 
     use_mask = args.compute_subswath_mask
-    plot_lookup = {(pt, rt) for (pt, rt) in plot_tiles}
     plot_records = []
     knee_counts = {}
 
-    # Chunk size in pulses, snapped to a whole number of CPI tiles
     chunk_tiles = max(1, args.pulse_chunk // cpi_len)
-    chunk_pulses = chunk_tiles * cpi_len
 
     with h5py.File(out_path, 'w') as f:
-        write_root_attrs(f, args, freq, pol, set_name, p_start, p_end, r_start, r_end,
-                         cpi_len, cpi_width, n_pulse_tiles, n_range_tiles, use_mask)
+        write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
+                         n_pulse_tiles, n_range_tiles, use_mask)
+        writer = TileWriter(f, cpi_len, cpi_width, max_bands, args.save_cpi)
 
         for chunk_start_tile in range(0, n_pulse_tiles, chunk_tiles):
             n_tiles_here = min(chunk_tiles, n_pulse_tiles - chunk_start_tile)
@@ -545,6 +644,21 @@ def generate_set(raw, freq, pol, args, set_name, plot_tiles, out_dir):
             else:
                 mask_chunk = None
 
+            n_batch = n_tiles_here * n_range_tiles
+            b_labels = np.zeros(n_batch, dtype=np.int8)
+            b_jsr = np.full((n_batch, max_bands), np.nan, dtype=np.float32)
+            b_rows = np.full((n_batch, max_bands), -1, dtype=np.int8)
+            b_eigs = np.zeros((n_batch, cpi_len), dtype=np.float32)
+            b_sig = np.zeros(n_batch, dtype=np.float32)
+            b_vfrac = np.zeros(n_batch, dtype=np.float32)
+            b_pulse = np.zeros(n_batch, dtype=np.int32)
+            b_range = np.zeros(n_batch, dtype=np.int32)
+            b_cpi = (
+                np.zeros((n_batch, cpi_len, cpi_width), dtype=np.complex64)
+                if args.save_cpi else None
+            )
+
+            k = 0
             for local_pt in range(n_tiles_here):
                 pt = chunk_start_tile + local_pt
                 lp0 = local_pt * cpi_len
@@ -563,60 +677,56 @@ def generate_set(raw, freq, pol, args, set_name, plot_tiles, out_dir):
                     )
 
                     tile_ss = make_tile_seed_seq(args.seed, pt, rt)
+                    n_bands = draw_n_bands(tile_ss, args.min_bands, args.max_bands)
+                    tile, meta = inject_rfi_bands(
+                        cpi, cpi_mask, n_bands, args.jsr_db, tile_ss
+                    )
 
-                    if set_name == 'clean':
-                        # No injection; the label is 0 by definition of the set.
-                        sig_db = 10.0 * np.log10(tile_signal_power(cpi, cpi_mask))
-                        vfrac = (
-                            float(cpi_mask.sum()) / cpi_mask.size
-                            if cpi_mask is not None else 1.0
-                        )
-                        tile = cpi
-                        meta = TileMeta(knee=0, bands=[],
-                                        signal_power_db=sig_db,
-                                        valid_fraction=vfrac)
-                    else:
-                        n_bands = draw_n_bands(tile_ss, args.min_bands, args.max_bands)
-                        tile, meta = inject_rfi_bands(
-                            cpi, cpi_mask, n_bands, args.jsr_db, tile_ss
-                        )
-
-                    scm, eigvals, diag_power = compute_scm_and_eigs(
+                    scm, eigvals = compute_scm_and_eigs(
                         tile, cpi_mask,
                         args.off_diag_overlap_ratio,
                         args.diag_valid_ratio,
                     )
 
+                    b_labels[k] = meta.knee
+                    for bi, band in enumerate(meta.bands):
+                        b_jsr[k, bi] = band.jsr_db      # stays NaN for a clean tile
+                        b_rows[k, bi] = band.local_row
+                    b_eigs[k] = eigvals                 # linear scale, descending
+                    b_sig[k] = meta.signal_power_db
+                    b_vfrac[k] = meta.valid_fraction
+                    b_pulse[k] = abs_p0
+                    b_range[k] = abs_r0
+                    if b_cpi is not None:
+                        b_cpi[k] = tile
+
                     knee_counts[meta.knee] = knee_counts.get(meta.knee, 0) + 1
-
-                    base = f"cpi_{abs_p0}_{abs_r0}"
-                    if args.save_cpi:
-                        dset = f.create_dataset(base, data=tile, compression='gzip',
-                                                compression_opts=4)
-                    else:
-                        dset = f.create_group(base)
-                    dset.attrs['rfi_bands'] = tile_meta_json(meta)
-
-                    f.create_dataset(f"{base}_eigenvalues", data=eigvals)
-                    f.create_dataset(f"{base}_diagonal", data=diag_power)
-                    if args.save_scm:
-                        f.create_dataset(f"{base}_scm", data=scm)
 
                     if (pt, rt) in plot_lookup:
                         plot_records.append({
                             'pt': pt, 'rt': rt,
                             'abs_p0': abs_p0, 'abs_r0': abs_r0,
-                            'cpi': tile.copy(),
                             'scm': scm.copy(),
                             'eigvals': eigvals.copy(),
                             'meta': meta,
                         })
 
-            print(f"    pulse tiles {chunk_start_tile}..{chunk_start_tile + n_tiles_here - 1} done")
+                    k += 1
+
+            writer.append(b_labels, b_jsr, b_rows, b_eigs, b_sig, b_vfrac,
+                          b_pulse, b_range, cpi=b_cpi)
+
+            done = chunk_start_tile + n_tiles_here
+            print(f"    pulse tiles {done}/{n_pulse_tiles}  ({writer.n} records written)")
+
+        # Label histogram lives in the file so downstream code can weight classes
+        hist = {str(k): int(v) for k, v in sorted(knee_counts.items())}
+        f.attrs['label_histogram'] = json.dumps(hist)
+        f.attrs['n_records'] = writer.n
 
     plot_records.sort(key=lambda rec: (rec['pt'], rec['rt']))
 
-    print(f"  label histogram: "
+    print("  label histogram: "
           + ", ".join(f"knee={k}: {knee_counts[k]}" for k in sorted(knee_counts)))
 
     return plot_records, knee_counts, out_path
@@ -628,10 +738,9 @@ def generate_set(raw, freq, pol, args, set_name, plot_tiles, out_dir):
 
 def select_plot_tiles(plot_seed, n_pulse_tiles, n_range_tiles, n_blocks):
     """
-    Pick n_blocks distinct (pulse_tile, range_tile) positions using a stream
-    that is fully independent of the injection streams. The SAME positions are
-    used for the clean and contaminated sets, so the plots are directly
-    comparable tile-for-tile.
+    Pick n_blocks distinct (pulse_tile, range_tile) positions from a stream that
+    is fully independent of the injection streams, so choosing plot blocks
+    cannot perturb any tile's contamination.
     """
     ss = np.random.SeedSequence([int(plot_seed), SALT_PLOT])
     rng = np.random.default_rng(ss)
@@ -640,24 +749,23 @@ def select_plot_tiles(plot_seed, n_pulse_tiles, n_range_tiles, n_blocks):
     n_pick = min(n_blocks, n_available)
     flat = rng.choice(n_available, size=n_pick, replace=False)
 
-    tiles = [(int(idx // n_range_tiles), int(idx % n_range_tiles)) for idx in flat]
-    return sorted(tiles)
+    return sorted((int(i // n_range_tiles), int(i % n_range_tiles)) for i in flat)
 
 
 # ---------------------------------------------------------------------------
 # PLOTS
 # ---------------------------------------------------------------------------
 
-def plot_eigenvalue_profiles(records, set_name, freq, pol, out_dir, max_bands):
+def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
     """
-    Two eigenvalue figures for the randomly selected blocks:
+    Two eigenvalue figures for the randomly selected blocks (fixed plot seed):
 
-      Figure 1 -- all selected blocks overlaid on one axes, each line colored
-                  by its label (knee). The knee position is marked so the
-                  drop-off after the injected bands is visible.
-      Figure 2 -- 2 x N grid of the individual profiles, one panel per block.
+      Figure 1 -- all selected blocks overlaid, each line colored by its label
+                  (knee), with the knee index marked so the drop-off after the
+                  injected bands is visible.
+      Figure 2 -- grid of the individual profiles, one panel per block.
 
-    Y axis is absolute dB: 10 * log10(eigenvalue).
+    Eigenvalues are stored linear; they are plotted as 10 * log10(.).
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -693,17 +801,17 @@ def plot_eigenvalue_profiles(records, set_name, freq, pol, out_dir, max_bands):
     cbar.set_label('Label (knee = number of injected RFI bands)', fontsize=10)
 
     ax1.set_xlabel('Eigenvalue index (1-based, descending)', fontsize=11)
-    ax1.set_ylabel('Eigenvalue (dB, absolute)', fontsize=11)
+    ax1.set_ylabel('Eigenvalue (dB)', fontsize=11)
     ax1.set_ylim(ylim)
     ax1.grid(True, linestyle='--', alpha=0.4)
     ax1.set_title(
-        f'Eigenvalue profiles -- {set_name.upper()} set -- {freq}-{pol}\n'
+        f'Eigenvalue profiles -- {freq}-{pol}\n'
         f'{len(records)} randomly selected CPI blocks (fixed plot seed), '
         f'gap-exclusion SCM',
         fontsize=11,
     )
     fig1.tight_layout()
-    path1 = os.path.join(out_dir, f'{set_name}_{freq}_{pol}_ev_overlay.png')
+    path1 = os.path.join(out_dir, f'{freq}_{pol}_ev_overlay.png')
     fig1.savefig(path1, dpi=150)
     plt.close(fig1)
 
@@ -736,23 +844,20 @@ def plot_eigenvalue_profiles(records, set_name, freq, pol, out_dir, max_bands):
     for ax in axes.flat[n:]:
         ax.axis('off')
 
-    fig2.suptitle(
-        f'Eigenvalue profiles per selected block -- {set_name.upper()} -- {freq}-{pol}',
-        fontsize=12,
-    )
+    fig2.suptitle(f'Eigenvalue profiles per selected block -- {freq}-{pol}', fontsize=12)
     fig2.tight_layout(rect=(0, 0, 1, 0.95))
-    path2 = os.path.join(out_dir, f'{set_name}_{freq}_{pol}_ev_blocks.png')
+    path2 = os.path.join(out_dir, f'{freq}_{pol}_ev_blocks.png')
     fig2.savefig(path2, dpi=150)
     plt.close(fig2)
 
     print(f"  plots -> {os.path.basename(path1)}, {os.path.basename(path2)}")
 
 
-def plot_scm_matrices(records, set_name, freq, pol, out_dir):
+def plot_scm_matrices(records, freq, pol, out_dir):
     """
-    Grid of SCM magnitude heatmaps (20 * log10 |R_ij|, dB) for the same
-    randomly selected blocks. Injected bands show up as bright rows/columns
-    and as raised off-diagonal structure.
+    Grid of SCM magnitude heatmaps (20 * log10 |R_ij|, dB) for the same randomly
+    selected blocks. Injected bands show up as bright rows/columns and as raised
+    off-diagonal structure.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -780,10 +885,7 @@ def plot_scm_matrices(records, set_name, freq, pol, out_dir):
         label = 'CLEAN' if meta.knee == 0 else f'RFI={meta.knee}'
         rows = sorted({b.local_row for b in meta.bands})
         rows_str = '' if not rows else f'\nrows={rows}'
-        ax.set_title(
-            f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{rows_str}',
-            fontsize=7,
-        )
+        ax.set_title(f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{rows_str}', fontsize=7)
         ax.set_xlabel('Pulse j', fontsize=8)
         ax.set_ylabel('Pulse i', fontsize=8)
         ax.tick_params(labelsize=6)
@@ -795,11 +897,8 @@ def plot_scm_matrices(records, set_name, freq, pol, out_dir):
         cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.85)
         cbar.set_label('|SCM| (dB)', fontsize=10)
 
-    fig.suptitle(
-        f'Gap-exclusion SCM magnitude -- {set_name.upper()} -- {freq}-{pol}',
-        fontsize=12,
-    )
-    path = os.path.join(out_dir, f'{set_name}_{freq}_{pol}_scm.png')
+    fig.suptitle(f'Gap-exclusion SCM magnitude -- {freq}-{pol}', fontsize=12)
+    path = os.path.join(out_dir, f'{freq}_{pol}_scm.png')
     fig.savefig(path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
@@ -812,8 +911,8 @@ def plot_scm_matrices(records, set_name, freq, pol, out_dir):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description=('Generate a clean test set and an RFI-contaminated test set '
-                     'from real NISAR L0B CPI tiles.'),
+        description=('Generate a labeled RFI CPI training set from real NISAR L0B data. '
+                     'Clean tiles (knee = 0) are interspersed at random.'),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -824,8 +923,8 @@ def parse_args():
 
     parser.add_argument('--pulse-start', type=int, default=PULSE_START_DEFAULT)
     parser.add_argument('--pulse-end', type=int, default=PULSE_END_DEFAULT)
-    parser.add_argument('--range-start', type=int, default=None)
-    parser.add_argument('--range-end', type=int, default=None)
+    parser.add_argument('--range-start', type=int, default=RANGE_START_DEFAULT)
+    parser.add_argument('--range-end', type=int, default=RANGE_END_DEFAULT)
 
     parser.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT)
     parser.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
@@ -844,19 +943,16 @@ def parse_args():
     parser.add_argument('--diag-valid-ratio', type=float,
                         default=DIAG_VALID_RATIO_DEFAULT)
 
-    parser.add_argument('--output-dir', default='data/real_testsets')
-    parser.add_argument('--no-save-cpi', dest='save_cpi', action='store_false',
-                        help='Skip storing the complex CPI tiles (labels/eigs only).')
-    parser.add_argument('--save-scm', action='store_true',
-                        help='Also store the full complex SCM per tile.')
+    parser.add_argument('--output-dir', default='data/rfi_train')
+    parser.add_argument('--save-cpi', action='store_true',
+                        help='Also store the full complex CPI tiles (about 32 kB/tile).')
 
     parser.add_argument('--seed', type=int, default=1234,
-                        help='Master seed for RFI injection streams.')
+                        help='Master seed for all RFI injection streams.')
     parser.add_argument('--plot-seed', type=int, default=20240101,
                         help='Fixed, independent seed for selecting plotted blocks.')
     parser.add_argument('--n-plot-blocks', type=int, default=N_PLOT_BLOCKS_DEFAULT)
 
-    parser.set_defaults(save_cpi=True)
     return parser.parse_args()
 
 
@@ -867,21 +963,19 @@ def main():
         raise ValueError('Require 0 <= min_bands <= max_bands')
 
     os.makedirs(args.output_dir, exist_ok=True)
-    clean_dir = os.path.join(args.output_dir, 'clean')
-    cont_dir = os.path.join(args.output_dir, 'contaminated')
-    os.makedirs(clean_dir, exist_ok=True)
-    os.makedirs(cont_dir, exist_ok=True)
 
     print('=' * 70)
-    print('Real-background RFI / clean test set generation')
+    print('RFI CPI training set generation (real background, synthetic RFI)')
     print('=' * 70)
     print(f'  granule        : {args.l0b_file}')
     print(f'  pulse window   : [{args.pulse_start}, {args.pulse_end})')
     print(f'  range window   : [{args.range_start}, {args.range_end})')
     print(f'  CPI tile       : {args.cpi_len} x {args.cpi_width}')
-    print(f'  bands per tile : {args.min_bands}..{args.max_bands} (label = drawn count)')
+    print(f'  bands per tile : {args.min_bands}..{args.max_bands} '
+          f'(label = drawn count; 0 = clean, interspersed at random)')
     print(f'  JSR            : {args.jsr_db} dB above each tile baseline power')
     print(f'  gap exclusion  : {args.compute_subswath_mask}')
+    print(f'  save CPI       : {args.save_cpi}')
     print(f'  seeds          : injection={args.seed}, plot={args.plot_seed}')
 
     raw = Raw(hdf5file=args.l0b_file)
@@ -890,37 +984,10 @@ def main():
     pols = [args.pol] if args.pol else list(raw.polarizations[args.freq])
 
     for pol in pols:
-        dataset = raw.getRawDataset(args.freq, pol)
-        total_pulses, total_range = dataset.shape
-
-        p_end = min(args.pulse_end, total_pulses)
-        r_start = args.range_start if args.range_start is not None else 0
-        r_end = args.range_end if args.range_end is not None else total_range
-
-        n_pulse_tiles = (p_end - args.pulse_start) // args.cpi_len
-        n_range_tiles = (r_end - r_start) // args.cpi_width
-
-        plot_tiles = select_plot_tiles(
-            args.plot_seed, n_pulse_tiles, n_range_tiles, args.n_plot_blocks
-        )
-
-        # Set 1: current data as-is, all tiles labeled clean (knee = 0)
-        clean_records, _, clean_path = generate_set(
-            raw, args.freq, pol, args, 'clean', plot_tiles, clean_dir
-        )
-        plot_eigenvalue_profiles(clean_records, 'clean', args.freq, pol, clean_dir,
-                                 args.max_bands)
-        plot_scm_matrices(clean_records, 'clean', args.freq, pol, clean_dir)
-
-        # Set 2: same tiles, RFI overlaid, label = number of bands drawn
-        cont_records, _, cont_path = generate_set(
-            raw, args.freq, pol, args, 'contaminated', plot_tiles, cont_dir
-        )
-        plot_eigenvalue_profiles(cont_records, 'contaminated', args.freq, pol, cont_dir,
-                                 args.max_bands)
-        plot_scm_matrices(cont_records, 'contaminated', args.freq, pol, cont_dir)
-
-        print(f'\n  {pol}: wrote\n    {clean_path}\n    {cont_path}')
+        records, _, out_path = generate_dataset(raw, args.freq, pol, args, args.output_dir)
+        plot_eigenvalue_profiles(records, args.freq, pol, args.output_dir, args.max_bands)
+        plot_scm_matrices(records, args.freq, pol, args.output_dir)
+        print(f"\n  {pol}: wrote {out_path}")
 
     print('\nDone.')
 
