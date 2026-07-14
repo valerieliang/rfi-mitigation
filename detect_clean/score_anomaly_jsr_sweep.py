@@ -73,10 +73,13 @@ Usage
 Outputs (in --output-dir)
 --------------------------
     anomaly_score_map_<pol>.png -- full-region spatial anomaly score map
-                                   for the REAL data (no injection), same
-                                   convention as score_anomaly.py: one cell
-                                   per CPI tile, pulse 0 at top, dark=clean,
-                                   bright=anomalous
+                                   AFTER synthetic RFI has been injected
+                                   into every tile at a single severity
+                                   (--map-jsr-db / --map-n-bands, default:
+                                   the weakest values in the sweep). Same
+                                   visual convention as score_anomaly.py's
+                                   map: one cell per CPI tile, pulse 0 at
+                                   top, dark=clean-like, bright=anomalous.
     jsr_sweep_scores.npz       -- raw per-tile scores: baseline and every
                                    (pol, jsr_db, n_bands) combination
     jsr_sweep_curve_<pol>.png  -- score vs JSR, one line per n_bands, with
@@ -207,6 +210,44 @@ def inject_rfi_bands(cpi_data: np.ndarray, cpi_mask: np.ndarray, jsr_db: float, 
     return contaminated, affected_rows
 
 
+def inject_rfi_into_full_grid(raw_data, mask_valid, cpi_len, cpi_width, jsr_db, n_bands, rng):
+    """
+    Inject synthetic RFI into every non-overlapping CPI tile of a full
+    (pulses, range) array, at a single (jsr_db, n_bands) severity, so the
+    resulting array can be scored and mapped the same way as real data.
+
+    Parameters
+    ----------
+    raw_data : (n_pulses, n_range) complex array
+    mask_valid : (n_pulses, n_range) bool array
+    cpi_len, cpi_width : int
+    jsr_db : float
+    n_bands : int
+    rng : np.random.Generator
+
+    Returns
+    -------
+    contaminated : (n_pulses, n_range) complex64 array
+        Copy of raw_data with RFI injected into every tile.
+    """
+    n_pulses, n_range = raw_data.shape
+    n_pulse_tiles = n_pulses // cpi_len
+    n_range_tiles = n_range // cpi_width
+
+    contaminated = raw_data.copy()
+
+    for pt in range(n_pulse_tiles):
+        p0, p1 = pt * cpi_len, pt * cpi_len + cpi_len
+        for rt in range(n_range_tiles):
+            r0, r1 = rt * cpi_width, rt * cpi_width + cpi_width
+            cpi_data = contaminated[p0:p1, r0:r1]
+            cpi_mask = mask_valid[p0:p1, r0:r1]
+            contaminated_cpi, _ = inject_rfi_bands(cpi_data, cpi_mask, jsr_db, n_bands, rng)
+            contaminated[p0:p1, r0:r1] = contaminated_cpi
+
+    return contaminated
+
+
 # ---------------------------------------------------------------------------
 # BACKGROUND TILE SAMPLING
 # ---------------------------------------------------------------------------
@@ -287,11 +328,11 @@ def score_tiles(tiles, model, norm_stats, eigen_loss_weight, global_loss_weight)
 # PLOTS
 # ---------------------------------------------------------------------------
 
-def save_score_map_png(total_score, n_pulse_tiles, n_range_tiles, pol, out_dir):
+def save_score_map_png(total_score, n_pulse_tiles, n_range_tiles, pol, jsr_db, n_bands, out_dir):
     """
-    Full-grid anomaly score map for the real (no-injection) data over the
-    requested region -- identical convention to score_anomaly.py's map, so
-    it can be read the same way and compared directly:
+    Full-grid anomaly score map AFTER synthetic RFI has been injected into
+    every tile at the given (jsr_db, n_bands) severity -- same visual
+    convention as score_anomaly.py's map so it can be read the same way:
     each cell = one 16x250 CPI tile (not a pixel), pulse index 0 at top,
     dark (inferno colormap) = low score = clean-like, bright = high score
     = anomalous.
@@ -302,7 +343,10 @@ def save_score_map_png(total_score, n_pulse_tiles, n_range_tiles, pol, out_dir):
     im = ax.imshow(score_grid, aspect='auto', origin='upper', cmap='inferno')
     ax.set_xlabel('Range Tile Index (one cell = one 250-sample-wide CPI tile)')
     ax.set_ylabel('Pulse Tile Index (one cell = one 16-pulse CPI; pulse 0 at top)')
-    ax.set_title(f'Anomaly Score Map - {pol} (real data, no injection; dark=clean-like, bright=anomalous)')
+    ax.set_title(
+        f'Anomaly Score Map - {pol} (AFTER injecting JSR={jsr_db} dB, n_bands={n_bands} '
+        f'into every tile; dark=clean-like, bright=anomalous)'
+    )
     fig.colorbar(im, ax=ax, label='Anomaly score (low=clean-like, high=anomalous)')
 
     fig.tight_layout()
@@ -442,6 +486,13 @@ def parse_args():
     parser.add_argument('--n-background-tiles', type=int, default=N_BACKGROUND_TILES_DEFAULT,
                         help=f'Number of real background tiles to sample for the sweep (default: {N_BACKGROUND_TILES_DEFAULT})')
 
+    parser.add_argument('--map-jsr-db', type=float, default=None,
+                        help='JSR (dB) used to inject RFI into every tile for the full-grid score map '
+                             '(default: the weakest/minimum value in --jsr-db-list)')
+    parser.add_argument('--map-n-bands', type=int, default=None,
+                        help='Number of RFI bands used to inject into every tile for the full-grid score map '
+                             '(default: the weakest/minimum value in --n-bands-list)')
+
     parser.add_argument('--eigen-loss-weight', type=float, default=None)
     parser.add_argument('--global-loss-weight', type=float, default=None)
     parser.add_argument('--threshold-p95', type=float, default=None,
@@ -540,13 +591,22 @@ def main():
         mask_valid = get_subswath_mask(raw, args.freq, pol, pulse_indices, range_indices)
 
         # ------------------------------------------------------------------
-        # Step 3a: Full-grid scoring of the REAL data (no injection) over
-        # the whole requested region, to produce a spatial map like
-        # score_anomaly.py's -- gives spatial context alongside the JSR
-        # calibration curves below.
+        # Step 3a: Full-grid scoring AFTER injecting synthetic RFI into
+        # every tile at the map's chosen severity, to produce a spatial map
+        # showing what widespread contamination at this severity would look
+        # like -- gives spatial context alongside the JSR calibration
+        # curves below.
         # ------------------------------------------------------------------
+        map_jsr_db = args.map_jsr_db if args.map_jsr_db is not None else min(args.jsr_db_list)
+        map_n_bands = args.map_n_bands if args.map_n_bands is not None else min(args.n_bands_list)
+        print(f"  Injecting RFI into every tile for the map (JSR={map_jsr_db} dB, n_bands={map_n_bands}) ...")
+
+        contaminated_raw_data = inject_rfi_into_full_grid(
+            raw_data, mask_valid, cpi_len, cpi_width, map_jsr_db, map_n_bands, rng,
+        )
+
         full_eigen, full_global, _, _, _ = tile_and_extract_features(
-            raw_data,
+            contaminated_raw_data,
             mask_valid=mask_valid,
             cpi_len=cpi_len,
             cpi_width=cpi_width,
@@ -564,7 +624,7 @@ def main():
                 model, full_eigen_norm, full_global_norm,
                 eigen_weight=eigen_loss_weight, global_weight=global_loss_weight,
             )
-            save_score_map_png(full_grid_scores, n_pulse_tiles, n_range_tiles, pol, args.output_dir)
+            save_score_map_png(full_grid_scores, n_pulse_tiles, n_range_tiles, pol, map_jsr_db, map_n_bands, args.output_dir)
         else:
             print(f"  NOTE: full-grid tile count ({n_full_tiles}) != expected grid "
                   f"({n_pulse_tiles * n_range_tiles}); skipping score map for {pol}")
