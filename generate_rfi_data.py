@@ -55,14 +55,22 @@ Seeding / uncorrelation
 Every random stream comes from a SeedSequence whose entropy tuple uniquely
 identifies its role, so no two streams can share state:
 
-    band count for tile (pt, rt)  : child of [seed, SALT_INJECT, pt, rt]
-    band rows for tile (pt, rt)   : [seed, SALT_INJECT, pt, rt] itself
+    band count for tile (pt, rt)  : child of [seed, SALT_INJECT, chan, pt, rt]
+    band rows for tile (pt, rt)   : [seed, SALT_INJECT, chan, pt, rt] itself
     per-band Doppler + coeffs     : spawned children of the same
-    plot tile selection           : [plot_seed, SALT_PLOT]
+    plot tile selection           : [plot_seed, SALT_PLOT, chan]
 
-A tile's contamination depends only on (seed, pt, rt), so it is reproducible
-regardless of what any other tile drew. The plot stream is disjoint, so
-selecting blocks to plot cannot perturb the injection draws.
+'chan' is a channel id derived from (frequency, polarization) via CHANNEL_IDS.
+It matters because the script runs over every frequency and polarization in the
+granule: without it, the same (pt, rt) grid position would receive an identical
+band count, identical band rows and identical Doppler in A-HH, A-HV, B-HH, ...
+Those tiles would then be near-duplicate training samples with correlated
+labels. With the channel id in the entropy tuple, every channel gets its own
+independent injection realization over the same real background.
+
+A tile's contamination depends only on (seed, chan, pt, rt), so it is
+reproducible regardless of what any other tile or channel drew. The plot stream
+is disjoint, so selecting blocks to plot cannot perturb the injection draws.
 
 Storage
 -------
@@ -91,15 +99,18 @@ name, frequency, polarization, and the final label histogram.
 
 Usage
 -----
-    python generate_rfi_data.py granule.h5 --freq A --pol HH \
+    # Every frequency and polarization in the granule (the default)
+    python generate_rfi_data.py granule.h5 \
         --pulse-start 813924 --pulse-end 888222 \
         --range-start 2000 --range-end 25000 \
         --compute-subswath-mask \
         --output-dir data/rfi_train \
-        --seed 1234 --plot-seed 20240101
+        --seed 0 --plot-seed 99
 
-    # Same, but also keep the complex CPI tiles
-    python generate_rfi_data.py granule.h5 --save-cpi
+    # Restrict to one channel, and also keep the complex CPI tiles
+    python generate_rfi_data.py granule.h5 --freq A --pol HH --save-cpi
+
+One HDF5 file per channel is written: rfi_data_<freq>_<pol>.h5
 """
 
 import os
@@ -148,6 +159,15 @@ DIAG_VALID_RATIO_DEFAULT = 0.20
 # entropy namespaces so no two random streams can ever alias.
 SALT_INJECT = 0xA1
 SALT_PLOT = 0xB2
+
+# Channel ids also enter the seed entropy tuples, so the same (pt, rt) tile gets
+# an independent injection realization in each frequency/polarization channel
+# instead of the identical one repeated across channels.
+FREQ_IDS = {'A': 0, 'B': 1}
+POL_IDS = {'HH': 0, 'HV': 1, 'VH': 2, 'VV': 3}
+
+SEED_DEFAULT = 0
+PLOT_SEED_DEFAULT = 99
 
 # Pulses read per chunk; snapped down to a whole number of CPI tiles.
 PULSE_CHUNK_DEFAULT = 1600
@@ -345,12 +365,28 @@ def tile_signal_power(cpi, cpi_mask):
     return max(float(np.mean(np.abs(vals) ** 2)), EPS)
 
 
-def make_tile_seed_seq(seed: int, pulse_tile: int, range_tile: int) -> np.random.SeedSequence:
+def channel_id(freq: str, pol: str) -> int:
     """
-    Injection SeedSequence for one tile. Depends only on (seed, pt, rt), so a
-    tile's contamination is reproducible independently of every other tile.
+    Stable integer id for a (frequency, polarization) channel, used to keep the
+    random streams of different channels independent.
     """
-    return np.random.SeedSequence([int(seed), SALT_INJECT, int(pulse_tile), int(range_tile)])
+    if freq not in FREQ_IDS:
+        raise ValueError(f"Unknown frequency '{freq}'")
+    if pol not in POL_IDS:
+        raise ValueError(f"Unknown polarization '{pol}'")
+    return FREQ_IDS[freq] * len(POL_IDS) + POL_IDS[pol]
+
+
+def make_tile_seed_seq(seed: int, chan: int, pulse_tile: int,
+                       range_tile: int) -> np.random.SeedSequence:
+    """
+    Injection SeedSequence for one tile of one channel. Depends only on
+    (seed, chan, pt, rt), so a tile's contamination is reproducible
+    independently of every other tile and every other channel.
+    """
+    return np.random.SeedSequence(
+        [int(seed), SALT_INJECT, int(chan), int(pulse_tile), int(range_tile)]
+    )
 
 
 def draw_n_bands(tile_seed_seq, min_bands, max_bands):
@@ -535,10 +571,12 @@ def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
 
     f.attrs['seed'] = args.seed
     f.attrs['plot_seed'] = args.plot_seed
+    f.attrs['channel_id'] = channel_id(freq, pol)
     f.attrs['salt_inject'] = SALT_INJECT
     f.attrs['salt_plot'] = SALT_PLOT
     f.attrs['seed_scheme'] = (
-        'per-tile SeedSequence entropy = [seed, salt_inject, pulse_tile, range_tile]; '
+        'per-tile SeedSequence entropy = '
+        '[seed, salt_inject, channel_id, pulse_tile, range_tile]; '
         'band count from a spawned child; each band coeff/Doppler from its own spawned child'
     )
 
@@ -601,8 +639,9 @@ def generate_dataset(raw, freq, pol, args, out_dir):
     )
     n_tiles = n_pulse_tiles * n_range_tiles
 
+    chan = channel_id(freq, pol)
     plot_tiles = select_plot_tiles(
-        args.plot_seed, n_pulse_tiles, n_range_tiles, args.n_plot_blocks
+        args.plot_seed, chan, n_pulse_tiles, n_range_tiles, args.n_plot_blocks
     )
     plot_lookup = set(plot_tiles)
 
@@ -676,7 +715,7 @@ def generate_dataset(raw, freq, pol, args, out_dir):
                         if mask_chunk is not None else None
                     )
 
-                    tile_ss = make_tile_seed_seq(args.seed, pt, rt)
+                    tile_ss = make_tile_seed_seq(args.seed, chan, pt, rt)
                     n_bands = draw_n_bands(tile_ss, args.min_bands, args.max_bands)
                     tile, meta = inject_rfi_bands(
                         cpi, cpi_mask, n_bands, args.jsr_db, tile_ss
@@ -736,13 +775,14 @@ def generate_dataset(raw, freq, pol, args, out_dir):
 # PLOT TILE SELECTION (fixed, independent seed)
 # ---------------------------------------------------------------------------
 
-def select_plot_tiles(plot_seed, n_pulse_tiles, n_range_tiles, n_blocks):
+def select_plot_tiles(plot_seed, chan, n_pulse_tiles, n_range_tiles, n_blocks):
     """
     Pick n_blocks distinct (pulse_tile, range_tile) positions from a stream that
     is fully independent of the injection streams, so choosing plot blocks
-    cannot perturb any tile's contamination.
+    cannot perturb any tile's contamination. The channel id keeps each
+    frequency/polarization looking at its own random selection of blocks.
     """
-    ss = np.random.SeedSequence([int(plot_seed), SALT_PLOT])
+    ss = np.random.SeedSequence([int(plot_seed), SALT_PLOT, int(chan)])
     rng = np.random.default_rng(ss)
 
     n_available = n_pulse_tiles * n_range_tiles
@@ -917,9 +957,10 @@ def parse_args():
     )
 
     parser.add_argument('l0b_file', help='Input NISAR L0B HDF5 granule')
-    parser.add_argument('--freq', choices=['A', 'B'], default='A')
+    parser.add_argument('--freq', choices=['A', 'B'], default=None,
+                        help='Frequency to process. Default: every frequency in the granule.')
     parser.add_argument('--pol', default=None,
-                        help='Polarization (HH/HV/VH/VV). Default: all available.')
+                        help='Polarization (HH/HV/VH/VV). Default: every pol in the granule.')
 
     parser.add_argument('--pulse-start', type=int, default=PULSE_START_DEFAULT)
     parser.add_argument('--pulse-end', type=int, default=PULSE_END_DEFAULT)
@@ -947,9 +988,9 @@ def parse_args():
     parser.add_argument('--save-cpi', action='store_true',
                         help='Also store the full complex CPI tiles (about 32 kB/tile).')
 
-    parser.add_argument('--seed', type=int, default=1234,
+    parser.add_argument('--seed', type=int, default=SEED_DEFAULT,
                         help='Master seed for all RFI injection streams.')
-    parser.add_argument('--plot-seed', type=int, default=20240101,
+    parser.add_argument('--plot-seed', type=int, default=PLOT_SEED_DEFAULT,
                         help='Fixed, independent seed for selecting plotted blocks.')
     parser.add_argument('--n-plot-blocks', type=int, default=N_PLOT_BLOCKS_DEFAULT)
 
@@ -981,15 +1022,39 @@ def main():
     raw = Raw(hdf5file=args.l0b_file)
     raw.parsePolarizations()
 
-    pols = [args.pol] if args.pol else list(raw.polarizations[args.freq])
+    # Default: every frequency in the granule, and within each, every pol.
+    freqs = [args.freq] if args.freq else list(raw.polarizations.keys())
 
-    for pol in pols:
-        records, _, out_path = generate_dataset(raw, args.freq, pol, args, args.output_dir)
-        plot_eigenvalue_profiles(records, args.freq, pol, args.output_dir, args.max_bands)
-        plot_scm_matrices(records, args.freq, pol, args.output_dir)
-        print(f"\n  {pol}: wrote {out_path}")
+    channels = []
+    for freq in freqs:
+        if freq not in raw.polarizations:
+            print(f"  WARNING: frequency {freq} not present in granule; skipping")
+            continue
+        avail = list(raw.polarizations[freq])
+        if args.pol:
+            if args.pol not in avail:
+                print(f"  WARNING: {args.pol} not present in frequency {freq}; skipping")
+                continue
+            pols = [args.pol]
+        else:
+            pols = avail
+        channels.extend((freq, pol) for pol in pols)
 
-    print('\nDone.')
+    if not channels:
+        raise ValueError('No matching frequency/polarization channels in this granule')
+
+    print(f'  channels       : ' + ', '.join(f'{f}-{p}' for f, p in channels))
+
+    written = []
+    for freq, pol in channels:
+        records, _, out_path = generate_dataset(raw, freq, pol, args, args.output_dir)
+        plot_eigenvalue_profiles(records, freq, pol, args.output_dir, args.max_bands)
+        plot_scm_matrices(records, freq, pol, args.output_dir)
+        written.append(out_path)
+
+    print('\nDone. Wrote:')
+    for path in written:
+        print(f'  {path}')
 
 
 if __name__ == '__main__':
