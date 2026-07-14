@@ -22,8 +22,11 @@ tile's own observed baseline power, so RFI strength is expressed as
 JSR = jammer-to-signal ratio, where "signal" is the mean power of the real CPI
 matrix over its valid (non-gap) samples.
 
-Per the requested configuration JSR is FIXED at JSR_DB = 3.0 dB: every injected
-band carries 3 dB more power than the tile's own baseline.
+Each band draws its own JSR independently and uniformly from
+[JSR_MIN_DB, JSR_MAX_DB] = [3, 30] dB, so the weakest interferer sits 3 dB above
+the tile's own baseline power and the strongest sits 30 dB above it. Bands
+within a tile therefore generally differ in strength, matching how
+generate_synthetic_data.py draws an independent per-band JNR from JNR_RANGE_DB.
 
 RFI injection model (adapted from generate_synthetic_data.py and
 score_anomaly_jsr_sweep.py)
@@ -31,7 +34,8 @@ score_anomaly_jsr_sweep.py)
 For each band injected into a tile:
   1. Estimate the tile's baseline power from its valid samples:
          signal_power = mean(|x|^2) over mask == True
-  2. Band power = signal_power * 10^(JSR_DB / 10).
+  2. Draw this band's JSR uniformly from [jsr_min_db, jsr_max_db], then
+     band power = signal_power * 10^(JSR_dB / 10).
   3. Pick a random local pulse row in [0, cpi_len). Rows may repeat across
      bands; two bands on the same row sum incoherently because they use
      independent range-coefficient vectors and independent Doppler phases.
@@ -56,9 +60,14 @@ Every random stream comes from a SeedSequence whose entropy tuple uniquely
 identifies its role, so no two streams can share state:
 
     band count for tile (pt, rt)  : child of [seed, SALT_INJECT, chan, pt, rt]
+    per-band JSR draws            : a separate child of the same
     band rows for tile (pt, rt)   : [seed, SALT_INJECT, chan, pt, rt] itself
     per-band Doppler + coeffs     : spawned children of the same
     plot tile selection           : [plot_seed, SALT_PLOT, chan]
+
+The JSR draws come from their own child stream (mirroring the JNR_SEED offset in
+generate_synthetic_data.py) so that changing the JSR range does not perturb band
+placement or the coefficient vectors.
 
 'chan' is a channel id derived from (frequency, polarization) via CHANNEL_IDS.
 It matters because the script runs over every frequency and polarization in the
@@ -77,8 +86,10 @@ Storage
 By default only compact per-tile records are stored (about 100 bytes/tile):
 
     labels          int8      (N,)              knee = number of RFI bands, 0..6
-    jsr_db          float32   (N, max_bands)    per-band JSR, NaN-padded;
-                                                all-NaN row for a clean tile
+    jsr_db          float32   (N, max_bands)    per-band JSR in dB (each drawn
+                                                from [jsr_min_db, jsr_max_db]),
+                                                NaN-padded; all-NaN row for a
+                                                clean tile
     band_rows       int8      (N, max_bands)    local pulse row per band, -1 pad
     eigenvalues     float32   (N, cpi_len)      descending, LINEAR scale
     signal_power_db float32   (N,)              tile baseline power, 10*log10
@@ -94,8 +105,8 @@ That array is roughly 32 kB/tile (about 13.7 GB for the full default window),
 so it is off by default.
 
 Root attributes carry the full generation config: seed, plot seed, pulse and
-range windows, CPI dimensions, JSR, band range, gap-exclusion ratios, granule
-name, frequency, polarization, and the final label histogram.
+range windows, CPI dimensions, JSR range, band range, gap-exclusion ratios,
+granule name, frequency, polarization, and the final label histogram.
 
 Usage
 -----
@@ -104,6 +115,7 @@ Usage
         --pulse-start 813924 --pulse-end 888222 \
         --range-start 2000 --range-end 25000 \
         --compute-subswath-mask \
+        --jsr-min-db 3 --jsr-max-db 30 \
         --output-dir data/rfi_train \
         --seed 0 --plot-seed 99
 
@@ -148,8 +160,10 @@ RANGE_END_DEFAULT = 25000
 MIN_BANDS_DEFAULT = 0
 MAX_BANDS_DEFAULT = 6
 
-# Fixed jammer-to-signal ratio: every band sits 3 dB above the tile baseline.
-JSR_DB_DEFAULT = 3.0
+# Per-band jammer-to-signal ratio range, both ends inclusive. Each band draws its
+# own JSR uniformly from this range, relative to the tile's own baseline power.
+JSR_MIN_DB_DEFAULT = 3.0
+JSR_MAX_DB_DEFAULT = 30.0
 
 # Gap-exclusion covariance thresholds (same defaults as read_nisar_isce3.py)
 OFF_DIAG_OVERLAP_RATIO_DEFAULT = 0.25
@@ -400,13 +414,15 @@ def draw_n_bands(tile_seed_seq, min_bands, max_bands):
     return int(rng_count.integers(min_bands, max_bands + 1))
 
 
-def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_db, tile_seed_seq):
+def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_min_db, jsr_max_db, tile_seed_seq):
     """
     Overlay n_bands synthetic Gaussian RFI bands onto a real CPI tile.
 
-    Every band sits jsr_db dB above the tile's own baseline power. Each band
-    gets its own spawned RNG child stream, so bands are mutually uncorrelated;
-    the structural draws (band rows) come from the tile's own stream.
+    Each band draws its own JSR uniformly from [jsr_min_db, jsr_max_db] dB,
+    relative to the tile's own baseline power, so bands within a tile generally
+    differ in strength. Each band also gets its own spawned RNG child stream, so
+    bands are mutually uncorrelated; the structural draws (band rows) come from
+    the tile's own stream, and the JSR draws from a separate child stream.
 
     n_bands == 0 returns the tile untouched with a knee = 0 label: that is the
     clean case, interspersed at random through the set.
@@ -431,15 +447,20 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_db, tile_seed_seq):
         return cpi.astype(np.complex64), meta
 
     rng_struct = np.random.default_rng(tile_seed_seq)
-    band_seeds = tile_seed_seq.spawn(n_bands)
 
-    band_power = signal_power * (10.0 ** (jsr_db / 10.0))
-    sigma = np.sqrt(band_power / 2.0)   # half the power in real, half in imag
+    # Dedicated JSR stream: keeps the strength draws decoupled from placement
+    # and from the per-band coefficient vectors.
+    rng_jsr = np.random.default_rng(tile_seed_seq.spawn(1)[0])
+    band_seeds = tile_seed_seq.spawn(n_bands)
 
     rfi = np.zeros((M, K), dtype=np.complex64)
     bands: List[BandMeta] = []
 
     for b in range(n_bands):
+        jsr_db = float(rng_jsr.uniform(jsr_min_db, jsr_max_db))
+        band_power = signal_power * (10.0 ** (jsr_db / 10.0))
+        sigma = np.sqrt(band_power / 2.0)   # half the power in real, half in imag
+
         local_row = int(rng_struct.integers(0, M))
         rng_band = np.random.default_rng(band_seeds[b])
 
@@ -450,7 +471,7 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_db, tile_seed_seq):
         phase = np.exp(1j * 2.0 * np.pi * doppler_freq * local_row)
 
         rfi[local_row, :] += (phase * range_coeff).astype(np.complex64)
-        bands.append(BandMeta(local_row=local_row, jsr_db=float(jsr_db)))
+        bands.append(BandMeta(local_row=local_row, jsr_db=jsr_db))
 
     tile = (cpi + rfi).astype(np.complex64)
     meta = TileMeta(knee=n_bands, bands=bands,
@@ -497,7 +518,8 @@ class TileWriter:
 
         self.labels.attrs['description'] = 'knee: number of injected RFI bands (0 = clean)'
         self.jsr_db.attrs['description'] = (
-            'per-band JSR in dB, NaN-padded to max_bands; all-NaN row means clean tile'
+            'per-band JSR in dB, each drawn uniformly from [jsr_min_db, jsr_max_db]; '
+            'NaN-padded to max_bands; all-NaN row means clean tile'
         )
         self.band_rows.attrs['description'] = 'local pulse row of each band, -1 padded'
         self.eigenvalues.attrs['description'] = (
@@ -566,7 +588,9 @@ def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
     f.attrs['min_bands'] = args.min_bands
     f.attrs['max_bands'] = args.max_bands
     f.attrs['n_classes'] = args.max_bands - args.min_bands + 1
-    f.attrs['jsr_db'] = args.jsr_db
+    f.attrs['jsr_min_db'] = args.jsr_min_db
+    f.attrs['jsr_max_db'] = args.jsr_max_db
+    f.attrs['jsr_draw'] = 'per band, uniform in [jsr_min_db, jsr_max_db]'
     f.attrs['jsr_reference'] = 'tile baseline power, mean(|x|^2) over valid samples'
 
     f.attrs['seed'] = args.seed
@@ -718,7 +742,8 @@ def generate_dataset(raw, freq, pol, args, out_dir):
                     tile_ss = make_tile_seed_seq(args.seed, chan, pt, rt)
                     n_bands = draw_n_bands(tile_ss, args.min_bands, args.max_bands)
                     tile, meta = inject_rfi_bands(
-                        cpi, cpi_mask, n_bands, args.jsr_db, tile_ss
+                        cpi, cpi_mask, n_bands,
+                        args.jsr_min_db, args.jsr_max_db, tile_ss
                     )
 
                     scm, eigvals = compute_scm_and_eigs(
@@ -870,8 +895,14 @@ def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
             ax.plot(knee, prof[knee - 1], 'rx', markersize=7, markeredgewidth=2)
             ax.axvline(x=knee, color='red', linestyle='--', alpha=0.35, linewidth=1)
         label = 'CLEAN' if knee == 0 else f'RFI={knee}'
+        # Bands now differ in strength, so show the range actually realized here
+        if meta.bands:
+            jsrs = [b.jsr_db for b in meta.bands]
+            jsr_str = f' | JSR {min(jsrs):.0f}-{max(jsrs):.0f} dB'
+        else:
+            jsr_str = ''
         ax.set_title(
-            f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]\n'
+            f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{jsr_str}\n'
             f'baseline={meta.signal_power_db:.1f} dB | valid={meta.valid_fraction*100:.0f}%',
             fontsize=7,
         )
@@ -925,7 +956,13 @@ def plot_scm_matrices(records, freq, pol, out_dir):
         label = 'CLEAN' if meta.knee == 0 else f'RFI={meta.knee}'
         rows = sorted({b.local_row for b in meta.bands})
         rows_str = '' if not rows else f'\nrows={rows}'
-        ax.set_title(f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{rows_str}', fontsize=7)
+        if meta.bands:
+            jsrs = [b.jsr_db for b in meta.bands]
+            jsr_str = f'\nJSR {min(jsrs):.0f}-{max(jsrs):.0f} dB'
+        else:
+            jsr_str = ''
+        ax.set_title(f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{rows_str}{jsr_str}',
+                     fontsize=7)
         ax.set_xlabel('Pulse j', fontsize=8)
         ax.set_ylabel('Pulse i', fontsize=8)
         ax.tick_params(labelsize=6)
@@ -974,8 +1011,10 @@ def parse_args():
 
     parser.add_argument('--min-bands', type=int, default=MIN_BANDS_DEFAULT)
     parser.add_argument('--max-bands', type=int, default=MAX_BANDS_DEFAULT)
-    parser.add_argument('--jsr-db', type=float, default=JSR_DB_DEFAULT,
-                        help='Fixed jammer-to-signal ratio per band, in dB.')
+    parser.add_argument('--jsr-min-db', type=float, default=JSR_MIN_DB_DEFAULT,
+                        help='Lower bound of the per-band jammer-to-signal ratio, in dB.')
+    parser.add_argument('--jsr-max-db', type=float, default=JSR_MAX_DB_DEFAULT,
+                        help='Upper bound of the per-band jammer-to-signal ratio, in dB.')
 
     parser.add_argument('--compute-subswath-mask', action='store_true',
                         help='Use ISCE3 subswath boundaries for gap-exclusion SCM.')
@@ -1002,6 +1041,8 @@ def main():
 
     if args.min_bands < 0 or args.max_bands < args.min_bands:
         raise ValueError('Require 0 <= min_bands <= max_bands')
+    if args.jsr_max_db < args.jsr_min_db:
+        raise ValueError('Require jsr_min_db <= jsr_max_db')
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -1014,7 +1055,8 @@ def main():
     print(f'  CPI tile       : {args.cpi_len} x {args.cpi_width}')
     print(f'  bands per tile : {args.min_bands}..{args.max_bands} '
           f'(label = drawn count; 0 = clean, interspersed at random)')
-    print(f'  JSR            : {args.jsr_db} dB above each tile baseline power')
+    print(f'  JSR            : [{args.jsr_min_db}, {args.jsr_max_db}] dB above each tile '
+          f'baseline power (drawn per band)')
     print(f'  gap exclusion  : {args.compute_subswath_mask}')
     print(f'  save CPI       : {args.save_cpi}')
     print(f'  seeds          : injection={args.seed}, plot={args.plot_seed}')
