@@ -12,6 +12,11 @@ no injection at all, so clean tiles are randomly interspersed through the set
 rather than living in a separate file. With a uniform draw over 7 values the
 classes come out balanced at roughly 1/7 each.
 
+The band rows are then drawn WITHOUT REPLACEMENT (see step 3 below), so the
+label is exactly the number of elevated eigenvalues the SCM actually contains.
+Class balance is preserved -- the count is still drawn uniformly first, and only
+the row placement changed.
+
 Why JSR (not JNR)
 -----------------
 generate_synthetic_data.py builds fully synthetic frames (synthetic noise +
@@ -36,9 +41,21 @@ For each band injected into a tile:
          signal_power = mean(|x|^2) over mask == True
   2. Draw this band's JSR uniformly from [jsr_min_db, jsr_max_db], then
      band power = signal_power * 10^(JSR_dB / 10).
-  3. Pick a random local pulse row in [0, cpi_len). Rows may repeat across
-     bands; two bands on the same row sum incoherently because they use
-     independent range-coefficient vectors and independent Doppler phases.
+  3. Pick the band's local pulse row WITHOUT REPLACEMENT from [0, cpi_len):
+     the n_bands rows for a tile are drawn as a distinct subset, i.e. one of
+     the C(cpi_len, n_bands) possible row combinations, chosen uniformly.
+
+     This matters for label validity. Each occupied pulse row contributes one
+     rank-1 term to the SCM and therefore one elevated eigenvalue. If rows were
+     drawn WITH replacement, two bands could land on the same row, sum into a
+     single row, and produce only ONE elevated eigenvalue while the tile was
+     still labeled with the full band count. The label would then be asking the
+     model to count something the covariance does not contain. Sampling without
+     replacement guarantees
+
+         knee (label) == number of distinct rows == number of RFI eigenvalues
+
+     exactly, for every tile. n_bands <= cpi_len is required and asserted.
   4. Draw an independent complex Gaussian range-coefficient vector scaled to
      the band power, modulate by a random Doppler phase, add onto the tile.
 
@@ -468,11 +485,20 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_min_db, jsr_max_db, tile_seed_s
     """
     Overlay n_bands synthetic Gaussian RFI bands onto a real CPI tile.
 
+    The n_bands pulse rows are drawn WITHOUT REPLACEMENT, as a uniformly chosen
+    distinct subset of [0, cpi_len) -- equivalently, one of the
+    C(cpi_len, n_bands) row combinations. Each occupied row contributes exactly
+    one rank-1 term to the SCM, so the label equals the number of elevated
+    eigenvalues by construction. (With replacement, two bands could collide on a
+    row and yield fewer elevated eigenvalues than the label claims: at
+    cpi_len=16 that happens for 50% of 5-band tiles and 66% of 6-band tiles,
+    which is unlearnable label noise.)
+
     Each band draws its own JSR uniformly from [jsr_min_db, jsr_max_db] dB,
     relative to the tile's own baseline power, so bands within a tile generally
     differ in strength. Each band also gets its own spawned RNG child stream, so
-    bands are mutually uncorrelated; the structural draws (band rows) come from
-    the tile's own stream, and the JSR draws from a separate child stream.
+    bands are mutually uncorrelated; the row subset comes from the tile's own
+    stream, and the JSR draws from a separate child stream.
 
     n_bands == 0 returns the tile untouched with a knee = 0 label: that is the
     clean case, interspersed at random through the set.
@@ -496,12 +522,23 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_min_db, jsr_max_db, tile_seed_s
                         valid_fraction=valid_fraction)
         return cpi.astype(np.complex64), meta
 
+    if n_bands > M:
+        raise ValueError(
+            f"n_bands ({n_bands}) exceeds cpi_len ({M}); rows are drawn without "
+            f"replacement, so at most {M} bands can be placed"
+        )
+
     rng_struct = np.random.default_rng(tile_seed_seq)
 
     # Dedicated JSR stream: keeps the strength draws decoupled from placement
     # and from the per-band coefficient vectors.
     rng_jsr = np.random.default_rng(tile_seed_seq.spawn(1)[0])
     band_seeds = tile_seed_seq.spawn(n_bands)
+
+    # Rows WITHOUT replacement: a uniformly chosen distinct subset of the M pulse
+    # rows, so every band occupies its own row and knee == number of elevated
+    # eigenvalues exactly. Sorted only so the stored row list is deterministic.
+    local_rows = np.sort(rng_struct.choice(M, size=n_bands, replace=False))
 
     rfi = np.zeros((M, K), dtype=np.complex64)
     bands: List[BandMeta] = []
@@ -511,7 +548,7 @@ def inject_rfi_bands(cpi, cpi_mask, n_bands, jsr_min_db, jsr_max_db, tile_seed_s
         band_power = signal_power * (10.0 ** (jsr_db / 10.0))
         sigma = np.sqrt(band_power / 2.0)   # half the power in real, half in imag
 
-        local_row = int(rng_struct.integers(0, M))
+        local_row = int(local_rows[b])
         rng_band = np.random.default_rng(band_seeds[b])
 
         doppler_freq = rng_band.uniform(-0.5, 0.5)
@@ -1104,6 +1141,11 @@ def main():
 
     if args.min_bands < 0 or args.max_bands < args.min_bands:
         raise ValueError('Require 0 <= min_bands <= max_bands')
+    if args.max_bands > args.cpi_len:
+        raise ValueError(
+            f'max_bands ({args.max_bands}) cannot exceed cpi_len ({args.cpi_len}): '
+            f'band rows are drawn without replacement'
+        )
     if args.jsr_max_db < args.jsr_min_db:
         raise ValueError('Require jsr_min_db <= jsr_max_db')
 
