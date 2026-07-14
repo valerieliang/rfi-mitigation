@@ -55,7 +55,7 @@ features it was trained on.
 Usage
 -----
     py-isce3 score_scene.py \\
-        <file_name>.h5 \\
+        /scratch/bohuang/rfi/la/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5 \\
         --model models/rfi_train/best_model.keras \\
         --pulse-start 46528 --pulse-end 124580 \\
         --range-start 2000 --range-end 25000 \\
@@ -265,6 +265,20 @@ def save_predictions_h5(rec, args, out_dir):
 # PLOTS
 # ---------------------------------------------------------------------------
 
+def _boxplot(ax, groups, labels, **kwargs):
+    """
+    Version-agnostic boxplot.
+
+    Matplotlib 3.9 renamed the 'labels' kwarg to 'tick_labels' and 3.11 removed
+    the old name outright, so passing either one directly breaks on some installs.
+    Try the new name, fall back to the old.
+    """
+    try:
+        return ax.boxplot(groups, tick_labels=labels, **kwargs)
+    except TypeError:
+        return ax.boxplot(groups, labels=labels, **kwargs)
+
+
 def plot_knee_map(rec, out_dir):
     """
     Predicted knee over the scene grid.
@@ -368,7 +382,7 @@ def plot_power_vs_knee(rec, out_dir):
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    bp = ax1.boxplot(groups, labels=labels, showfliers=False, patch_artist=True)
+    bp = _boxplot(ax1, groups, labels, showfliers=False, patch_artist=True)
     for patch in bp['boxes']:
         patch.set_facecolor('steelblue')
         patch.set_alpha(0.6)
@@ -435,7 +449,7 @@ def plot_confidence_by_knee(rec, out_dir):
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    bp1 = ax1.boxplot(conf_groups, labels=labels, showfliers=False, patch_artist=True)
+    bp1 = _boxplot(ax1, conf_groups, labels, showfliers=False, patch_artist=True)
     for patch in bp1['boxes']:
         patch.set_facecolor('steelblue')
         patch.set_alpha(0.6)
@@ -447,7 +461,7 @@ def plot_confidence_by_knee(rec, out_dir):
     for i, c in enumerate(counts):
         ax1.annotate(f'n={c}', (i + 1, 0.02), ha='center', fontsize=7)
 
-    bp2 = ax2.boxplot(ent_groups, labels=labels, showfliers=False, patch_artist=True)
+    bp2 = _boxplot(ax2, ent_groups, labels, showfliers=False, patch_artist=True)
     for patch in bp2['boxes']:
         patch.set_facecolor('indianred')
         patch.set_alpha(0.6)
