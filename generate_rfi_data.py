@@ -229,6 +229,11 @@ PULSE_CHUNK_DEFAULT = 1600
 
 N_PLOT_BLOCKS_DEFAULT = 12
 
+# Fixed y-axis span for the eigenvalue plots, in dB. Holding this constant makes
+# profiles directly comparable across blocks, channels and runs, rather than
+# each figure autoscaling to its own data.
+EV_YLIM_DB = (0.0, 60.0)
+
 EPS = 1e-12
 
 
@@ -888,8 +893,8 @@ def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
     profiles_db = [10.0 * np.log10(np.maximum(r['eigvals'], EPS)) for r in records]
     knees = [r['meta'].knee for r in records]
 
-    all_db = np.concatenate(profiles_db)
-    ylim = [np.percentile(all_db, 1) - 5.0, np.percentile(all_db, 99) + 5.0]
+    # Fixed axis rather than autoscaled, so every figure is on the same scale
+    ylim = list(EV_YLIM_DB)
 
     norm = mcolors.Normalize(vmin=0, vmax=max(max_bands, 1))
     cmap = cm.plasma
