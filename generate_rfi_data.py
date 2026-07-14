@@ -128,14 +128,55 @@ One HDF5 file per channel is written: rfi_data_<freq>_<pol>.h5
 import os
 import json
 import argparse
-from datetime import datetime
+import warnings
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List
 
 import numpy as np
 import h5py
 
-from nisar.products.readers.Raw import Raw
+
+def _silence_third_party_noise():
+    """
+    Quiet the warnings the readers emit on every run.
+
+    Three separate sources, none of them actionable here:
+      1. The nisar Identification reader warns that hasInputDataException is
+         absent from the product metadata; it then correctly assumes no
+         anomalies. Expected for these granules.
+      2. ISCE3 routes the same message through its 'journal' channels, which
+         bypass the warnings module entirely and must be deactivated directly.
+      3. Assorted DeprecationWarnings from the isce3/h5py/numpy stack.
+
+    Set RFI_SHOW_WARNINGS=1 in the environment to keep all of them.
+    """
+    if os.environ.get('RFI_SHOW_WARNINGS'):
+        return
+
+    warnings.filterwarnings('ignore', category=DeprecationWarning)
+    warnings.filterwarnings('ignore', category=FutureWarning)
+    warnings.filterwarnings(
+        'ignore',
+        message='.*hasInputDataException.*',
+        category=UserWarning,
+    )
+
+    # ISCE3 journal channels print outside the warnings machinery
+    try:
+        import journal
+        for channel in ('nisar.reader', 'isce3.io', 'isce3.core'):
+            journal.info(channel).deactivate()
+            journal.warning(channel).deactivate()
+    except Exception:
+        # journal is an ISCE3 dependency; if its API shifts, the messages are
+        # cosmetic and not worth failing the run over
+        pass
+
+
+_silence_third_party_noise()
+
+from nisar.products.readers.Raw import Raw  # noqa: E402  (import after silencing)
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +651,7 @@ def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
 
     f.attrs['eigenvalue_scale'] = 'linear, descending'
     f.attrs['cpi_stored'] = bool(args.save_cpi)
-    f.attrs['generated_utc'] = datetime.utcnow().isoformat()
+    f.attrs['generated_utc'] = datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
