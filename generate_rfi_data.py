@@ -229,10 +229,14 @@ PULSE_CHUNK_DEFAULT = 1600
 
 N_PLOT_BLOCKS_DEFAULT = 12
 
-# Fixed y-axis span for the eigenvalue plots, in dB. Holding this constant makes
-# profiles directly comparable across blocks, channels and runs, rather than
-# each figure autoscaling to its own data.
-EV_YLIM_DB = (0.0, 60.0)
+# Y-axis for the eigenvalue plots, in dB. The bottom is pinned at 0 dB; the top
+# is the largest eigenvalue seen across ALL selected blocks, plus a small margin
+# so the peak is not drawn flush against the axis. Both eigenvalue figures share
+# this range, so every block is on the same scale and a high-power block is never
+# clipped. Set EV_YLIM_TOP_MARGIN_DB to 0.0 for the bare maximum.
+EV_YLIM_BOTTOM_DB = 0.0
+EV_YLIM_TOP_MARGIN_DB = 2.0
+EV_YLIM_MIN_TOP_DB = 10.0   # floor on the top, so a flat low-power set is not squashed
 
 EPS = 1e-12
 
@@ -633,7 +637,10 @@ def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
 
     f.attrs['min_bands'] = args.min_bands
     f.attrs['max_bands'] = args.max_bands
-    f.attrs['n_classes'] = args.max_bands - args.min_bands + 1
+    # Labels are the drawn band count, so the label SPACE is always 0..max_bands
+    # even when min_bands > 0 (an RFI-only set simply never emits label 0). The
+    # classifier head must be sized to the label space, not to the drawn range.
+    f.attrs['n_classes'] = args.max_bands + 1
     f.attrs['jsr_min_db'] = args.jsr_min_db
     f.attrs['jsr_max_db'] = args.jsr_max_db
     f.attrs['jsr_draw'] = 'per band, uniform in [jsr_min_db, jsr_max_db]'
@@ -893,8 +900,18 @@ def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
     profiles_db = [10.0 * np.log10(np.maximum(r['eigvals'], EPS)) for r in records]
     knees = [r['meta'].knee for r in records]
 
-    # Fixed axis rather than autoscaled, so every figure is on the same scale
-    ylim = list(EV_YLIM_DB)
+    # Bottom pinned at 0 dB; top driven by the largest eigenvalue anywhere in
+    # this set of blocks, so a high-power block is never cut off and every panel
+    # stays on the same scale. Note eigenvalues below 0 dB fall off the bottom of
+    # the axis by design.
+    global_max_db = float(np.max(np.concatenate(profiles_db)))
+    top = max(global_max_db + EV_YLIM_TOP_MARGIN_DB, EV_YLIM_MIN_TOP_DB)
+    ylim = [EV_YLIM_BOTTOM_DB, top]
+
+    n_below = int(np.sum(np.concatenate(profiles_db) < EV_YLIM_BOTTOM_DB))
+    if n_below:
+        print(f"  note: {n_below} eigenvalue points fall below "
+              f"{EV_YLIM_BOTTOM_DB:.0f} dB and are clipped off the bottom of the axis")
 
     norm = mcolors.Normalize(vmin=0, vmax=max(max_bands, 1))
     cmap = cm.plasma
@@ -1089,6 +1106,18 @@ def main():
         raise ValueError('Require 0 <= min_bands <= max_bands')
     if args.jsr_max_db < args.jsr_min_db:
         raise ValueError('Require jsr_min_db <= jsr_max_db')
+
+    # The per-tile injection stream is keyed on (seed, channel, pulse_tile,
+    # range_tile), where pulse_tile is RELATIVE to the start of the window. Two
+    # different pulse windows generated with the SAME seed therefore replay the
+    # same band counts, rows and JSRs tile-for-tile. Backgrounds differ, so this
+    # is not label leakage, but a held-out set should not share an injection
+    # realization with the set the model trained on. Use a distinct --seed for
+    # every window.
+    if args.seed == 0 and args.pulse_start != PULSE_START_DEFAULT:
+        print('\n  NOTE: this is not the default training window but --seed is still 0. '
+              'Use a distinct seed for held-out windows so their injection '
+              'realizations are independent of the training set.\n')
 
     os.makedirs(args.output_dir, exist_ok=True)
 
