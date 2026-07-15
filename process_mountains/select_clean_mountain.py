@@ -4,15 +4,22 @@ select_clean_mountain.py
 
 Scan a NISAR L0B scene for "clean" CPI tiles and save them to HDF5.
 
-A tile is considered clean if:
-    max(diag[:12]) - median(diag[:12]) <= threshold_db (default 5 dB)
+A tile is considered clean using an IQR-based method:
+1. Compute gap-excluded SCM and identify valid diagonal entries
+2. Remove invalid diagonal entries
+3. Select middle 50% of remaining valid diagonals (IQR)
+4. Compute mean and std dev of the IQR
+5. Check if top n_check eigenvalues exceed mean + std_threshold * std_dev
+6. Flag as unclean if any exceed the threshold
 
-where diag is the SCM diagonal (CPI^H * CPI / 250), and we only inspect
-the first 12 eigenvalues/diagonal entries (the largest ones).
+This approach uses signal noise statistics (IQR) free from drop-offs and RFI
+to detect outliers, rather than an absolute threshold.
 
 For each clean tile, we store:
   - Full eigenvalue profile (16 values, unnormalized)
   - Full diagonal (16 values, unnormalized)
+  - IQR mean and std dev (statistics used for cleanliness check)
+  - Number of std devs above mean for the max value checked
   - Pulse start and range start indices
   - Frequency and polarization
 
@@ -172,37 +179,106 @@ def eigvals_to_db(eigvals: np.ndarray) -> np.ndarray:
 # CLEAN TILE SELECTION
 # ---------------------------------------------------------------------------
 
-def is_clean_tile(diag_lin: np.ndarray, n_keep: int = N_KEEP_DEFAULT, threshold_db: float = 3.0) -> bool:
+def is_clean_tile(
+    diag_lin: np.ndarray,
+    diag_valid_idx: np.ndarray,
+    n_check: int = 1,
+    std_threshold: float = 1.0
+) -> tuple[bool, dict]:
     """
-    Determine if a CPI tile is "clean" based on SCM diagonal statistics.
+    Determine if a CPI tile is "clean" based on SCM diagonal statistics using IQR method.
 
-    A tile is clean if: max(diag[:n_keep]) - median(diag[:n_keep]) <= threshold_db
+    Steps:
+    1. Remove invalid diagonal entries (from diag_valid_idx)
+    2. Select middle 50% of remaining valid diagonals (IQR)
+    3. Compute mean and std dev of the middle 50%
+    4. Check if the top n_check eigenvalues exceed mean + std_threshold * std_dev
+    5. If any exceed, flag as unclean (RFI contamination)
 
     Parameters
     ----------
     diag_lin : (M,) float array
         SCM diagonal in linear scale (unnormalized).
-    n_keep : int, default 12
-        Number of leading diagonal entries to inspect.
-    threshold_db : float, default 3.0
-        Maximum allowed spread (in dB) between max and median.
+    diag_valid_idx : (M,) bool array
+        True where diagonal entry had enough valid samples.
+    n_check : int, default 1
+        Number of top eigenvalues to check against IQR statistics.
+    std_threshold : float, default 1.0
+        Number of standard deviations above the IQR mean to allow.
 
     Returns
     -------
     is_clean : bool
+        True if tile is clean (no outliers detected).
+    stats : dict
+        Dictionary containing:
+        - 'iqr_mean': mean of middle 50% (linear scale)
+        - 'iqr_std': std dev of middle 50% (linear scale)
+        - 'max_value': maximum value checked
+        - 'n_std_above': number of std devs the max is above mean
     """
-    diag_kept = diag_lin[:n_keep]
-    diag_db = 10.0 * np.log10(np.clip(diag_kept, EPS, None))
+    # Step 1: Filter out invalid diagonals
+    valid_diag = diag_lin[diag_valid_idx]
 
-    max_db = np.max(diag_db)
-    median_db = np.median(diag_db)
-    spread = max_db - median_db
+    if len(valid_diag) < 4:
+        # Not enough valid samples to compute IQR
+        return False, {
+            'iqr_mean': 0.0,
+            'iqr_std': 0.0,
+            'max_value': 0.0,
+            'n_std_above': np.inf
+        }
 
-    return spread <= threshold_db
+    # Step 2: Select middle 50% (IQR)
+    n_valid = len(valid_diag)
+    q1_idx = n_valid // 4
+    q3_idx = 3 * n_valid // 4
+
+    # Sort to get IQR
+    sorted_diag = np.sort(valid_diag)
+    iqr_diag = sorted_diag[q1_idx:q3_idx]
+
+    if len(iqr_diag) == 0:
+        return False, {
+            'iqr_mean': 0.0,
+            'iqr_std': 0.0,
+            'max_value': 0.0,
+            'n_std_above': np.inf
+        }
+
+    # Step 3: Compute mean and std dev of IQR
+    iqr_mean = np.mean(iqr_diag)
+    iqr_std = np.std(iqr_diag, ddof=1) if len(iqr_diag) > 1 else 0.0
+
+    # Step 4: Check top n_check values against threshold
+    # Top values are at the beginning (descending order from SCM diag)
+    n_check_actual = min(n_check, len(valid_diag))
+    top_values = np.sort(valid_diag)[-n_check_actual:]  # Get largest values
+
+    max_value = np.max(top_values)
+
+    # Compute how many std devs above mean
+    if iqr_std > EPS:
+        n_std_above = (max_value - iqr_mean) / iqr_std
+    else:
+        # If std is zero, any value above mean is considered an outlier
+        n_std_above = np.inf if max_value > iqr_mean else 0.0
+
+    # Step 5: Flag as clean if within threshold
+    is_clean = n_std_above <= std_threshold
+
+    stats = {
+        'iqr_mean': float(iqr_mean),
+        'iqr_std': float(iqr_std),
+        'max_value': float(max_value),
+        'n_std_above': float(n_std_above)
+    }
+
+    return is_clean, stats
 
 
 def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
-                     off_diag_ratio, diag_ratio, n_keep, threshold_db):
+                     off_diag_ratio, diag_ratio, n_check, std_threshold):
     """
     Tile data_block into non-overlapping cpi_len x cpi_width CPIs, extract
     eigenvalues and diagonal for each, and filter for clean tiles only.
@@ -218,6 +294,9 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
     diag_valid_list = []
     pulse_idx_list = []
     range_idx_list = []
+    iqr_mean_list = []      # IQR mean for each CPI
+    iqr_std_list = []       # IQR std dev for each CPI
+    n_std_above_list = []   # Number of std devs above mean for max value
 
     for pt in range(n_pt):
         ps = pt * cpi_len
@@ -229,7 +308,7 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             cpi = data_block[ps:pe, rs:re]
             cpi_mask = None if mask_block is None else mask_block[ps:pe, rs:re]
 
-            scm, _diag_valid_idx, diag_valid_frac = compute_gap_exclusion_scm(
+            scm, diag_valid_idx, diag_valid_frac = compute_gap_exclusion_scm(
                 cpi,
                 mask_valid_cpi=cpi_mask,
                 off_diag_overlap_ratio=off_diag_ratio,
@@ -242,8 +321,15 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             eigvals = eigen_decompose_descending(scm)      # (16,) linear, unnormalized
             diag_lin = np.real(np.diag(scm)).astype(np.float64)
 
-            # Filter: only keep clean tiles
-            if not is_clean_tile(diag_lin, n_keep=n_keep, threshold_db=threshold_db):
+            # Filter: only keep clean tiles using new IQR-based method
+            is_clean, stats = is_clean_tile(
+                diag_lin,
+                diag_valid_idx,
+                n_check=n_check,
+                std_threshold=std_threshold
+            )
+
+            if not is_clean:
                 continue
 
             eig_lin_list.append(eigvals.astype(np.float64))
@@ -251,6 +337,9 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             diag_valid_list.append(diag_valid_frac)
             pulse_idx_list.append(p0 + ps)
             range_idx_list.append(r0 + rs)
+            iqr_mean_list.append(stats['iqr_mean'])
+            iqr_std_list.append(stats['iqr_std'])
+            n_std_above_list.append(stats['n_std_above'])
 
     if not eig_lin_list:
         return None
@@ -264,6 +353,9 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
         "diag_valid_frac": np.array(diag_valid_list, dtype=np.float32),
         "pulse_idx": np.array(pulse_idx_list, dtype=np.int64),
         "range_idx": np.array(range_idx_list, dtype=np.int64),
+        "iqr_mean": np.array(iqr_mean_list, dtype=np.float32),
+        "iqr_std": np.array(iqr_std_list, dtype=np.float32),
+        "n_std_above": np.array(n_std_above_list, dtype=np.float32),
     }
 
 
@@ -377,10 +469,10 @@ def main():
     parser.add_argument('--diag-valid-ratio', type=float,
                         default=DIAG_VALID_RATIO_DEFAULT)
 
-    parser.add_argument('--n-keep', type=int, default=N_KEEP_DEFAULT,
-                        help='Number of leading eigenvalues/diagonal entries to inspect for cleanliness.')
-    parser.add_argument('--threshold-db', type=float, default=3.0,
-                        help='Max allowed spread (dB) between max and median of the top n_keep diagonal entries.')
+    parser.add_argument('--n-check', type=int, default=1,
+                        help='Number of top eigenvalues to check against IQR statistics.')
+    parser.add_argument('--std-threshold', type=float, default=1.0,
+                        help='Number of standard deviations above IQR mean to allow before flagging as unclean.')
 
     parser.add_argument('--output-h5', default='clean_mountains.h5',
                         help='Output HDF5 file path.')
@@ -402,8 +494,8 @@ def main():
     h5_out.attrs['pulse_end'] = args.pulse_end
     h5_out.attrs['range_start'] = args.range_start if args.range_start is not None else 0
     h5_out.attrs['range_end'] = args.range_end if args.range_end is not None else -1
-    h5_out.attrs['n_keep'] = args.n_keep
-    h5_out.attrs['threshold_db'] = args.threshold_db
+    h5_out.attrs['n_check'] = args.n_check
+    h5_out.attrs['std_threshold'] = args.std_threshold
 
     # Process each frequency/polarization pair
     for freq, pol in freq_pols:
@@ -435,13 +527,13 @@ def main():
             print("    Valid fraction: {:.2%}".format(valid_frac))
 
         # Process tiles and filter for clean ones
-        print("    Tiling and filtering for clean tiles (threshold={} dB) ...".format(args.threshold_db))
+        print("    Tiling and filtering for clean tiles (std_threshold={} std devs) ...".format(args.std_threshold))
         result = process_freq_pol(
             data_block, mask_block,
             args.pulse_start, r0,
             args.cpi_len, args.cpi_width,
             args.off_diag_overlap_ratio, args.diag_valid_ratio,
-            args.n_keep, args.threshold_db
+            args.n_check, args.std_threshold
         )
 
         if result is None:
@@ -459,6 +551,9 @@ def main():
         grp.create_dataset('diag_valid_frac', data=result['diag_valid_frac'], compression='gzip')
         grp.create_dataset('pulse_idx', data=result['pulse_idx'], compression='gzip')
         grp.create_dataset('range_idx', data=result['range_idx'], compression='gzip')
+        grp.create_dataset('iqr_mean', data=result['iqr_mean'], compression='gzip')
+        grp.create_dataset('iqr_std', data=result['iqr_std'], compression='gzip')
+        grp.create_dataset('n_std_above', data=result['n_std_above'], compression='gzip')
         grp.attrs['frequency'] = freq
         grp.attrs['polarization'] = pol
         grp.attrs['n_clean_tiles'] = n_clean
