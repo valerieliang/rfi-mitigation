@@ -110,6 +110,11 @@ Examples:
     parser.add_argument('--cpi-width', type=int, default=250,
                         help='CPI width (default: 250)')
 
+    parser.add_argument('--off-diag-overlap-ratio', type=float, default=None,
+                        help='Minimum fraction of overlapping valid range samples for off-diagonal SCM entries (default: 0.03)')
+    parser.add_argument('--diag-valid-ratio', type=float, default=None,
+                        help='Minimum fraction of valid samples for diagonal SCM entries (default: 0.02)')
+
     parser.add_argument('--max-grid', type=int, default=None,
                         help='Max number of CPIs in grid plot (passed to mountain_profile.py)')
 
@@ -138,6 +143,11 @@ def build_command(l0b_file, mountain, output_dir, args):
         cmd.extend(["--pol", args.pol])
     if args.compute_subswath_mask:
         cmd.append("--compute-subswath-mask")
+
+    if args.off_diag_overlap_ratio is not None:
+        cmd.extend(["--off-diag-overlap-ratio", str(args.off_diag_overlap_ratio)])
+    if args.diag_valid_ratio is not None:
+        cmd.extend(["--diag-valid-ratio", str(args.diag_valid_ratio)])
 
     if args.max_grid is not None:
         cmd.extend(["--max-grid", str(args.max_grid)])

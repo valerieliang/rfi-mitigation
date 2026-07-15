@@ -600,6 +600,110 @@ def plot_scm_diag(diag_db, out_path, freq, pol, n_show):
     plt.close(fig)
 
 
+def plot_grid_combined(eig_hh, eig_hv, diag_hh, diag_hv, cpi_pulse_idx, cpi_range_idx,
+                       out_path, freq, n_show, max_grid,
+                       eig_y_min, eig_y_max, diag_y_min, diag_y_max):
+    """
+    Combined grid plot with HH and HV side by side for each CPI tile.
+    Each row shows one CPI with 4 columns: HH eigenvalues, HH SCM diagonal, HV eigenvalues, HV SCM diagonal.
+
+    Splits into multiple images with at most max_per_image CPIs per image to avoid
+    excessively long plots.
+    """
+    eig_hh_show = eig_hh[:, :n_show]
+    eig_hv_show = eig_hv[:, :n_show]
+    diag_hh_show = diag_hh[:, :n_show]
+    diag_hv_show = diag_hv[:, :n_show]
+    x = np.arange(n_show)
+    N = eig_hh_show.shape[0]
+
+    if N <= max_grid:
+        sel = np.arange(N)
+    else:
+        sel = np.unique(np.linspace(0, N - 1, max_grid).round().astype(int))
+
+    n_total = len(sel)
+
+    # Split into multiple images with at most 5 CPIs per image
+    max_per_image = 5
+    n_images = int(np.ceil(n_total / max_per_image))
+
+    # Generate base filename without extension
+    out_base = os.path.splitext(out_path)[0]
+    out_ext = os.path.splitext(out_path)[1]
+
+    output_files = []
+
+    for img_idx in range(n_images):
+        start_idx = img_idx * max_per_image
+        end_idx = min(start_idx + max_per_image, n_total)
+        sel_chunk = sel[start_idx:end_idx]
+        n_in_chunk = len(sel_chunk)
+
+        n_cols = 4  # Four columns: HH eig, HH diag, HV eig, HV diag
+
+        fig, axes = plt.subplots(n_in_chunk, n_cols,
+                                 figsize=(9.6, 1.9 * n_in_chunk),
+                                 squeeze=False, sharex=True)
+
+        for k, cpi_i in enumerate(sel_chunk):
+            # Column 0: HH eigenvalues
+            ax_eig_hh = axes[k][0]
+            ax_eig_hh.plot(x, eig_hh_show[cpi_i], color="C0", lw=1.1)
+            ax_eig_hh.set_ylim(eig_y_min, eig_y_max)
+            ax_eig_hh.set_title("CPI {} HH Eig (p{}, r{})".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_eig_hh.tick_params(labelsize=6)
+            ax_eig_hh.grid(True, alpha=0.3)
+
+            # Column 1: HH SCM diagonal
+            ax_diag_hh = axes[k][1]
+            ax_diag_hh.scatter(x, diag_hh_show[cpi_i], color="C3", s=15, alpha=0.7)
+            ax_diag_hh.set_ylim(diag_y_min, diag_y_max)
+            ax_diag_hh.set_title("CPI {} HH Diag (p{}, r{})".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_diag_hh.tick_params(labelsize=6)
+            ax_diag_hh.grid(True, alpha=0.3)
+
+            # Column 2: HV eigenvalues
+            ax_eig_hv = axes[k][2]
+            ax_eig_hv.plot(x, eig_hv_show[cpi_i], color="C0", lw=1.1)
+            ax_eig_hv.set_ylim(eig_y_min, eig_y_max)
+            ax_eig_hv.set_title("CPI {} HV Eig (p{}, r{})".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_eig_hv.tick_params(labelsize=6)
+            ax_eig_hv.grid(True, alpha=0.3)
+
+            # Column 3: HV SCM diagonal
+            ax_diag_hv = axes[k][3]
+            ax_diag_hv.scatter(x, diag_hv_show[cpi_i], color="C3", s=15, alpha=0.7)
+            ax_diag_hv.set_ylim(diag_y_min, diag_y_max)
+            ax_diag_hv.set_title("CPI {} HV Diag (p{}, r{})".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_diag_hv.tick_params(labelsize=6)
+            ax_diag_hv.grid(True, alpha=0.3)
+
+        subtitle = "" if N <= max_grid else " (showing {}/{}, evenly sampled)".format(n_total, N)
+        part_info = " - Part {}/{}".format(img_idx + 1, n_images) if n_images > 1 else ""
+        fig.suptitle("Profile Grid: freq {}{}{}  [all {}]"
+                     .format(freq, subtitle, part_info, n_show), fontsize=11)
+        fig.text(0.5, 0.01, "Index", ha="center", fontsize=9)
+        fig.text(0.01, 0.5, "Power (dB)", va="center", rotation="vertical", fontsize=9)
+        fig.tight_layout(rect=[0.02, 0.02, 1, 0.97])
+
+        # Save with part number if multiple images
+        if n_images > 1:
+            out_file = "{}_part{:02d}{}".format(out_base, img_idx + 1, out_ext)
+        else:
+            out_file = out_path
+
+        fig.savefig(out_file, dpi=130)
+        plt.close(fig)
+        output_files.append(out_file)
+
+    return output_files
+
+
 # ---------------------------------------------------------------------------
 # STORAGE
 # ---------------------------------------------------------------------------
@@ -634,6 +738,9 @@ def main():
     raw = open_raw(args.l0b_file)
     pairs = resolve_freq_pols(raw, args.freq, args.pol)
 
+    # Group results by frequency and polarization
+    results_by_freq = {}
+
     for freq, pol in pairs:
         print("[info] processing freq {} pol {}".format(freq, pol))
         ds = raw.getRawDataset(freq, pol)
@@ -662,28 +769,48 @@ def main():
             print("[warn] no CPIs extracted for freq {} pol {}.".format(freq, pol))
             continue
 
+        # Store results by frequency and polarization
+        if freq not in results_by_freq:
+            results_by_freq[freq] = {}
+        results_by_freq[freq][pol] = res
+
+        # Store individual H5 files
         tag = "{}_{}".format(freq, pol)
-        p_avg = os.path.join(args.output_dir, "eig_average_{}.png".format(tag))
-        p_over = os.path.join(args.output_dir, "eig_overlaid_{}.png".format(tag))
-        p_grid = os.path.join(args.output_dir, "eig_grid_{}.png".format(tag))
-        p_diag = os.path.join(args.output_dir, "scm_diagonal_{}.png".format(tag))
         p_h5 = os.path.join(args.output_dir, "mountain_profiles_{}.h5".format(tag))
-
-        plot_average_shape(res["eig_db"], p_avg, freq, pol, N_SHOW)
-        plot_overlaid(res["eig_db"], p_over, freq, pol, N_SHOW)
-
-        grid_files = plot_grid(res["eig_db"], res["diag_db"], res["pulse_idx"], res["range_idx"],
-                               p_grid, freq, pol, N_SHOW, args.max_grid, args.grid_cols)
-
-        plot_scm_diag(res["diag_db"], p_diag, freq, pol, N_SHOW)
-
         store_profiles(p_h5, res, freq, pol, args.cpi_len, args.cpi_width)
-
         n_cpi = res["eig_lin"].shape[0]
         print("[info]   {} CPIs -> {}".format(n_cpi, p_h5))
-        grid_str = " | ".join(grid_files) if len(grid_files) > 1 else grid_files[0]
-        print("[info]   plots: {} | {} | {} | {}"
-              .format(p_avg, p_over, grid_str, p_diag))
+
+    # Generate combined plots for each frequency with HH and HV side by side
+    for freq, pol_results in results_by_freq.items():
+        if 'HH' in pol_results and 'HV' in pol_results:
+            res_hh = pol_results['HH']
+            res_hv = pol_results['HV']
+
+            # Compute shared y-limits for eigenvalues (0 to max of top 12)
+            eig_hh_12 = res_hh["eig_db"][:, :12]
+            eig_hv_12 = res_hv["eig_db"][:, :12]
+            eig_y_max = np.ceil(max(np.max(eig_hh_12), np.max(eig_hv_12)))
+            eig_y_min = 0
+
+            # Compute shared y-limits for SCM diagonal (0 to max of top 12 sorted)
+            diag_hh_sorted_12 = np.sort(res_hh["diag_db"], axis=1)[:, ::-1][:, :12]
+            diag_hv_sorted_12 = np.sort(res_hv["diag_db"], axis=1)[:, ::-1][:, :12]
+            diag_y_max = np.ceil(max(np.max(diag_hh_sorted_12), np.max(diag_hv_sorted_12)))
+            diag_y_min = 0
+
+            # Generate combined grid plot
+            p_grid = os.path.join(args.output_dir, "profile_grid_{}.png".format(freq))
+            grid_files = plot_grid_combined(
+                res_hh["eig_db"], res_hv["eig_db"],
+                res_hh["diag_db"], res_hv["diag_db"],
+                res_hh["pulse_idx"], res_hh["range_idx"],
+                p_grid, freq, N_SHOW, args.max_grid,
+                eig_y_min, eig_y_max, diag_y_min, diag_y_max
+            )
+
+            grid_str = " | ".join(grid_files) if len(grid_files) > 1 else grid_files[0]
+            print("[info]   combined grid plots: {}".format(grid_str))
 
 
 if __name__ == "__main__":
