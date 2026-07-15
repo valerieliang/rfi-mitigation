@@ -30,6 +30,7 @@ API differs.
 
 import argparse
 import os
+import sys
 
 import numpy as np
 import matplotlib
@@ -50,6 +51,9 @@ DIAG_VALID_RATIO_DEFAULT = 0.02
 
 # Number of leading (largest) eigenvalues to keep as features.
 N_KEEP_DEFAULT = 12
+
+# Number of values to show in plots (all 16)
+N_SHOW = 16
 
 EPS = 1e-12
 
@@ -157,10 +161,9 @@ def eigen_decompose_descending(scm: np.ndarray) -> np.ndarray:
     return np.sort(np.real(eigvals))[::-1]
 
 
-def normalize_eigvals_db(eigvals: np.ndarray) -> np.ndarray:
+def eigvals_to_db(eigvals: np.ndarray) -> np.ndarray:
     """
-    Normalize eigenvalues to the linear scale (lambda_i / lambda_max), then
-    convert to dB. lambda_max maps to 0 dB by construction.
+    Convert eigenvalues to dB (un-normalized power in dB).
 
     Parameters
     ----------
@@ -170,15 +173,8 @@ def normalize_eigvals_db(eigvals: np.ndarray) -> np.ndarray:
     -------
     eigvals_db : (M,) float32 array
     """
-    lambda_max = max(float(eigvals[0]), EPS)
-    eigvals_norm = np.clip(eigvals / lambda_max, EPS, None)
-    eigvals_db = 10.0 * np.log10(eigvals_norm)
+    eigvals_db = 10.0 * np.log10(np.clip(eigvals, EPS, None))
     return eigvals_db.astype(np.float32)
-
-# Number of leading values shown in every plot (largest 12 eigenvalues and the
-# first 12 SCM diagonal entries). Tied to N_KEEP so the plots share the same
-# feature basis as anomaly_features.py.
-N_SHOW = N_KEEP_DEFAULT
 
 # Default pulse read chunk (keeps memory bounded for large pulse ranges).
 PULSE_CHUNK_DEFAULT = 8192
@@ -227,10 +223,6 @@ def parse_args():
                              'plot (evenly sampled across the scene if exceeded).')
     parser.add_argument('--grid-cols', type=int, default=6,
                         help='Number of columns in the grid-of-shapes plot.')
-    parser.add_argument('--diag-raw', action='store_true',
-                        help='Plot the SCM diagonal as raw power in dB instead of '
-                             'normalizing each CPI to its top eigenvalue (0 dB).')
-
     parser.add_argument('--output-dir', default='results/scene')
     return parser.parse_args()
 
@@ -343,17 +335,18 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
                      off_diag_ratio, diag_ratio):
     """
     Tile data_block into non-overlapping cpi_len x cpi_width CPIs and extract,
-    per CPI: descending eigenvalues, the (max eigenvalue -> 0 dB) normalized
-    eigenvalue profile, and the SCM diagonal. Returns a dict of stacked arrays,
-    or None if no full tile fits.
+    per CPI: descending eigenvalues (power in dB) and the SCM diagonal (power in dB).
+    SCM is computed as M^H*M/250. Returns a dict of stacked arrays, or None if no
+    full tile fits.
     """
     n_p, n_r = data_block.shape
     n_pt = n_p // cpi_len
     n_rt = n_r // cpi_width
 
     eig_lin_list = []       # (16,) linear eigenvalues, descending
-    eig_db_plot_list = []   # (16,) max eigenvalue -> 0 dB (anomaly-style)
-    diag_lin_list = []      # (16,) per-pulse SCM diagonal power
+    eig_db_list = []        # (16,) eigenvalues in dB (un-normalized power)
+    diag_lin_list = []      # (16,) per-pulse SCM diagonal power (linear)
+    diag_db_list = []       # (16,) per-pulse SCM diagonal power (dB)
     diag_valid_list = []
     pulse_idx_list = []
     range_idx_list = []
@@ -375,13 +368,18 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
                 diag_valid_ratio=diag_ratio,
             )
 
+            # Normalize SCM by number of range samples (M^H*M/250)
+            scm = scm / cpi_width
+
             eigvals = eigen_decompose_descending(scm)      # (16,) linear
-            eig_db_plot = normalize_eigvals_db(eigvals)    # max -> 0 dB
+            eig_db = eigvals_to_db(eigvals)                # power in dB
             diag_lin = np.real(np.diag(scm)).astype(np.float64)
+            diag_db = 10.0 * np.log10(np.clip(diag_lin, EPS, None))
 
             eig_lin_list.append(eigvals.astype(np.float64))
-            eig_db_plot_list.append(eig_db_plot.astype(np.float32))
+            eig_db_list.append(eig_db.astype(np.float32))
             diag_lin_list.append(diag_lin)
+            diag_db_list.append(diag_db.astype(np.float32))
             diag_valid_list.append(diag_valid_frac)
             pulse_idx_list.append(p0 + ps)
             range_idx_list.append(r0 + rs)
@@ -390,23 +388,15 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
         return None
 
     eig_lin = np.stack(eig_lin_list)             # (N, 16)
-    eig_db_plot = np.stack(eig_db_plot_list)     # (N, 16)
+    eig_db = np.stack(eig_db_list)               # (N, 16)
     diag_lin = np.stack(diag_lin_list)           # (N, 16)
-
-    # SCM diagonal in dB. For a Hermitian PSD SCM every diagonal entry is <= the
-    # top eigenvalue, so normalizing to it keeps the diagonal plot on the same
-    # 0 dB reference as the eigenvalue plots. Raw dB is kept too for absolute
-    # power inspection.
-    lam_max = np.clip(eig_lin[:, :1], EPS, None)                    # (N, 1)
-    diag_db_norm = 10.0 * np.log10(np.clip(diag_lin / lam_max, EPS, None))
-    diag_db_raw = 10.0 * np.log10(np.clip(diag_lin, EPS, None))
+    diag_db = np.stack(diag_db_list)             # (N, 16)
 
     return {
         "eig_lin": eig_lin,
-        "eig_db_plot": eig_db_plot,
+        "eig_db": eig_db,
         "diag_lin": diag_lin.astype(np.float32),
-        "diag_db_norm": diag_db_norm.astype(np.float32),
-        "diag_db_raw": diag_db_raw.astype(np.float32),
+        "diag_db": diag_db.astype(np.float32),
         "diag_valid_frac": np.array(diag_valid_list, dtype=np.float32),
         "pulse_idx": np.array(pulse_idx_list, dtype=np.int64),
         "range_idx": np.array(range_idx_list, dtype=np.int64),
@@ -431,6 +421,11 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show):
     lo = eig.min(axis=0)
     hi = eig.max(axis=0)
 
+    # Dynamic y-limits based on 12 largest eigenvalues (descending order)
+    eig_12 = eig_db[:, :12]  # Top 12 eigenvalues
+    y_max = np.ceil(np.max(eig_12))
+    y_min = np.floor(np.min(eig_12))
+
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.fill_between(x, lo, hi, color="C0", alpha=0.12, label="min / max envelope")
     ax.fill_between(x, mean - std, mean + std, color="C0", alpha=0.30,
@@ -439,11 +434,11 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show):
     ax.plot(x, med, color="C3", lw=1.4, ls="--", label="median")
 
     ax.set_xlabel("Eigenvalue index")
-    ax.set_ylabel("Eigenvalue (dB, max -> 0 dB)")
-    ax.set_title("Average eigenvalue shape: freq {} pol {} ({} CPIs, first {})"
+    ax.set_ylabel("Eigenvalue (dB, power)")
+    ax.set_title("Average eigenvalue shape: freq {} pol {} ({} CPIs, all {})"
                  .format(freq, pol, eig.shape[0], n_show))
     ax.set_xticks(x)
-    ax.set_ylim(0, -60)
+    ax.set_ylim(y_min, y_max)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -461,17 +456,22 @@ def plot_overlaid(eig_db, out_path, freq, pol, n_show):
     n = eig.shape[0]
     alpha = float(np.clip(30.0 / max(n, 1), 0.03, 0.5))
 
+    # Dynamic y-limits based on 12 largest eigenvalues (descending order)
+    eig_12 = eig_db[:, :12]  # Top 12 eigenvalues
+    y_max = np.ceil(np.max(eig_12))
+    y_min = np.floor(np.min(eig_12))
+
     fig, ax = plt.subplots(figsize=(8, 6))
     for i in range(n):
         ax.plot(x, eig[i], color="C0", alpha=alpha, lw=0.8)
     ax.plot(x, eig.mean(axis=0), color="k", lw=1.6, label="mean")
 
     ax.set_xlabel("Eigenvalue index")
-    ax.set_ylabel("Eigenvalue (dB, max -> 0 dB)")
-    ax.set_title("All eigenvalue profiles overlaid: freq {} pol {} ({} CPIs, first {})"
+    ax.set_ylabel("Eigenvalue (dB, power)")
+    ax.set_title("All eigenvalue profiles overlaid: freq {} pol {} ({} CPIs, all {})"
                  .format(freq, pol, n, n_show))
     ax.set_xticks(x)
-    ax.set_ylim(0, -60)
+    ax.set_ylim(y_min, y_max)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -485,7 +485,9 @@ def plot_grid(eig_db, diag_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol
     Grid of small multiples: one CPI eigenvalue profile next to SCM diagonal
     scatter plot per row. If there are more CPIs than max_grid, the shown CPIs
     are sampled evenly across the scene so the grid stays representative.
-    All cells share y-limits for comparison.
+
+    Splits into multiple images with at most max_per_image CPIs per image to avoid
+    excessively long plots.
     """
     eig = eig_db[:, :n_show]
     diag = diag_db[:, :n_show]
@@ -497,54 +499,88 @@ def plot_grid(eig_db, diag_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol
     else:
         sel = np.unique(np.linspace(0, N - 1, max_grid).round().astype(int))
 
-    n = len(sel)
-    n_rows = n
-    n_cols = 2  # Two columns: eigenvalue plot and SCM diagonal scatter plot
+    n_total = len(sel)
 
-    # Fixed y-limits: 0 to -60 dB
-    y_lo = -60
-    y_hi = 0
+    # Split into multiple images with at most 5 CPIs per image
+    max_per_image = 5
+    n_images = int(np.ceil(n_total / max_per_image))
 
-    fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(4.8, 1.9 * n_rows),
-                             squeeze=False, sharex=True, sharey=True)
+    # Generate base filename without extension
+    out_base = os.path.splitext(out_path)[0]
+    out_ext = os.path.splitext(out_path)[1]
 
-    for k, cpi_i in enumerate(sel):
-        # Left column: eigenvalue plot
-        ax_eig = axes[k][0]
-        ax_eig.plot(x, eig[cpi_i], color="C0", lw=1.1)
-        ax_eig.set_ylim(y_lo, y_hi)
-        ax_eig.set_title("CPI {} Eigenvalues (p{}, r{})".format(
-            cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
-        ax_eig.tick_params(labelsize=6)
-        ax_eig.grid(True, alpha=0.3)
+    output_files = []
 
-        # Right column: SCM diagonal scatter plot (sorted descending)
-        ax_diag = axes[k][1]
-        diag_sorted = np.sort(diag[cpi_i])[::-1]  # Sort descending
-        ax_diag.scatter(x, diag_sorted, color="C3", s=15, alpha=0.7)
-        ax_diag.set_ylim(y_lo, y_hi)
-        ax_diag.set_title("CPI {} SCM Diagonal (p{}, r{})".format(
-            cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
-        ax_diag.tick_params(labelsize=6)
-        ax_diag.grid(True, alpha=0.3)
+    for img_idx in range(n_images):
+        start_idx = img_idx * max_per_image
+        end_idx = min(start_idx + max_per_image, n_total)
+        sel_chunk = sel[start_idx:end_idx]
+        n_in_chunk = len(sel_chunk)
 
-    subtitle = "" if N <= max_grid else " (showing {}/{}, evenly sampled)".format(n, N)
-    fig.suptitle("Eigenvalue shapes & SCM diagonal grid: freq {} pol {}{}  [first {}]"
-                 .format(freq, pol, subtitle, n_show), fontsize=11)
-    fig.text(0.5, 0.01, "Index", ha="center", fontsize=9)
-    fig.text(0.01, 0.5, "Value (dB, max eigenvalue -> 0 dB)", va="center", rotation="vertical", fontsize=9)
-    fig.tight_layout(rect=[0.02, 0.02, 1, 0.97])
-    fig.savefig(out_path, dpi=130)
-    plt.close(fig)
+        # Compute dynamic y-limits for this chunk based on 12 largest eigenvalues
+        eig_chunk_12 = eig_db[sel_chunk, :12]
+        diag_chunk_12 = np.sort(diag_db[sel_chunk, :])[:, ::-1][:, :12]  # Sort each CPI descending, take top 12
+        combined_12 = np.concatenate([eig_chunk_12.flatten(), diag_chunk_12.flatten()])
+        y_max = np.ceil(np.max(combined_12))
+        y_min = np.floor(np.min(combined_12))
+
+        n_cols = 2  # Two columns: eigenvalue plot and SCM diagonal scatter plot
+
+        fig, axes = plt.subplots(n_in_chunk, n_cols,
+                                 figsize=(4.8, 1.9 * n_in_chunk),
+                                 squeeze=False, sharex=True, sharey=True)
+
+        for k, cpi_i in enumerate(sel_chunk):
+            # Left column: eigenvalue plot
+            ax_eig = axes[k][0]
+            ax_eig.plot(x, eig[cpi_i], color="C0", lw=1.1)
+            ax_eig.set_ylim(y_min, y_max)
+            ax_eig.set_title("CPI {} Eigenvalues (p{}, r{})".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_eig.tick_params(labelsize=6)
+            ax_eig.grid(True, alpha=0.3)
+
+            # Right column: SCM diagonal scatter plot (in matrix diagonal order, not sorted)
+            ax_diag = axes[k][1]
+            ax_diag.scatter(x, diag[cpi_i], color="C3", s=15, alpha=0.7)
+            ax_diag.set_ylim(y_min, y_max)
+            ax_diag.set_title("CPI {} SCM Diagonal (p{}, r{})".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_diag.tick_params(labelsize=6)
+            ax_diag.grid(True, alpha=0.3)
+
+        subtitle = "" if N <= max_grid else " (showing {}/{}, evenly sampled)".format(n_total, N)
+        part_info = " - Part {}/{}".format(img_idx + 1, n_images) if n_images > 1 else ""
+        fig.suptitle("Eigenvalue shapes & SCM diagonal grid: freq {} pol {}{}{}  [all {}]"
+                     .format(freq, pol, subtitle, part_info, n_show), fontsize=11)
+        fig.text(0.5, 0.01, "Index", ha="center", fontsize=9)
+        fig.text(0.01, 0.5, "Power (dB)", va="center", rotation="vertical", fontsize=9)
+        fig.tight_layout(rect=[0.02, 0.02, 1, 0.97])
+
+        # Save with part number if multiple images
+        if n_images > 1:
+            out_file = "{}_part{:02d}{}".format(out_base, img_idx + 1, out_ext)
+        else:
+            out_file = out_path
+
+        fig.savefig(out_file, dpi=130)
+        plt.close(fig)
+        output_files.append(out_file)
+
+    return output_files
 
 
-def plot_scm_diag(diag_db, out_path, freq, pol, n_show, ylabel):
-    """SCM diagonal values per CPI, first n_show diagonal positions."""
+def plot_scm_diag(diag_db, out_path, freq, pol, n_show):
+    """SCM diagonal values per CPI, all n_show diagonal positions."""
     d = diag_db[:, :n_show]
     x = np.arange(n_show)
     n = d.shape[0]
     alpha = float(np.clip(30.0 / max(n, 1), 0.03, 0.5))
+
+    # Dynamic y-limits based on 12 largest values (sorted descending per CPI)
+    d_sorted_12 = np.sort(d, axis=1)[:, ::-1][:, :12]  # Sort each CPI descending, take top 12
+    y_max = np.ceil(np.max(d_sorted_12))
+    y_min = np.floor(np.min(d_sorted_12))
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for i in range(n):
@@ -552,11 +588,11 @@ def plot_scm_diag(diag_db, out_path, freq, pol, n_show, ylabel):
     ax.plot(x, d.mean(axis=0), color="k", lw=1.6, label="mean")
 
     ax.set_xlabel("Pulse index (SCM diagonal position)")
-    ax.set_ylabel(ylabel)
-    ax.set_title("SCM diagonal per CPI: freq {} pol {} ({} CPIs, first {})"
+    ax.set_ylabel("SCM diagonal power (dB)")
+    ax.set_title("SCM diagonal per CPI: freq {} pol {} ({} CPIs, all {})"
                  .format(freq, pol, n, n_show))
     ax.set_xticks(x)
-    ax.set_ylim(0, -60)
+    ax.set_ylim(y_min, y_max)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -577,12 +613,11 @@ def store_profiles(out_h5, res, freq, pol, cpi_len, cpi_width):
         h.attrs["cpi_width"] = cpi_width
         h.attrs["n_keep"] = N_KEEP_DEFAULT
         h.attrs["n_show"] = N_SHOW
-        h.attrs["eig_norm"] = "max_eigenvalue_to_0dB"
+        h.attrs["scm_normalization"] = "M^H*M/cpi_width"
         h.create_dataset("eigvals_linear", data=res["eig_lin"].astype(np.float32))
-        h.create_dataset("eigvals_db", data=res["eig_db_plot"])
+        h.create_dataset("eigvals_db", data=res["eig_db"])
         h.create_dataset("scm_diag_linear", data=res["diag_lin"])
-        h.create_dataset("scm_diag_db_norm", data=res["diag_db_norm"])
-        h.create_dataset("scm_diag_db_raw", data=res["diag_db_raw"])
+        h.create_dataset("scm_diag_db", data=res["diag_db"])
         h.create_dataset("diag_valid_frac", data=res["diag_valid_frac"])
         h.create_dataset("cpi_pulse_idx", data=res["pulse_idx"])
         h.create_dataset("cpi_range_idx", data=res["range_idx"])
@@ -634,27 +669,21 @@ def main():
         p_diag = os.path.join(args.output_dir, "scm_diagonal_{}.png".format(tag))
         p_h5 = os.path.join(args.output_dir, "mountain_profiles_{}.h5".format(tag))
 
-        plot_average_shape(res["eig_db_plot"], p_avg, freq, pol, N_SHOW)
-        plot_overlaid(res["eig_db_plot"], p_over, freq, pol, N_SHOW)
+        plot_average_shape(res["eig_db"], p_avg, freq, pol, N_SHOW)
+        plot_overlaid(res["eig_db"], p_over, freq, pol, N_SHOW)
 
-        # Use normalized diagonal for grid plot to match eigenvalue normalization
-        diag_for_grid = res["diag_db_raw"] if args.diag_raw else res["diag_db_norm"]
-        plot_grid(res["eig_db_plot"], diag_for_grid, res["pulse_idx"], res["range_idx"],
-                  p_grid, freq, pol, N_SHOW, args.max_grid, args.grid_cols)
+        grid_files = plot_grid(res["eig_db"], res["diag_db"], res["pulse_idx"], res["range_idx"],
+                               p_grid, freq, pol, N_SHOW, args.max_grid, args.grid_cols)
 
-        if args.diag_raw:
-            plot_scm_diag(res["diag_db_raw"], p_diag, freq, pol, N_SHOW,
-                          "SCM diagonal power (dB)")
-        else:
-            plot_scm_diag(res["diag_db_norm"], p_diag, freq, pol, N_SHOW,
-                          "SCM diagonal (dB, max eigenvalue -> 0 dB)")
+        plot_scm_diag(res["diag_db"], p_diag, freq, pol, N_SHOW)
 
         store_profiles(p_h5, res, freq, pol, args.cpi_len, args.cpi_width)
 
         n_cpi = res["eig_lin"].shape[0]
         print("[info]   {} CPIs -> {}".format(n_cpi, p_h5))
+        grid_str = " | ".join(grid_files) if len(grid_files) > 1 else grid_files[0]
         print("[info]   plots: {} | {} | {} | {}"
-              .format(p_avg, p_over, p_grid, p_diag))
+              .format(p_avg, p_over, grid_str, p_diag))
 
 
 if __name__ == "__main__":

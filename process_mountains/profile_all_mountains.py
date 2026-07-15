@@ -76,9 +76,15 @@ Mountain ranges profiled (south to north):
   4. Giant Mountains (Krkonoše)         : pulse 473000-482000
   5. Jizerské Mountains                 : pulse 480000-487000
 
-Example:
+Examples:
+  # Process all mountains
   python profile_all_mountains.py /path/to/scene.h5 --freq A --pol HH
+
+  # Process specific mountains only
   python profile_all_mountains.py scene.h5 --ranges giant_mountains jeseniky
+
+  # Adjust grid plot size
+  python profile_all_mountains.py scene.h5 --max-grid 100
         """
     )
     parser.add_argument('l0b_file', help='Input NISAR L0B HDF5 granule')
@@ -103,6 +109,9 @@ Example:
                         help='CPI length (default: 16)')
     parser.add_argument('--cpi-width', type=int, default=250,
                         help='CPI width (default: 250)')
+
+    parser.add_argument('--max-grid', type=int, default=None,
+                        help='Max number of CPIs in grid plot (passed to mountain_profile.py)')
 
     parser.add_argument('--dry-run', action='store_true',
                         help='Print commands without executing')
@@ -129,6 +138,9 @@ def build_command(l0b_file, mountain, output_dir, args):
         cmd.extend(["--pol", args.pol])
     if args.compute_subswath_mask:
         cmd.append("--compute-subswath-mask")
+
+    if args.max_grid is not None:
+        cmd.extend(["--max-grid", str(args.max_grid)])
 
     return cmd
 
