@@ -443,6 +443,7 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show):
     ax.set_title("Average eigenvalue shape: freq {} pol {} ({} CPIs, first {})"
                  .format(freq, pol, eig.shape[0], n_show))
     ax.set_xticks(x)
+    ax.set_ylim(0, -60)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -470,6 +471,7 @@ def plot_overlaid(eig_db, out_path, freq, pol, n_show):
     ax.set_title("All eigenvalue profiles overlaid: freq {} pol {} ({} CPIs, first {})"
                  .format(freq, pol, n, n_show))
     ax.set_xticks(x)
+    ax.set_ylim(0, -60)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -477,14 +479,16 @@ def plot_overlaid(eig_db, out_path, freq, pol, n_show):
     plt.close(fig)
 
 
-def plot_grid(eig_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol,
+def plot_grid(eig_db, diag_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol,
               n_show, max_grid, grid_cols):
     """
-    Grid of small multiples: one CPI eigenvalue profile per cell. If there are
-    more CPIs than max_grid, the shown CPIs are sampled evenly across the scene
-    so the grid stays representative. All cells share y-limits for comparison.
+    Grid of small multiples: one CPI eigenvalue profile next to SCM diagonal
+    scatter plot per row. If there are more CPIs than max_grid, the shown CPIs
+    are sampled evenly across the scene so the grid stays representative.
+    All cells share y-limits for comparison.
     """
     eig = eig_db[:, :n_show]
+    diag = diag_db[:, :n_show]
     x = np.arange(n_show)
     N = eig.shape[0]
 
@@ -494,36 +498,42 @@ def plot_grid(eig_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol,
         sel = np.unique(np.linspace(0, N - 1, max_grid).round().astype(int))
 
     n = len(sel)
-    n_cols = int(min(grid_cols, n))
-    n_rows = int(np.ceil(n / float(n_cols)))
+    n_rows = n
+    n_cols = 2  # Two columns: eigenvalue plot and SCM diagonal scatter plot
 
-    y_lo = float(eig[sel].min())
-    y_hi = float(eig[sel].max())
-    pad = 0.05 * (y_hi - y_lo + 1e-6)
+    # Fixed y-limits: 0 to -60 dB
+    y_lo = -60
+    y_hi = 0
 
     fig, axes = plt.subplots(n_rows, n_cols,
-                             figsize=(2.4 * n_cols, 1.9 * n_rows),
+                             figsize=(4.8, 1.9 * n_rows),
                              squeeze=False, sharex=True, sharey=True)
 
     for k, cpi_i in enumerate(sel):
-        r, c = divmod(k, n_cols)
-        ax = axes[r][c]
-        ax.plot(x, eig[cpi_i], color="C0", lw=1.1)
-        ax.set_ylim(y_lo - pad, y_hi + pad)
-        ax.set_title("CPI {} (p{}, r{})".format(
+        # Left column: eigenvalue plot
+        ax_eig = axes[k][0]
+        ax_eig.plot(x, eig[cpi_i], color="C0", lw=1.1)
+        ax_eig.set_ylim(y_lo, y_hi)
+        ax_eig.set_title("CPI {} Eigenvalues (p{}, r{})".format(
             cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
-        ax.tick_params(labelsize=6)
-        ax.grid(True, alpha=0.3)
+        ax_eig.tick_params(labelsize=6)
+        ax_eig.grid(True, alpha=0.3)
 
-    for k in range(n, n_rows * n_cols):
-        r, c = divmod(k, n_cols)
-        axes[r][c].axis("off")
+        # Right column: SCM diagonal scatter plot (sorted descending)
+        ax_diag = axes[k][1]
+        diag_sorted = np.sort(diag[cpi_i])[::-1]  # Sort descending
+        ax_diag.scatter(x, diag_sorted, color="C3", s=15, alpha=0.7)
+        ax_diag.set_ylim(y_lo, y_hi)
+        ax_diag.set_title("CPI {} SCM Diagonal (p{}, r{})".format(
+            cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+        ax_diag.tick_params(labelsize=6)
+        ax_diag.grid(True, alpha=0.3)
 
     subtitle = "" if N <= max_grid else " (showing {}/{}, evenly sampled)".format(n, N)
-    fig.suptitle("Eigenvalue shapes grid: freq {} pol {}{}  [first {}]"
+    fig.suptitle("Eigenvalue shapes & SCM diagonal grid: freq {} pol {}{}  [first {}]"
                  .format(freq, pol, subtitle, n_show), fontsize=11)
-    fig.text(0.5, 0.01, "Eigenvalue index", ha="center", fontsize=9)
-    fig.text(0.01, 0.5, "Eigenvalue (dB, max -> 0 dB)", va="center", rotation="vertical", fontsize=9)
+    fig.text(0.5, 0.01, "Index", ha="center", fontsize=9)
+    fig.text(0.01, 0.5, "Value (dB, max eigenvalue -> 0 dB)", va="center", rotation="vertical", fontsize=9)
     fig.tight_layout(rect=[0.02, 0.02, 1, 0.97])
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -546,6 +556,7 @@ def plot_scm_diag(diag_db, out_path, freq, pol, n_show, ylabel):
     ax.set_title("SCM diagonal per CPI: freq {} pol {} ({} CPIs, first {})"
                  .format(freq, pol, n, n_show))
     ax.set_xticks(x)
+    ax.set_ylim(0, -60)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
@@ -625,7 +636,10 @@ def main():
 
         plot_average_shape(res["eig_db_plot"], p_avg, freq, pol, N_SHOW)
         plot_overlaid(res["eig_db_plot"], p_over, freq, pol, N_SHOW)
-        plot_grid(res["eig_db_plot"], res["pulse_idx"], res["range_idx"],
+
+        # Use normalized diagonal for grid plot to match eigenvalue normalization
+        diag_for_grid = res["diag_db_raw"] if args.diag_raw else res["diag_db_norm"]
+        plot_grid(res["eig_db_plot"], diag_for_grid, res["pulse_idx"], res["range_idx"],
                   p_grid, freq, pol, N_SHOW, args.max_grid, args.grid_cols)
 
         if args.diag_raw:
