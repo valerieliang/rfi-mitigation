@@ -298,8 +298,10 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
     iqr_std_list = []       # IQR std dev for each CPI
     n_std_above_list = []   # Number of std devs above mean for max value
 
-    # DEBUG: Track first non-zero tile
+    # DEBUG: Track first non-zero tile and rejection reasons
     first_nonzero_logged = False
+    rejection_counts = {'zero': 0, 'unclean': 0}
+    first_rejection_logged = False
 
     for pt in range(n_pt):
         ps = pt * cpi_len
@@ -349,14 +351,8 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
 
             # Skip zero tiles (invalid/near-range data)
             if np.max(np.abs(eigvals)) < EPS:
+                rejection_counts['zero'] += 1
                 continue
-
-            # DEBUG: Check for zero eigenvalues/diagonal
-            if len(eig_lin_list) == 0:  # Only print for first clean tile
-                print(f"    [DEBUG] First clean tile at p={ps}, r={rs}:")
-                print(f"      SCM max: {np.max(np.abs(scm)):.6e}")
-                print(f"      Eigvals: {eigvals[:5]}")
-                print(f"      Diagonal: {diag_lin[:5]}")
 
             # Filter: only keep clean tiles using new IQR-based method
             is_clean, stats = is_clean_tile(
@@ -367,7 +363,25 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             )
 
             if not is_clean:
+                rejection_counts['unclean'] += 1
+                # DEBUG: Show first rejection reason
+                if not first_rejection_logged:
+                    print(f"    [DEBUG] First tile rejected as unclean at p={ps}, r={rs}:")
+                    print(f"      Eigvals: {eigvals[:5]}")
+                    print(f"      Diagonal: {diag_lin[:5]}")
+                    print(f"      IQR mean: {stats['iqr_mean']:.3f}, IQR std: {stats['iqr_std']:.3f}")
+                    print(f"      n_std_above: {stats['n_std_above']:.3f}, threshold: {std_threshold:.3f}")
+                    first_rejection_logged = True
                 continue
+
+            # DEBUG: Check for zero eigenvalues/diagonal (only first clean tile that passes filter)
+            if len(eig_lin_list) == 0:
+                print(f"    [DEBUG] First clean tile (passed all filters) at p={ps}, r={rs}:")
+                print(f"      SCM max: {np.max(np.abs(scm)):.6e}")
+                print(f"      Eigvals: {eigvals[:5]}")
+                print(f"      Diagonal: {diag_lin[:5]}")
+                print(f"      IQR mean: {stats['iqr_mean']:.3f}, IQR std: {stats['iqr_std']:.3f}")
+                print(f"      n_std_above: {stats['n_std_above']:.3f}")
 
             eig_lin_list.append(eigvals.astype(np.float64))
             diag_lin_list.append(diag_lin)
@@ -377,6 +391,14 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             iqr_mean_list.append(stats['iqr_mean'])
             iqr_std_list.append(stats['iqr_std'])
             n_std_above_list.append(stats['n_std_above'])
+
+    # DEBUG: Report rejection statistics
+    total_tiles = n_pt * n_rt
+    print(f"    [DEBUG] Tile filtering results:")
+    print(f"      Total tiles: {total_tiles}")
+    print(f"      Rejected (zero): {rejection_counts['zero']}")
+    print(f"      Rejected (unclean): {rejection_counts['unclean']}")
+    print(f"      Accepted (clean): {len(eig_lin_list)}")
 
     if not eig_lin_list:
         return None
