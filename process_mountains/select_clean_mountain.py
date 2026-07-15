@@ -308,6 +308,15 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             cpi = data_block[ps:pe, rs:re]
             cpi_mask = None if mask_block is None else mask_block[ps:pe, rs:re]
 
+            # DEBUG: Check input data for first tile
+            if pt == 0 and rt == 0:
+                print(f"    [DEBUG] First CPI tile input:")
+                print(f"      CPI shape: {cpi.shape}")
+                print(f"      CPI max magnitude: {np.max(np.abs(cpi)):.6e}")
+                print(f"      CPI all zero: {np.all(cpi == 0)}")
+                if cpi_mask is not None:
+                    print(f"      Mask valid fraction: {np.mean(cpi_mask):.2%}")
+
             scm, diag_valid_idx, diag_valid_frac = compute_gap_exclusion_scm(
                 cpi,
                 mask_valid_cpi=cpi_mask,
@@ -315,8 +324,17 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
                 diag_valid_ratio=diag_ratio,
             )
 
+            # DEBUG: Check SCM before normalization
+            if pt == 0 and rt == 0:
+                print(f"      SCM max (before norm): {np.max(np.abs(scm)):.6e}")
+
             # Normalize SCM by number of range samples (CPI^H * CPI / 250)
             scm = scm / cpi_width
+
+            # DEBUG: Check SCM after normalization
+            if pt == 0 and rt == 0:
+                print(f"      SCM max (after norm): {np.max(np.abs(scm)):.6e}")
+                print(f"      cpi_width: {cpi_width}")
 
             eigvals = eigen_decompose_descending(scm)      # (16,) linear, unnormalized
             diag_lin = np.real(np.diag(scm)).astype(np.float64)
