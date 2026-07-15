@@ -298,6 +298,9 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
     iqr_std_list = []       # IQR std dev for each CPI
     n_std_above_list = []   # Number of std devs above mean for max value
 
+    # DEBUG: Track first non-zero tile
+    first_nonzero_logged = False
+
     for pt in range(n_pt):
         ps = pt * cpi_len
         pe = ps + cpi_len
@@ -308,12 +311,17 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             cpi = data_block[ps:pe, rs:re]
             cpi_mask = None if mask_block is None else mask_block[ps:pe, rs:re]
 
-            # DEBUG: Check input data for first tile
-            if pt == 0 and rt == 0:
-                print(f"    [DEBUG] First CPI tile input:")
+            # DEBUG: Check input data for first tile AND first non-zero tile
+            cpi_is_zero = np.all(cpi == 0)
+            if (pt == 0 and rt == 0) or (not first_nonzero_logged and not cpi_is_zero):
+                if pt == 0 and rt == 0:
+                    print(f"    [DEBUG] First CPI tile (pt={pt}, rt={rt}):")
+                else:
+                    print(f"    [DEBUG] First non-zero CPI tile (pt={pt}, rt={rt}):")
+                    first_nonzero_logged = True
                 print(f"      CPI shape: {cpi.shape}")
                 print(f"      CPI max magnitude: {np.max(np.abs(cpi)):.6e}")
-                print(f"      CPI all zero: {np.all(cpi == 0)}")
+                print(f"      CPI all zero: {cpi_is_zero}")
                 if cpi_mask is not None:
                     print(f"      Mask valid fraction: {np.mean(cpi_mask):.2%}")
 
@@ -324,15 +332,15 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
                 diag_valid_ratio=diag_ratio,
             )
 
-            # DEBUG: Check SCM before normalization
-            if pt == 0 and rt == 0:
+            # DEBUG: Check SCM before normalization (only for logged tiles)
+            if (pt == 0 and rt == 0) or (not cpi_is_zero and not first_nonzero_logged):
                 print(f"      SCM max (before norm): {np.max(np.abs(scm)):.6e}")
 
             # Normalize SCM by number of range samples (CPI^H * CPI / 250)
             scm = scm / cpi_width
 
-            # DEBUG: Check SCM after normalization
-            if pt == 0 and rt == 0:
+            # DEBUG: Check SCM after normalization (only for logged tiles)
+            if (pt == 0 and rt == 0) or (not cpi_is_zero and not first_nonzero_logged):
                 print(f"      SCM max (after norm): {np.max(np.abs(scm)):.6e}")
                 print(f"      cpi_width: {cpi_width}")
 
@@ -547,6 +555,8 @@ def main():
             args.pulse_start, args.pulse_end, r0, r1))
         data_block = read_scene_block(rds, args.pulse_start, args.pulse_end, r0, r1, args.pulse_chunk)
         print("    Data block shape: {}".format(data_block.shape))
+        print("    [DEBUG] Data block max magnitude: {:.6e}, all_zero: {}".format(
+            np.max(np.abs(data_block)), np.all(data_block == 0)))
 
         # Compute validity mask if requested
         mask_block = None
