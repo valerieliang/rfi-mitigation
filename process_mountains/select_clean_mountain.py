@@ -347,6 +347,10 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             eigvals = eigen_decompose_descending(scm)      # (16,) linear, unnormalized
             diag_lin = np.real(np.diag(scm)).astype(np.float64)
 
+            # Skip zero tiles (invalid/near-range data)
+            if np.max(np.abs(eigvals)) < EPS:
+                continue
+
             # DEBUG: Check for zero eigenvalues/diagonal
             if len(eig_lin_list) == 0:  # Only print for first clean tile
                 print(f"    [DEBUG] First clean tile at p={ps}, r={rs}:")
