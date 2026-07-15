@@ -155,24 +155,35 @@ def plot_grid(eig_db, diag_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol
         sel_chunk = sel[start_idx:end_idx]
         n_in_chunk = len(sel_chunk)
 
-        # Compute dynamic y-limits for this chunk based on 12 largest eigenvalues
+        # Compute dynamic y-limits for eigenvalues based on 12 largest eigenvalues
         eig_chunk_12 = eig_db[sel_chunk, :12]
-        diag_chunk_12 = np.sort(diag_db[sel_chunk, :])[:, ::-1][:, :12]  # Sort each CPI descending, take top 12
-        combined_12 = np.concatenate([eig_chunk_12.flatten(), diag_chunk_12.flatten()])
-        y_max = np.ceil(np.max(combined_12))
-        y_min = 0
+        eig_y_max = np.ceil(np.max(eig_chunk_12))
+        eig_y_min = 0
+
+        # Compute dynamic y-limits for SCM diagonal based on all values in chunk
+        diag_chunk = diag_db[sel_chunk, :]
+        diag_y_min = max(0, np.floor(np.min(diag_chunk)))
+        diag_y_max = np.ceil(np.max(diag_chunk))
 
         n_cols = 2  # Two columns: eigenvalue plot and SCM diagonal scatter plot
 
         fig, axes = plt.subplots(n_in_chunk, n_cols,
                                  figsize=(9.6, 1.9 * n_in_chunk),
-                                 squeeze=False, sharex=True, sharey=True)
+                                 squeeze=False, sharex=True, sharey=False)
 
         for k, cpi_i in enumerate(sel_chunk):
+            # Compute SCM diagonal statistics
+            diag_vals = diag[cpi_i]
+            diag_mean = np.mean(diag_vals)
+            diag_std = np.std(diag_vals)
+            diag_q25 = np.percentile(diag_vals, 25)
+            diag_q75 = np.percentile(diag_vals, 75)
+            diag_iqr = diag_q75 - diag_q25
+
             # Left column: eigenvalue plot
             ax_eig = axes[k][0]
             ax_eig.plot(x, eig[cpi_i], color="C0", lw=1.1)
-            ax_eig.set_ylim(y_min, y_max)
+            ax_eig.set_ylim(eig_y_min, eig_y_max)
             ax_eig.set_title("CPI {} Eigenvalues (p{}, r{})".format(
                 cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
             ax_eig.tick_params(labelsize=6)
@@ -181,9 +192,10 @@ def plot_grid(eig_db, diag_db, cpi_pulse_idx, cpi_range_idx, out_path, freq, pol
             # Right column: SCM diagonal scatter plot (in matrix diagonal order, not sorted)
             ax_diag = axes[k][1]
             ax_diag.scatter(x, diag[cpi_i], color="C3", s=15, alpha=0.7)
-            ax_diag.set_ylim(y_min, y_max)
-            ax_diag.set_title("CPI {} SCM Diagonal (p{}, r{})".format(
-                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i]), fontsize=7)
+            ax_diag.set_ylim(diag_y_min, diag_y_max)
+            ax_diag.set_title("CPI {} SCM Diag (p{}, r{}) | mean={:.1f} iqr={:.1f} std={:.1f}".format(
+                cpi_i, cpi_pulse_idx[cpi_i], cpi_range_idx[cpi_i],
+                diag_mean, diag_iqr, diag_std), fontsize=7)
             ax_diag.tick_params(labelsize=6)
             ax_diag.grid(True, alpha=0.3)
 

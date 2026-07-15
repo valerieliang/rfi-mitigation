@@ -321,6 +321,13 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             eigvals = eigen_decompose_descending(scm)      # (16,) linear, unnormalized
             diag_lin = np.real(np.diag(scm)).astype(np.float64)
 
+            # DEBUG: Check for zero eigenvalues/diagonal
+            if len(eig_lin_list) == 0:  # Only print for first clean tile
+                print(f"    [DEBUG] First clean tile at p={ps}, r={rs}:")
+                print(f"      SCM max: {np.max(np.abs(scm)):.6e}")
+                print(f"      Eigvals: {eigvals[:5]}")
+                print(f"      Diagonal: {diag_lin[:5]}")
+
             # Filter: only keep clean tiles using new IQR-based method
             is_clean, stats = is_clean_tile(
                 diag_lin,
@@ -346,6 +353,11 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
 
     eig_lin = np.stack(eig_lin_list)             # (N, 16)
     diag_lin = np.stack(diag_lin_list)           # (N, 16)
+
+    # DEBUG: Check if stacked arrays are non-zero
+    print(f"    [DEBUG] After stacking {len(eig_lin_list)} clean tiles:")
+    print(f"      eig_lin max: {np.max(eig_lin):.6e}, all_zero: {np.all(eig_lin == 0)}")
+    print(f"      diag_lin max: {np.max(diag_lin):.6e}, all_zero: {np.all(diag_lin == 0)}")
 
     return {
         "eig_lin": eig_lin,
