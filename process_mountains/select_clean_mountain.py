@@ -172,7 +172,7 @@ def eigvals_to_db(eigvals: np.ndarray) -> np.ndarray:
 # CLEAN TILE SELECTION
 # ---------------------------------------------------------------------------
 
-def is_clean_tile(diag_lin: np.ndarray, n_keep: int = N_KEEP_DEFAULT, threshold_db: float = 5.0) -> bool:
+def is_clean_tile(diag_lin: np.ndarray, n_keep: int = N_KEEP_DEFAULT, threshold_db: float = 3.0) -> bool:
     """
     Determine if a CPI tile is "clean" based on SCM diagonal statistics.
 
@@ -184,7 +184,7 @@ def is_clean_tile(diag_lin: np.ndarray, n_keep: int = N_KEEP_DEFAULT, threshold_
         SCM diagonal in linear scale (unnormalized).
     n_keep : int, default 12
         Number of leading diagonal entries to inspect.
-    threshold_db : float, default 5.0
+    threshold_db : float, default 3.0
         Maximum allowed spread (in dB) between max and median.
 
     Returns
