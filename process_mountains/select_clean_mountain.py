@@ -379,7 +379,7 @@ def main():
 
     parser.add_argument('--n-keep', type=int, default=N_KEEP_DEFAULT,
                         help='Number of leading eigenvalues/diagonal entries to inspect for cleanliness.')
-    parser.add_argument('--threshold-db', type=float, default=5.0,
+    parser.add_argument('--threshold-db', type=float, default=3.0,
                         help='Max allowed spread (dB) between max and median of the top n_keep diagonal entries.')
 
     parser.add_argument('--output-h5', default='clean_mountains.h5',
