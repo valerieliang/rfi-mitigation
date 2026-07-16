@@ -93,11 +93,23 @@ Design decisions
    normalization, so a collapsed eigenvalue never reaches lambda_max, the dB
    floor, or the global features.
 4. Condition number (dB) and effective rank are BOTH computed from the kept 12
-   eigenvalues only, for every tile, clean or dithered alike, so the two global
-   features stay on a consistent basis.
+   eigenvalues only, for every tile, clean or dithered alike, so those two
+   global features stay on a consistent basis.
+5. The diagonal median/max ratio (see diag_median_max_ratio_feature) is
+   computed from ALL valid diagonal rows, not the kept 12 -- the diagonal
+   doesn't suffer the same dithering collapse the smallest eigenvalues do, so
+   there's no reason to truncate it. It exists to give the model a feature
+   that doesn't come from the eigenvalue shape at all, so a terrain-driven
+   eigenvalue knee (mountain backscatter) and an RFI-driven one (power piled
+   onto a few pulse rows) don't have to be told apart from the eigenvalue
+   profile alone.
 
-The model architecture is untouched. build_model is called with
+The eigen branch of the model is unchanged: build_model is still called with
 cpi_size = N_KEEP, which only sets the length of the eigen-branch input;
+n_knee_classes stays tied to the LABEL range, so truncating the features cannot
+silently reshape the output head. The global branch now takes N_GLOBAL = 3
+features (build_model's n_global_features is passed explicitly, so this needs
+no change in model.py itself).
 n_knee_classes stays tied to the LABEL range, so truncating the features cannot
 silently reshape the output head.
 
@@ -109,9 +121,20 @@ eigen_input  shape (N_KEEP, 2):
     channel 1 -- finite differences of channel 0 (slopes in dB per index),
                  zero-padded at index N_KEEP-1 so the tensor stays (N_KEEP, 2)
 
-global_input shape (2,):
-    0  condition_number_db -- ev_db[0] - ev_db[N_KEEP-1], over the kept 12
-    1  eff_rank            -- Shannon-entropy effective rank, over the kept 12
+global_input shape (3,):
+    0  condition_number_db     -- ev_db[0] - ev_db[N_KEEP-1], over the kept 12
+    1  eff_rank                -- Shannon-entropy effective rank, over the kept 12
+    2  diag_median_max_ratio   -- median(valid SCM diagonal) / max(valid SCM
+                                 diagonal), linear scale, over ALL valid rows
+                                 (not just the kept 12). Close to 1 for a flat
+                                 diagonal, well below 1 (~0.3 in heavily
+                                 contaminated tiles) when RFI concentrates
+                                 power on a few pulse rows. Added specifically
+                                 to keep mountain terrain's own eigenvalue
+                                 structure from being read as an RFI knee: a
+                                 terrain-driven elevated eigenvalue need not
+                                 come with the same diagonal-domain peakiness
+                                 that RFI produces.
 
 Train / val split
 -----------------
@@ -169,7 +192,7 @@ MODELS_ROOT = 'models'
 
 M = 16                 # pulses per CPI = number of eigenvalues available
 N_KEEP = 12            # eigenvalues actually used as features (the 12 largest)
-N_GLOBAL = 2           # global features: [condition_number_db, eff_rank]
+N_GLOBAL = 3           # global features: [condition_number_db, eff_rank, diag_median_max_ratio]
 
 # Permissive gap-exclusion ratios the generating run is expected to have used.
 # Checked against the file attrs; the SCM itself is computed in the generator.
@@ -204,9 +227,57 @@ GROUP_OFFSET = 10_000_000
 # FEATURE EXTRACTION
 # ---------------------------------------------------------------------------
 
-def features_from_eigenvalues(eigvals_linear):
+def diag_median_max_ratio_feature(diag_lin, diag_valid_idx):
     """
-    Build the eigen and global feature tensors from LINEAR eigenvalues.
+    Ratio of the median VALID SCM diagonal entry to the max VALID entry, per
+    tile, on the LINEAR scale (independent of the eigenvalue normalization
+    elsewhere).
+
+    A flat diagonal -- power spread evenly across pulse rows -- gives a ratio
+    close to 1. RFI concentrated on one or a few rows pulls the max up sharply
+    while the median (dominated by the untouched rows) barely moves, so a
+    heavily contaminated tile can drop to roughly 0.3 or lower.
+
+    This exists specifically so the model has a feature that distinguishes a
+    true RFI-driven eigenvalue "knee" -- power piled onto a handful of pulse
+    rows -- from an eigenvalue shape that merely LOOKS like a knee because of
+    mountain terrain's own backscatter structure, which the eigenvalue
+    profile alone doesn't always separate cleanly.
+
+    Args:
+        diag_lin (np.ndarray): (M,) or (N, M) linear SCM diagonal.
+        diag_valid_idx (np.ndarray): (M,) or (N, M) bool, same shape.
+
+    Returns:
+        ratio (float or np.ndarray): scalar or (N,) float32, in (0, 1].
+            Defaults to the neutral value 1.0 for a tile with fewer than 2
+            valid diagonal entries, since there isn't enough there to report
+            a meaningful spread and a neutral value keeps that tile from
+            injecting a spurious low-ratio "RFI-like" signal.
+    """
+    single = (np.asarray(diag_lin).ndim == 1)
+    diag = np.atleast_2d(np.asarray(diag_lin, dtype=np.float64))
+    valid = np.atleast_2d(np.asarray(diag_valid_idx, dtype=bool))
+
+    masked = np.where(valid, diag, np.nan)
+    n_valid = valid.sum(axis=1)
+
+    with np.errstate(invalid='ignore'):
+        vmax = np.nanmax(masked, axis=1)
+        vmed = np.nanmedian(masked, axis=1)
+
+    ratio = np.where(n_valid >= 2, vmed / np.maximum(vmax, EPS), 1.0)
+    ratio = ratio.astype(np.float32)
+
+    if single:
+        return float(ratio[0])
+    return ratio
+
+
+def features_from_eigenvalues(eigvals_linear, diag_lin, diag_valid_idx):
+    """
+    Build the eigen and global feature tensors from LINEAR eigenvalues plus
+    the LINEAR SCM diagonal.
 
     Single place the N_KEEP truncation and normalization order are defined, so
     train and test features are guaranteed identical.
@@ -221,12 +292,18 @@ def features_from_eigenvalues(eigvals_linear):
       3. Convert to dB. Channel 0 therefore always starts at exactly 0 dB.
       4. Slopes = finite differences of the dB profile, zero-padded to N_KEEP.
       5. Condition number and effective rank from the SAME kept 12.
+      6. Diagonal median/max ratio (see diag_median_max_ratio_feature), over
+         ALL valid diagonal rows -- not truncated to N_KEEP, since the
+         diagonal isn't subject to the same dithering collapse the smallest
+         eigenvalues are.
 
     A gap-excluded SCM can be slightly indefinite (entries with too little valid
     overlap are zeroed), so eigenvalues are clipped at EPS before the log.
 
     Args:
         eigvals_linear (np.ndarray): (M,) or (N, M) real eigenvalues, descending.
+        diag_lin (np.ndarray): (M,) or (N, M) linear SCM diagonal, same tiles.
+        diag_valid_idx (np.ndarray): (M,) or (N, M) bool, same shape as diag_lin.
 
     Returns:
         eigen (np.ndarray): (N_KEEP, 2) or (N, N_KEEP, 2), float32.
@@ -259,7 +336,11 @@ def features_from_eigenvalues(eigvals_linear):
     p = np.maximum(p, EPS)
     eff_rank = np.exp(-np.sum(p * np.log(p), axis=1))
 
-    global_ = np.stack([cond_db, eff_rank], axis=-1).astype(np.float32)
+    # 6. Diagonal median/max ratio, over all valid rows
+    diag_ratio = diag_median_max_ratio_feature(diag_lin, diag_valid_idx)
+    diag_ratio = np.atleast_1d(np.asarray(diag_ratio, dtype=np.float64))
+
+    global_ = np.stack([cond_db, eff_rank, diag_ratio], axis=-1).astype(np.float32)
 
     if single:
         return eigen[0], global_[0]
@@ -423,7 +504,7 @@ def load_rfi_data_dir(data_dirs, max_samples=None, tag=''):
                 diag = np.asarray(f['diagonal'][sel], dtype=np.float64)
                 diag_valid = np.asarray(f['diag_valid_idx'][sel], dtype=bool)
 
-                eigen, global_ = features_from_eigenvalues(eigvals)
+                eigen, global_ = features_from_eigenvalues(eigvals, diag, diag_valid)
 
                 eigen_parts.append(eigen)
                 global_parts.append(global_)
@@ -640,8 +721,12 @@ def load_paired_test_dir(test_dir, tag=''):
             idx_clean = np.where(is_clean)[0][order_clean]
             idx_contam = np.where(is_contam)[0][order_contam]
 
-            eigen_c, global_c = features_from_eigenvalues(eigvals[idx_clean])
-            eigen_x, global_x = features_from_eigenvalues(eigvals[idx_contam])
+            eigen_c, global_c = features_from_eigenvalues(
+                eigvals[idx_clean], diag[idx_clean], diag_valid[idx_clean]
+            )
+            eigen_x, global_x = features_from_eigenvalues(
+                eigvals[idx_contam], diag[idx_contam], diag_valid[idx_contam]
+            )
 
             clean['eigen'].append(eigen_c)
             clean['global'].append(global_c)

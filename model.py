@@ -9,8 +9,10 @@ Key features:
   1. Residual skip connection in conv blocks for gradient flow.
   2. Conv branch consumes the FULL eigenvalue profile (M values) plus the
      full slope profile (M-1 values) as two channels.
-  3. Global branch accepts normalized context features:
-     [condition_number, sigma_min, sigma_max, mu_min, f_factor].
+  3. Global branch accepts n_global_features scalar context features. The
+     caller defines what these are (train_db.py currently passes 3:
+     [condition_number_db, effective_rank, diag_median_max_ratio]); this
+     module makes no assumption about their identity, only their count.
   4. Eigenvalues are NORMALIZED to [0, 1] by dividing by max eigenvalue for
      scale invariance across different SNR levels.
   5. Output head is softmax over knee indices [0, M], producing a full
@@ -85,9 +87,11 @@ def build_model(
     cpi_size : int
         Number of pulses per CPI (M). Eigenvalue profile length.
     n_global_features : int
-        Number of scalar context features per CPI. Current set (normalized):
-        [condition_number, sigma_min, sigma_max, mu_min, f_factor].
-        All features except condition_number and f_factor are normalized by max eigenvalue.
+        Number of scalar context features per CPI. train_db.py currently
+        passes 3: [condition_number_db, effective_rank, diag_median_max_ratio],
+        but this module treats it purely as a shape parameter -- the Dense
+        input layer sizes to whatever is passed, with no assumption about
+        which features they are.
     n_knee_classes : int or None
         Number of output classes for the knee index. Defaults to cpi_size + 1
         so that index 0 means "no RFI present" and indices 1..M mean
