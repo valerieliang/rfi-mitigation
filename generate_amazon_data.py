@@ -109,6 +109,13 @@ By default only compact per-tile records are stored (about 100 bytes/tile):
                                                 clean tile
     band_rows       int8      (N, max_bands)    local pulse row per band, -1 pad
     eigenvalues     float32   (N, cpi_len)      descending, LINEAR scale
+    diagonal        float32   (N, cpi_len)      SCM diagonal, LINEAR scale,
+                                                unnormalized power per pulse row.
+                                                RFI shows up as a jump on the
+                                                injected row(s); a clean row is
+                                                comparatively flat.
+    diag_valid_idx  bool      (N, cpi_len)      per-index diagonal validity mask
+                                                (True = enough non-gap samples)
     signal_power_db float32   (N,)              tile baseline power, 10*log10
     valid_fraction  float32   (N,)              fraction of valid samples
     tile_pulse      int32     (N,)              absolute pulse index of tile row 0
@@ -358,18 +365,27 @@ def compute_gap_exclusion_cov(
 
 def compute_scm_and_eigs(cpi, cpi_mask, off_diag_overlap_ratio, diag_valid_ratio):
     """
-    Compute the SCM and its descending LINEAR eigenvalues for one CPI tile.
+    Compute the SCM, its descending LINEAR eigenvalues, its LINEAR diagonal,
+    and the per-index diagonal validity mask for one CPI tile.
 
     Uses the gap-exclusion covariance when a mask is supplied, otherwise the
     plain (M @ M^H) / K estimate.
+
+    The diagonal is the entry-level counterpart to the eigenvalue profile: RFI
+    shows up as a jump in specific pulse rows of the diagonal, whereas a clean
+    tile's diagonal stays comparatively flat across rows. diag_valid_idx marks
+    which rows had enough non-gap samples to be trusted, so a downstream jump
+    metric can skip entries that are invalid rather than real.
 
     Returns
     -------
     scm : (M, M) complex64
     eigvals : (M,) float32, descending, linear scale
+    diag_lin : (M,) float64, linear scale, unnormalized power per pulse row
+    diag_valid_idx : (M,) bool
     """
     if cpi_mask is not None:
-        scm, _ = compute_gap_exclusion_cov(
+        scm, diag_valid_idx = compute_gap_exclusion_cov(
             cpi,
             mask_valid_cpi=cpi_mask,
             off_diag_overlap_ratio=off_diag_overlap_ratio,
@@ -378,11 +394,14 @@ def compute_scm_and_eigs(cpi, cpi_mask, off_diag_overlap_ratio, diag_valid_ratio
     else:
         M, K = cpi.shape
         scm = ((cpi @ cpi.conj().T) / K).astype(np.complex64)
+        diag_valid_idx = np.ones(M, dtype=bool)
 
     eigvals = np.linalg.eigvalsh(scm)          # ascending, real
     eigvals = np.sort(eigvals)[::-1]           # descending
 
-    return scm, eigvals.astype(np.float32)
+    diag_lin = np.real(np.diag(scm)).astype(np.float64)
+
+    return scm, eigvals.astype(np.float32), diag_lin, diag_valid_idx
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +617,8 @@ class TileWriter:
         self.jsr_db = mk('jsr_db', (max_bands,), np.float32, 4096)
         self.band_rows = mk('band_rows', (max_bands,), np.int8, 4096)
         self.eigenvalues = mk('eigenvalues', (cpi_len,), np.float32, 2048)
+        self.diagonal = mk('diagonal', (cpi_len,), np.float32, 2048)
+        self.diag_valid_idx = mk('diag_valid_idx', (cpi_len,), bool, 2048)
         self.signal_power_db = mk('signal_power_db', (), np.float32, 4096)
         self.valid_fraction = mk('valid_fraction', (), np.float32, 4096)
         self.tile_pulse = mk('tile_pulse', (), np.int32, 4096)
@@ -611,6 +632,15 @@ class TileWriter:
         self.band_rows.attrs['description'] = 'local pulse row of each band, -1 padded'
         self.eigenvalues.attrs['description'] = (
             'SCM eigenvalues, descending, LINEAR scale (take 10*log10 for dB)'
+        )
+        self.diagonal.attrs['description'] = (
+            'SCM diagonal, LINEAR scale, unnormalized power per pulse row; '
+            'RFI tends to show up as a jump on the injected row(s), a clean '
+            'row is comparatively flat'
+        )
+        self.diag_valid_idx.attrs['description'] = (
+            'per-index bool mask: True where that diagonal entry had enough '
+            'valid (non-gap) samples to be trusted'
         )
 
         if save_cpi:
@@ -627,7 +657,7 @@ class TileWriter:
         else:
             self.cpi = None
 
-    def append(self, labels, jsr_db, band_rows, eigenvalues,
+    def append(self, labels, jsr_db, band_rows, eigenvalues, diagonal, diag_valid_idx,
                signal_power_db, valid_fraction, tile_pulse, tile_range, cpi=None):
         """Append one batch of tile records (arrays with a leading tile axis)."""
         m = len(labels)
@@ -638,6 +668,8 @@ class TileWriter:
             (self.jsr_db, jsr_db),
             (self.band_rows, band_rows),
             (self.eigenvalues, eigenvalues),
+            (self.diagonal, diagonal),
+            (self.diag_valid_idx, diag_valid_idx),
             (self.signal_power_db, signal_power_db),
             (self.valid_fraction, valid_fraction),
             (self.tile_pulse, tile_pulse),
@@ -699,6 +731,7 @@ def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
     f.attrs['diag_valid_ratio'] = args.diag_valid_ratio
 
     f.attrs['eigenvalue_scale'] = 'linear, descending'
+    f.attrs['diagonal_scale'] = 'linear, unnormalized'
     f.attrs['cpi_stored'] = bool(args.save_cpi)
     f.attrs['generated_utc'] = datetime.now(timezone.utc).isoformat()
 
@@ -802,6 +835,8 @@ def generate_dataset(raw, freq, pol, args, out_dir):
             b_jsr = np.full((n_batch, max_bands), np.nan, dtype=np.float32)
             b_rows = np.full((n_batch, max_bands), -1, dtype=np.int8)
             b_eigs = np.zeros((n_batch, cpi_len), dtype=np.float32)
+            b_diag = np.zeros((n_batch, cpi_len), dtype=np.float32)
+            b_diag_valid = np.zeros((n_batch, cpi_len), dtype=bool)
             b_sig = np.zeros(n_batch, dtype=np.float32)
             b_vfrac = np.zeros(n_batch, dtype=np.float32)
             b_pulse = np.zeros(n_batch, dtype=np.int32)
@@ -836,7 +871,7 @@ def generate_dataset(raw, freq, pol, args, out_dir):
                         args.jsr_min_db, args.jsr_max_db, tile_ss
                     )
 
-                    scm, eigvals = compute_scm_and_eigs(
+                    scm, eigvals, diag_lin, diag_valid_idx = compute_scm_and_eigs(
                         tile, cpi_mask,
                         args.off_diag_overlap_ratio,
                         args.diag_valid_ratio,
@@ -847,6 +882,8 @@ def generate_dataset(raw, freq, pol, args, out_dir):
                         b_jsr[k, bi] = band.jsr_db      # stays NaN for a clean tile
                         b_rows[k, bi] = band.local_row
                     b_eigs[k] = eigvals                 # linear scale, descending
+                    b_diag[k] = diag_lin                # linear scale, per pulse row
+                    b_diag_valid[k] = diag_valid_idx
                     b_sig[k] = meta.signal_power_db
                     b_vfrac[k] = meta.valid_fraction
                     b_pulse[k] = abs_p0
@@ -867,8 +904,8 @@ def generate_dataset(raw, freq, pol, args, out_dir):
 
                     k += 1
 
-            writer.append(b_labels, b_jsr, b_rows, b_eigs, b_sig, b_vfrac,
-                          b_pulse, b_range, cpi=b_cpi)
+            writer.append(b_labels, b_jsr, b_rows, b_eigs, b_diag, b_diag_valid,
+                          b_sig, b_vfrac, b_pulse, b_range, cpi=b_cpi)
 
             done = chunk_start_tile + n_tiles_here
             print(f"    pulse tiles {done}/{n_pulse_tiles}  ({writer.n} records written)")

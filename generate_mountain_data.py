@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-generate_mountain_rfi_data.py
+generate_mountain_data.py
 
 Build a labeled RFI training set by overlaying synthetic RFI bands onto the
 EXACT pulse tiles that select_clean_mountain.py / filter_clean_mountains.py
@@ -47,12 +47,21 @@ convention in generate_rfi_data.py.
 
 Usage
 -----
-    python generate_mountain_rfi_data.py clean_mountains_filtered.h5 granule.h5 \
+    # Training set: one record per tile, band count drawn from [0, 6]
+    python generate_mountain_data.py clean_mountains_filtered.h5 granule.h5 \
         --min-bands 0 --max-bands 6 \
         --jsr-min-db 3 --jsr-max-db 30 \
         --mask-mode subswath \
         --output-dir data/mountain_rfi_train \
         --seed 0
+
+    # Paired test set: two records per tile (clean + forced-RFI), same background
+    python generate_mountain_data.py clean_mountains_filtered.h5 granule.h5 \
+        --paired-test --max-bands 6 \
+        --jsr-min-db 3 --jsr-max-db 30 \
+        --mask-mode subswath \
+        --output-dir data/mountain_rfi_paired_test \
+        --seed 1
 """
 
 import os
@@ -415,7 +424,14 @@ class TileWriter:
         self.valid_fraction = mk('valid_fraction', (), np.float32, 4096)
         self.tile_pulse = mk('tile_pulse', (), np.int32, 4096)
         self.tile_range = mk('tile_range', (), np.int32, 4096)
+        self.pair_id = mk('pair_id', (), np.int32, 4096)
 
+        self.pair_id.attrs['description'] = (
+            'index into the source clean_mountains file for this tile. In '
+            '--paired-test mode the clean record and its contaminated '
+            'counterpart share the same pair_id, so they can be matched up '
+            'as the SAME background under the two conditions.'
+        )
         self.labels.attrs['description'] = 'knee: number of injected RFI bands (0 = clean)'
         self.jsr_db.attrs['description'] = (
             'per-band JSR in dB, each drawn uniformly from [jsr_min_db, jsr_max_db]; '
@@ -448,7 +464,7 @@ class TileWriter:
             self.cpi = None
 
     def append(self, labels, jsr_db, band_rows, eigenvalues, diagonal, diag_valid_idx,
-               signal_power_db, valid_fraction, tile_pulse, tile_range, cpi=None):
+               signal_power_db, valid_fraction, tile_pulse, tile_range, pair_id, cpi=None):
         """Append one batch of tile records (arrays with a leading tile axis)."""
         m = len(labels)
         new_n = self.n + m
@@ -464,6 +480,7 @@ class TileWriter:
             (self.valid_fraction, valid_fraction),
             (self.tile_pulse, tile_pulse),
             (self.tile_range, tile_range),
+            (self.pair_id, pair_id),
         ):
             dset.resize(new_n, axis=0)
             dset[self.n:new_n] = arr
@@ -514,6 +531,15 @@ def write_root_attrs(f, args, freq, pol, source_group, n_tiles, cpi_len, cpi_wid
 
     f.attrs['eigenvalue_scale'] = 'linear, descending'
     f.attrs['diagonal_scale'] = 'linear, unnormalized'
+    f.attrs['paired_test'] = bool(args.paired_test)
+    if args.paired_test:
+        f.attrs['paired_test_scheme'] = (
+            'each source tile (pair_id) produced exactly 2 records: one '
+            'untouched (label 0) and one with RFI forced (label >= 1, '
+            'band count drawn from [max(min_bands,1), max_bands]), both from '
+            'the identical raw CPI. Match rows by pair_id to compare behavior '
+            'on the same background clean vs contaminated.'
+        )
     f.attrs['cpi_stored'] = bool(args.save_cpi)
     f.attrs['generated_utc'] = datetime.now(timezone.utc).isoformat()
 
@@ -522,11 +548,52 @@ def write_root_attrs(f, args, freq, pol, source_group, n_tiles, cpi_len, cpi_wid
 # SET GENERATION
 # ---------------------------------------------------------------------------
 
+def _build_record(tile, meta, cpi_mask, cpi_width, args, pair_id, p0, r0):
+    """Compute features for one (tile, meta) pair and return the append() kwargs."""
+    eigvals, diag_lin, diag_valid_idx = compute_scm_eigs_and_diag(
+        tile, cpi_mask, cpi_width,
+        args.off_diag_overlap_ratio, args.diag_valid_ratio,
+    )
+
+    jsr_row = np.full(args.max_bands, np.nan, dtype=np.float32)
+    rows_row = np.full(args.max_bands, -1, dtype=np.int8)
+    for bi, band in enumerate(meta.bands):
+        jsr_row[bi] = band.jsr_db
+        rows_row[bi] = band.local_row
+
+    return dict(
+        labels=np.array([meta.knee], dtype=np.int8),
+        jsr_db=jsr_row[None, :],
+        band_rows=rows_row[None, :],
+        eigenvalues=eigvals[None, :],
+        diagonal=diag_lin.astype(np.float32)[None, :],
+        diag_valid_idx=diag_valid_idx[None, :],
+        signal_power_db=np.array([meta.signal_power_db], dtype=np.float32),
+        valid_fraction=np.array([meta.valid_fraction], dtype=np.float32),
+        tile_pulse=np.array([p0], dtype=np.int32),
+        tile_range=np.array([r0], dtype=np.int32),
+        pair_id=np.array([pair_id], dtype=np.int32),
+        cpi=tile[None, ...] if args.save_cpi else None,
+    )
+
+
 def generate_dataset_for_group(raw, freq, pol, grp_name, pulse_idx, range_idx,
                                 cpi_len, cpi_width, args, out_dir):
     """
     Inject RFI onto every tile location listed for one freq_X_pol_Y group of
     the clean-mountain source file, and write the labeled records to HDF5.
+
+    Default mode: one record per tile, band count drawn from
+    [min_bands, max_bands] (0 = clean, interspersed at random) -- suitable
+    for training.
+
+    --paired-test mode: two records per tile, both from the IDENTICAL raw
+    CPI: one left untouched (label 0) and one with RFI forced onto it (band
+    count drawn from [max(min_bands, 1), max_bands], so it is never 0). Both
+    records share the same pair_id, so a downstream consumer can evaluate the
+    model (and any diagonal-based metric) on the very same background clean
+    vs. contaminated, rather than on two different tiles that happen to have
+    drawn different band counts.
 
     Returns
     -------
@@ -535,9 +602,12 @@ def generate_dataset_for_group(raw, freq, pol, grp_name, pulse_idx, range_idx,
     """
     chan = channel_id(freq, pol)
     n_tiles = len(pulse_idx)
+    paired = bool(args.paired_test)
 
-    out_path = os.path.join(out_dir, f"mountain_rfi_data_{freq}_{pol}.h5")
-    print(f"\n[{freq}-{pol}] source group: {grp_name}  ({n_tiles} clean tiles)")
+    suffix = '_paired' if paired else ''
+    out_path = os.path.join(out_dir, f"mountain_rfi_data{suffix}_{freq}_{pol}.h5")
+    print(f"\n[{freq}-{pol}] source group: {grp_name}  ({n_tiles} clean tiles)"
+          + ("  [paired-test mode]" if paired else ""))
     print(f"  -> {out_path}")
 
     use_mask = args.mask_mode != 'none'
@@ -565,38 +635,36 @@ def generate_dataset_for_group(raw, freq, pol, grp_name, pulse_idx, range_idx,
             pulse_tile = p0 // cpi_len
             range_tile = r0 // cpi_width
             tile_ss = make_tile_seed_seq(args.seed, chan, pulse_tile, range_tile)
-            n_bands = draw_n_bands(tile_ss, args.min_bands, args.max_bands)
 
-            tile, meta = inject_rfi_bands(
+            # In paired-test mode the contaminated copy must never draw 0
+            # bands, or it would be indistinguishable from its own clean
+            # counterpart. The draw still comes from tile_ss, so it stays
+            # reproducible per tile.
+            contam_min_bands = max(args.min_bands, 1) if paired else args.min_bands
+            n_bands = draw_n_bands(tile_ss, contam_min_bands, args.max_bands)
+
+            tiles_metas = []
+
+            if paired:
+                # Untouched copy of the identical raw tile. n_bands=0 returns
+                # immediately inside inject_rfi_bands without touching
+                # tile_ss's random stream, so calling it here does not
+                # perturb the contaminated draw below.
+                clean_tile, clean_meta = inject_rfi_bands(
+                    cpi, cpi_mask, 0, args.jsr_min_db, args.jsr_max_db, tile_ss
+                )
+                tiles_metas.append((clean_tile, clean_meta))
+
+            contam_tile, contam_meta = inject_rfi_bands(
                 cpi, cpi_mask, n_bands, args.jsr_min_db, args.jsr_max_db, tile_ss
             )
+            tiles_metas.append((contam_tile, contam_meta))
 
-            eigvals, diag_lin, diag_valid_idx = compute_scm_eigs_and_diag(
-                tile, cpi_mask, cpi_width,
-                args.off_diag_overlap_ratio, args.diag_valid_ratio,
-            )
-
-            jsr_row = np.full(args.max_bands, np.nan, dtype=np.float32)
-            rows_row = np.full(args.max_bands, -1, dtype=np.int8)
-            for bi, band in enumerate(meta.bands):
-                jsr_row[bi] = band.jsr_db
-                rows_row[bi] = band.local_row
-
-            writer.append(
-                labels=np.array([meta.knee], dtype=np.int8),
-                jsr_db=jsr_row[None, :],
-                band_rows=rows_row[None, :],
-                eigenvalues=eigvals[None, :],
-                diagonal=diag_lin.astype(np.float32)[None, :],
-                diag_valid_idx=diag_valid_idx[None, :],
-                signal_power_db=np.array([meta.signal_power_db], dtype=np.float32),
-                valid_fraction=np.array([meta.valid_fraction], dtype=np.float32),
-                tile_pulse=np.array([p0], dtype=np.int32),
-                tile_range=np.array([r0], dtype=np.int32),
-                cpi=tile[None, ...] if args.save_cpi else None,
-            )
-
-            knee_counts[meta.knee] = knee_counts.get(meta.knee, 0) + 1
+            for tile, meta in tiles_metas:
+                kwargs = _build_record(tile, meta, cpi_mask, cpi_width, args,
+                                       pair_id=i, p0=p0, r0=r0)
+                writer.append(**kwargs)
+                knee_counts[meta.knee] = knee_counts.get(meta.knee, 0) + 1
 
             if (i + 1) % report_every == 0 or (i + 1) == n_tiles:
                 print(f"    {i + 1}/{n_tiles} tiles processed ({writer.n} records written)")
@@ -650,6 +718,14 @@ def parse_args():
     parser.add_argument('--save-cpi', action='store_true',
                         help='Also store the raw complex CPI tiles (RFI already overlaid).')
 
+    parser.add_argument('--paired-test', action='store_true',
+                        help='Generate a PAIRED test set instead of a training set: for '
+                             'every clean tile, write both an untouched copy (label 0) and '
+                             'a forced-contaminated copy (label >= 1) of the IDENTICAL raw '
+                             'CPI, sharing a pair_id. Use this output with train_db.py '
+                             '--paired-test-dir to compare model (and diagonal-metric) '
+                             'behavior on the same background clean vs. contaminated.')
+
     parser.add_argument('--seed', type=int, default=SEED_DEFAULT,
                         help='Master seed for all RFI injection streams.')
 
@@ -663,17 +739,30 @@ def main():
         raise ValueError('Require 0 <= min_bands <= max_bands')
     if args.jsr_max_db < args.jsr_min_db:
         raise ValueError('Require jsr_min_db <= jsr_max_db')
+    if args.paired_test and args.max_bands < 1:
+        raise ValueError(
+            'max_bands must be >= 1 in --paired-test mode: the contaminated '
+            'copy of each tile is forced to draw at least 1 band'
+        )
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     print('=' * 70)
-    print('Mountain-tile RFI training set generation')
-    print('(RFI injected onto the exact tiles select_clean_mountain.py found clean)')
+    if args.paired_test:
+        print('Mountain-tile PAIRED test set generation')
+        print('(each clean tile -> one untouched record + one forced-RFI record, same pair_id)')
+    else:
+        print('Mountain-tile RFI training set generation')
+        print('(RFI injected onto the exact tiles select_clean_mountain.py found clean)')
     print('=' * 70)
     print(f'  clean tiles from : {args.clean_h5}')
     print(f'  source granule   : {args.l0b_file}')
-    print(f'  bands per tile   : {args.min_bands}..{args.max_bands} '
-          f'(label = drawn count; 0 = clean, interspersed at random)')
+    if args.paired_test:
+        print(f'  bands per tile   : untouched (0) paired with '
+              f'{max(args.min_bands, 1)}..{args.max_bands} (forced RFI)')
+    else:
+        print(f'  bands per tile   : {args.min_bands}..{args.max_bands} '
+              f'(label = drawn count; 0 = clean, interspersed at random)')
     print(f'  JSR              : [{args.jsr_min_db}, {args.jsr_max_db}] dB above tile baseline power')
     print(f'  mask mode        : {args.mask_mode}')
     print(f'  save CPI         : {args.save_cpi}')
