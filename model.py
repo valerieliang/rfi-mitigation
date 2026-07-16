@@ -78,6 +78,7 @@ def build_model(
     n_knee_classes=None,
     dropout_rate=0.5,
     learning_rate=3e-4,
+    weight_decay=1e-4,
 ):
     """
     Build the two-branch knee-index classifier.
@@ -100,7 +101,9 @@ def build_model(
         Dropout in the dense head.
     learning_rate : float
         Adam learning rate.
- 
+    weight_decay : float
+        L2 regularization strength (AdamW weight decay).
+
     Inputs
     ------
     eigen_input  : (cpi_size, 2)  channels = [eigenvalues_normalized, slopes_normalized_padded]
@@ -142,7 +145,7 @@ def build_model(
  
     model = Model(inputs=[eigen_inputs, global_inputs], outputs=outputs)
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate),
+        optimizer=tf.keras.optimizers.AdamW(learning_rate=learning_rate, weight_decay=weight_decay),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
         metrics=[
             tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
