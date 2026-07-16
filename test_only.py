@@ -206,7 +206,7 @@ def load_synthetic_data(data_dir):
             labels_pol = f['labels'][:]
 
             # Preprocess raw eigenvalues into model features
-            eigen_feat, global_feat = preprocess_eigenvalues_to_model_inputs(
+            eigen_feat, global_feat = features_from_eigenvalues(
                 eigvals, diag, diag_valid_idx
             )
 
