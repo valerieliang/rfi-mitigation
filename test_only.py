@@ -973,6 +973,16 @@ def score_mountain_tiles(raw, freq, pol, model, args, tile_spec, ground_truth_la
     confidence = np.max(probs, axis=-1).astype(np.float32)
     entropy = (-np.sum(probs * np.log(probs + EPS), axis=-1)).astype(np.float32)
 
+    # Calculate pulse and range windows from tile specifications
+    p_start = int(pulse_tiles.min())
+    p_end = int(pulse_tiles.max()) + cpi_len
+    r_start = int(range_tiles.min())
+    r_end = int(range_tiles.max()) + cpi_width
+
+    # Calculate grid dimensions (approximate, since tiles may not be contiguous)
+    n_pt = len(np.unique(pulse_tiles))
+    n_rt = len(np.unique(range_tiles))
+
     return {
         'freq': freq,
         'pol': pol,
@@ -984,6 +994,10 @@ def score_mountain_tiles(raw, freq, pol, model, args, tile_spec, ground_truth_la
         'tile_pulse': pulse_tiles,
         'tile_range': range_tiles,
         'n_tiles': n_tiles,
+        'n_pt': n_pt,
+        'n_rt': n_rt,
+        'pulse_window': [p_start, p_end],
+        'range_window': [r_start, r_end],
         'n_classes': probs.shape[-1],
         'ground_truth_label': ground_truth_label,
     }
