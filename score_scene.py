@@ -106,13 +106,87 @@ from generate_amazon_data import (  # noqa: E402
     DIAG_VALID_RATIO_DEFAULT,
     PULSE_CHUNK_DEFAULT,
 )
-from train_db import features_from_eigenvalues, N_KEEP  # noqa: E402
-
 from nisar.products.readers.Raw import Raw  # noqa: E402
 
 
 EPS = 1e-12
-M = 16  # eigenvalues per CPI
+M = 16                 # pulses per CPI = number of eigenvalues available
+N_KEEP = 12            # eigenvalues actually used as features (the 12 largest)
+N_GLOBAL = 3           # global features: [condition_number_db, eff_rank, diag_median_max_ratio]
+DB_FLOOR = -100.0      # floor for dB values
+
+
+# ---------------------------------------------------------------------------
+# FEATURE EXTRACTION (from train_only.py)
+# ---------------------------------------------------------------------------
+
+def diag_median_max_ratio_feature(diag_lin, diag_valid_idx):
+    """
+    Ratio of the median VALID SCM diagonal entry to the max VALID entry, per
+    tile, on the LINEAR scale.
+    """
+    single = (np.asarray(diag_lin).ndim == 1)
+    diag = np.atleast_2d(np.asarray(diag_lin, dtype=np.float64))
+    valid = np.atleast_2d(np.asarray(diag_valid_idx, dtype=bool))
+
+    masked = np.where(valid, diag, np.nan)
+    n_valid = valid.sum(axis=1)
+
+    with np.errstate(invalid='ignore'):
+        vmax = np.nanmax(masked, axis=1)
+        vmed = np.nanmedian(masked, axis=1)
+
+    ratio = np.where(n_valid >= 2, vmed / np.maximum(vmax, EPS), 1.0)
+    ratio = ratio.astype(np.float32)
+
+    if single:
+        return float(ratio[0])
+    return ratio
+
+
+def features_from_eigenvalues(eigvals_linear, diag_lin, diag_valid_idx):
+    """
+    Build the eigen and global feature tensors from LINEAR eigenvalues plus
+    the LINEAR SCM diagonal.
+
+    This matches the signature from train_only.py and generate_amazon_data.py.
+    """
+    single = (np.asarray(eigvals_linear).ndim == 1)
+    ev = np.atleast_2d(np.asarray(eigvals_linear, dtype=np.float64))
+
+    # 1. Keep the 12 largest, drop the 4 dithering-exposed smallest
+    ev = ev[:, :N_KEEP]
+
+    # 2. Linear normalization by lambda_max (per tile)
+    ev = np.maximum(ev, EPS)
+    lam_max = np.maximum(ev[:, :1], EPS)
+    ev_norm = ev / lam_max
+
+    # 3. dB
+    ev_db = 10.0 * np.log10(np.maximum(ev_norm, EPS))
+    ev_db = np.maximum(ev_db, DB_FLOOR)
+
+    # 4. Slopes, zero-padded so the tensor stays (N_KEEP, 2)
+    slopes = np.diff(ev_db, axis=1)
+    slopes = np.concatenate([slopes, np.zeros((ev_db.shape[0], 1))], axis=1)
+    eigen = np.stack([ev_db, slopes], axis=-1).astype(np.float32)
+
+    # 5. Global features, both over the kept 12 only
+    cond_db = ev_db[:, 0] - np.maximum(ev_db[:, -1], DB_FLOOR)
+
+    p = ev / np.maximum(ev.sum(axis=1, keepdims=True), EPS)
+    p = np.maximum(p, EPS)
+    eff_rank = np.exp(-np.sum(p * np.log(p), axis=1))
+
+    # 6. Diagonal median/max ratio, over all valid rows
+    diag_ratio = diag_median_max_ratio_feature(diag_lin, diag_valid_idx)
+    diag_ratio = np.atleast_1d(np.asarray(diag_ratio, dtype=np.float64))
+
+    global_ = np.stack([cond_db, eff_rank, diag_ratio], axis=-1).astype(np.float32)
+
+    if single:
+        return eigen[0], global_[0]
+    return eigen, global_
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +276,14 @@ def score_channel(raw, freq, pol, model, args):
                 cpi_mask = (np.ascontiguousarray(mask_chunk[lp0:lp1, lr0:lr1])
                             if mask_chunk is not None else None)
 
-                _, eigvals = compute_scm_and_eigs(
+                _, eigvals, diag_lin, diag_valid = compute_scm_and_eigs(
                     cpi, cpi_mask,
                     args.off_diag_overlap_ratio, args.diag_valid_ratio
                 )
 
-                eigen_all[k], global_all[k] = features_from_eigenvalues(eigvals)
+                eigen_all[k], global_all[k] = features_from_eigenvalues(
+                    eigvals, diag_lin, diag_valid
+                )
                 eigvals_all[k] = eigvals
                 power_db[k] = 10.0 * np.log10(tile_signal_power(cpi, cpi_mask))
                 valid_frac[k] = (float(cpi_mask.sum()) / cpi_mask.size
