@@ -28,7 +28,14 @@ py-isce3 test_only.py combined \\
     --data-dirs data/amazon_synthetic data/mountain_synthetic \\
     --output-dir results/combined_test
 
-# Amazon clean check
+# Amazon clean check (full extent)
+py-isce3 test_only.py amazon-clean \\
+    --model models/combined_amazon_mountain/best_model.keras \\
+    --nisar-file /path/to/amazon.h5 \\
+    --freq A \\
+    --output-dir results/amazon_clean
+
+# Amazon clean check (specific window)
 py-isce3 test_only.py amazon-clean \\
     --model models/combined_amazon_mountain/best_model.keras \\
     --nisar-file /path/to/amazon.h5 \\
@@ -44,7 +51,15 @@ py-isce3 test_only.py mountains-clean \\
     --nisar-file /path/to/berlin.h5 \\
     --output-dir results/mountains_clean
 
-# Score scene (no ground truth)
+# Score scene (no ground truth, full extent)
+py-isce3 test_only.py score-scene \\
+    --model models/combined_amazon_mountain/best_model.keras \\
+    --nisar-file /path/to/scene.h5 \\
+    --freq A --pol HH \\
+    --save-predictions --save-confidence --save-profiles --save-diagnostics \\
+    --output-dir results/scene_score
+
+# Score scene (no ground truth, specific window)
 py-isce3 test_only.py score-scene \\
     --model models/combined_amazon_mountain/best_model.keras \\
     --nisar-file /path/to/scene.h5 \\
@@ -495,8 +510,14 @@ def amazon_clean_check(model, args):
     print(f"{'='*70}")
     print(f"NISAR file: {args.nisar_file}")
     print(f"Frequency: {args.freq}")
-    print(f"Pulses: [{args.pulse_start}, {args.pulse_end})")
-    print(f"Range: [{args.range_start}, {args.range_end})")
+
+    pulse_str = (f"[{args.pulse_start if args.pulse_start is not None else 'full'}, "
+                 f"{args.pulse_end if args.pulse_end is not None else 'full'})")
+    print(f"Pulses: {pulse_str}")
+
+    rng_str = (f"[{args.range_start if args.range_start is not None else 'full'}, "
+               f"{args.range_end if args.range_end is not None else 'full'})")
+    print(f"Range: {rng_str}")
     print("\nASSUMPTION: Real data is CLEAN (label=0 ground truth)")
 
     raw = Raw(hdf5file=args.nisar_file)
@@ -574,10 +595,14 @@ def score_clean_channel(raw, freq, pol, model, args, ground_truth_label=0):
     dataset = raw.getRawDataset(freq, pol)
     total_pulses, total_range = dataset.shape
 
-    p_start = args.pulse_start
-    p_end = min(args.pulse_end, total_pulses)
-    r_start = args.range_start
-    r_end = min(args.range_end, total_range)
+    # Default to full extent if not specified
+    p_start = args.pulse_start if args.pulse_start is not None else 0
+    p_end = args.pulse_end if args.pulse_end is not None else total_pulses
+    p_end = min(p_end, total_pulses)
+
+    r_start = args.range_start if args.range_start is not None else 0
+    r_end = args.range_end if args.range_end is not None else total_range
+    r_end = min(r_end, total_range)
 
     n_pt = (p_end - p_start) // cpi_len
     n_rt = (r_end - r_start) // cpi_width
@@ -967,8 +992,14 @@ def score_scene_mode(model, args):
     print(f"{'='*70}")
     print(f"NISAR file: {args.nisar_file}")
     print(f"Frequency: {args.freq}, Polarization: {args.pol}")
-    print(f"Pulses: [{args.pulse_start}, {args.pulse_end})")
-    print(f"Range: [{args.range_start}, {args.range_end})")
+
+    pulse_str = (f"[{args.pulse_start if args.pulse_start is not None else 'full'}, "
+                 f"{args.pulse_end if args.pulse_end is not None else 'full'})")
+    print(f"Pulses: {pulse_str}")
+
+    rng_str = (f"[{args.range_start if args.range_start is not None else 'full'}, "
+               f"{args.range_end if args.range_end is not None else 'full'})")
+    print(f"Range: {rng_str}")
 
     raw = Raw(hdf5file=args.nisar_file)
     raw.parsePolarizations()
@@ -1263,10 +1294,14 @@ def parse_args():
     amazon.add_argument('--model', required=True, help='Trained Keras model')
     amazon.add_argument('--nisar-file', required=True, help='NISAR L0B file')
     amazon.add_argument('--freq', required=True, choices=['A', 'B'])
-    amazon.add_argument('--pulse-start', type=int, required=True)
-    amazon.add_argument('--pulse-end', type=int, required=True)
-    amazon.add_argument('--range-start', type=int, required=True)
-    amazon.add_argument('--range-end', type=int, required=True)
+    amazon.add_argument('--pulse-start', type=int, default=None,
+                       help='Default: 0 (start of acquisition)')
+    amazon.add_argument('--pulse-end', type=int, default=None,
+                       help='Default: full pulse extent')
+    amazon.add_argument('--range-start', type=int, default=None,
+                       help='Default: 0 (start of swath)')
+    amazon.add_argument('--range-end', type=int, default=None,
+                       help='Default: full range extent')
     amazon.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT)
     amazon.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
     amazon.add_argument('--pulse-chunk', type=int, default=PULSE_CHUNK_DEFAULT)
@@ -1302,10 +1337,14 @@ def parse_args():
     scene.add_argument('--nisar-file', required=True, help='NISAR L0B file')
     scene.add_argument('--freq', required=True, choices=['A', 'B'])
     scene.add_argument('--pol', required=True, help='Polarization (e.g. HH, HV)')
-    scene.add_argument('--pulse-start', type=int, required=True)
-    scene.add_argument('--pulse-end', type=int, required=True)
-    scene.add_argument('--range-start', type=int, required=True)
-    scene.add_argument('--range-end', type=int, required=True)
+    scene.add_argument('--pulse-start', type=int, default=None,
+                      help='Default: 0 (start of acquisition)')
+    scene.add_argument('--pulse-end', type=int, default=None,
+                      help='Default: full pulse extent')
+    scene.add_argument('--range-start', type=int, default=None,
+                      help='Default: 0 (start of swath)')
+    scene.add_argument('--range-end', type=int, default=None,
+                      help='Default: full range extent')
     scene.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT)
     scene.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
     scene.add_argument('--pulse-chunk', type=int, default=PULSE_CHUNK_DEFAULT)

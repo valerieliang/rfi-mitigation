@@ -61,10 +61,20 @@ extra suspicion.
 
 Usage
 -----
+    # Process full granule extent
+    py-isce3 score_scene.py \\
+        /scratch/bohuang/rfi/la/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5 \\
+        --model models/rfi_train/best_model.keras \\
+        --compute-subswath-mask \\
+        --off-diag-overlap-ratio 0.03 --diag-valid-ratio 0.02 \\
+        --output-dir results/la_scene
+
+    # Process specific pulse/range window
     py-isce3 score_scene.py \\
         /scratch/bohuang/rfi/la/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5 \\
         --model models/rfi_train/best_model.keras \\
         --pulse-start 46528 --pulse-end 124580 \\
+        --range-start 0 --range-end 25600 \\
         --compute-subswath-mask \\
         --off-diag-overlap-ratio 0.03 --diag-valid-ratio 0.02 \\
         --output-dir results/la_scene
@@ -218,14 +228,16 @@ def score_channel(raw, freq, pol, model, args):
     dataset = raw.getRawDataset(freq, pol)
     total_pulses, total_range = dataset.shape
 
-    p_start = args.pulse_start
-    p_end = min(args.pulse_end, total_pulses)
+    # Default to full extent if not specified
+    p_start = args.pulse_start if args.pulse_start is not None else 0
+    p_end = args.pulse_end if args.pulse_end is not None else total_pulses
+    p_end = min(p_end, total_pulses)
 
     # No range window given -> process the full swath width. Only whole CPI tiles
     # are scored, so a trailing partial tile at the far edge is dropped.
     r_start = args.range_start if args.range_start is not None else 0
-    r_end = (min(args.range_end, total_range) if args.range_end is not None
-             else total_range)
+    r_end = (args.range_end if args.range_end is not None else total_range)
+    r_end = min(r_end, total_range)
 
     n_pt = (p_end - p_start) // cpi_len
     n_rt = (r_end - r_start) // cpi_width
@@ -848,8 +860,10 @@ def parse_args():
     parser.add_argument('--pol', default=None,
                         help='Default: every polarization in the granule.')
 
-    parser.add_argument('--pulse-start', type=int, required=True)
-    parser.add_argument('--pulse-end', type=int, required=True)
+    parser.add_argument('--pulse-start', type=int, default=None,
+                        help='Default: 0 (start of acquisition).')
+    parser.add_argument('--pulse-end', type=int, default=None,
+                        help='Default: the full pulse extent of the granule.')
     parser.add_argument('--range-start', type=int, default=None,
                         help='Default: 0 (start of the swath).')
     parser.add_argument('--range-end', type=int, default=None,
@@ -888,9 +902,13 @@ def main():
     print(f"{'='*70}")
     print(f"  granule : {args.l0b_file}")
     print(f"  model   : {args.model}")
-    print(f"  pulses  : [{args.pulse_start}, {args.pulse_end})")
-    rng_str = (f"[{args.range_start if args.range_start is not None else 0}, "
-               f"{args.range_end if args.range_end is not None else 'full swath'})")
+
+    pulse_str = (f"[{args.pulse_start if args.pulse_start is not None else 'full'}, "
+                 f"{args.pulse_end if args.pulse_end is not None else 'full'})")
+    print(f"  pulses  : {pulse_str}")
+
+    rng_str = (f"[{args.range_start if args.range_start is not None else 'full'}, "
+               f"{args.range_end if args.range_end is not None else 'full'})")
     print(f"  range   : {rng_str}")
     print(f"  features: top {N_KEEP} eigenvalues, gap_exclusion="
           f"{args.compute_subswath_mask} "
