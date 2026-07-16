@@ -220,7 +220,13 @@ def load_synthetic_data(data_dir):
     eigen = np.concatenate(all_eigen, axis=0)
     global_feat = np.concatenate(all_global, axis=0)
     labels = np.concatenate(all_labels, axis=0)
-    jsr_db = np.concatenate(all_jsr, axis=0) if all_jsr else None
+
+    # JSR: take max across bands (6 bands per sample, some may be NaN)
+    if all_jsr:
+        jsr_all_bands = np.concatenate(all_jsr, axis=0)
+        jsr_db = np.nanmax(jsr_all_bands, axis=1)  # (N,) - max JSR per sample
+    else:
+        jsr_db = None
 
     return {
         'eigen': eigen,
