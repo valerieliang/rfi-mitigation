@@ -1524,9 +1524,10 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('--data-dir', type=str, nargs='+',
-                        default=['data/amazon_train', 'data/mountain_rfi_train'],
+                        default=['amazon_train', 'mountain_train'],
                         help='One or more training directories, concatenated into a '
-                             'single train+val pool. Accepts rfi_data_<freq>_<pol>.h5 '
+                             'single train+val pool. Each directory may mix clean and '
+                             'RFI-contaminated tiles freely. Accepts rfi_data_<freq>_<pol>.h5 '
                              '(generate_amazon_data.py / generate_rfi_data.py) and '
                              'mountain_rfi_data_<freq>_<pol>.h5 (generate_mountain_rfi_data.py).')
     parser.add_argument('--test-dir', type=str, default='data/rfi_test',
@@ -1536,6 +1537,10 @@ def parse_args():
                         help='PAIRED mountain test region from generate_mountain_rfi_data.py '
                              '--paired-test: same background, clean vs. RFI-overlaid. '
                              'Skipped with a note if the directory has no matching files.')
+    parser.add_argument('--train-only', action='store_true',
+                        help='Skip both held-out evaluations (--test-dir and '
+                             '--paired-test-dir) entirely and just train + save the '
+                             'model. Useful when test/paired-test data isn\'t generated yet.')
     parser.add_argument('--run-name', type=str, default=None,
                         help='Model output folder. Defaults to the first data dir name.')
     parser.add_argument('--max-samples', type=int, default=None,
@@ -1551,8 +1556,11 @@ def parse_args():
 
 def main():
     """
-    Train on the combined training pool (train/val split only), then run TWO
-    independent held-out evaluations:
+    Train on the combined training pool (train/val split only).
+
+    With --train-only, stops right there: no --test-dir or --paired-test-dir
+    evaluation is attempted, and the model + training curves are saved as-is.
+    Without it, runs TWO independent held-out evaluations after training:
 
       1. --test-dir: a separate generator run over a disjoint pulse window,
          same 0..6 band range, clean tiles interspersed -- the original
@@ -1563,8 +1571,8 @@ def main():
          newer, optional addition.
 
     Only the top N_KEEP = 12 eigenvalues ever reach the model; the SCM
-    diagonal is used only by the evaluation-time jump metric, never as a
-    model input.
+    diagonal is used only by diag_median_max_ratio_feature (a global input)
+    and the evaluation-time jump metric.
     """
     args = parse_args()
 
@@ -1575,8 +1583,11 @@ def main():
     print('RFI knee classifier training')
     print(f"{'='*70}")
     print(f"  train region(s)   : {', '.join(args.data_dir)}")
-    print(f"  test  region      : {args.test_dir}")
-    print(f"  paired test region: {args.paired_test_dir}")
+    if args.train_only:
+        print(f"  mode              : TRAIN ONLY (no held-out evaluation)")
+    else:
+        print(f"  test  region      : {args.test_dir}")
+        print(f"  paired test region: {args.paired_test_dir}")
     print(f"  features          : top {N_KEEP} of {M} eigenvalues, linear-normalized then dB")
     print(f"  run name          : {run_name}")
 
@@ -1603,33 +1614,44 @@ def main():
         epochs=args.epochs, batch_size=args.batch_size,
     )
 
-    # ---------------- Held-out test region (disjoint window) --------------
-    test_data = load_rfi_data_dir(args.test_dir, args.max_samples, tag='TEST region')
-    check_disjoint(train_data['meta'], test_data['meta'])
+    results = {
+        'run': run_name,
+        'n_train': int(len(idx_train)),
+        'n_val': int(len(idx_val)),
+        'n_classes': n_classes,
+        'n_keep': N_KEEP,
+        'train_provenance': train_data['meta'],
+    }
 
-    uniq, counts = np.unique(test_data['labels'], return_counts=True)
-    print(f"\nTest region: {len(test_data['labels'])} tiles")
-    for u, c in zip(uniq.tolist(), counts.tolist()):
-        print(f"  label {u} ({'clean' if u == 0 else f'knee@{u}'}): {c}")
-
-    results = evaluate(model, test_data, n_classes, run_name, out_dir)
-
-    results['n_train'] = int(len(idx_train))
-    results['n_val'] = int(len(idx_val))
-    results['train_provenance'] = train_data['meta']
-    results['test_provenance'] = test_data['meta']
-
-    # ---------------- Paired mountain test (same tile, clean vs RFI) ------
-    try:
-        paired_data = load_paired_test_dir(args.paired_test_dir, tag='PAIRED TEST region')
-    except FileNotFoundError as exc:
-        print(f"\n=== PAIRED CHECK: SAME-TILE CLEAN vs. RFI-OVERLAID ===")
-        print(f"  SKIPPED: {exc}")
-        print(f"  Generate one with: generate_mountain_rfi_data.py ... --paired-test "
-              f"--output-dir {args.paired_test_dir}")
+    if args.train_only:
+        print("\n--train-only set: skipping --test-dir and --paired-test-dir evaluation.")
     else:
-        results = paired_behavior_check(model, paired_data, out_dir, results)
-        results['paired_test_provenance'] = paired_data['meta']
+        # ---------------- Held-out test region (disjoint window) ----------
+        test_data = load_rfi_data_dir(args.test_dir, args.max_samples, tag='TEST region')
+        check_disjoint(train_data['meta'], test_data['meta'])
+
+        uniq, counts = np.unique(test_data['labels'], return_counts=True)
+        print(f"\nTest region: {len(test_data['labels'])} tiles")
+        for u, c in zip(uniq.tolist(), counts.tolist()):
+            print(f"  label {u} ({'clean' if u == 0 else f'knee@{u}'}): {c}")
+
+        results = evaluate(model, test_data, n_classes, run_name, out_dir)
+        results['n_train'] = int(len(idx_train))
+        results['n_val'] = int(len(idx_val))
+        results['train_provenance'] = train_data['meta']
+        results['test_provenance'] = test_data['meta']
+
+        # ---------------- Paired mountain test (same tile, clean vs RFI) --
+        try:
+            paired_data = load_paired_test_dir(args.paired_test_dir, tag='PAIRED TEST region')
+        except FileNotFoundError as exc:
+            print(f"\n=== PAIRED CHECK: SAME-TILE CLEAN vs. RFI-OVERLAID ===")
+            print(f"  SKIPPED: {exc}")
+            print(f"  Generate one with: generate_mountain_rfi_data.py ... --paired-test "
+                  f"--output-dir {args.paired_test_dir}")
+        else:
+            results = paired_behavior_check(model, paired_data, out_dir, results)
+            results['paired_test_provenance'] = paired_data['meta']
 
     with open(os.path.join(out_dir, 'eval_results.json'), 'w') as fh:
         json.dump(results, fh, indent=2)
