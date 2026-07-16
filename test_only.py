@@ -913,7 +913,7 @@ def score_mountain_tiles(raw, freq, pol, model, args, tile_spec, ground_truth_la
     print(f"Scoring {n_tiles} specified tiles...")
 
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
-    global_all = np.zeros((n_tiles, 2), dtype=np.float32)
+    global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)
     power_db = np.zeros(n_tiles, dtype=np.float32)
 

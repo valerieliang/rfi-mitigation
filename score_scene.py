@@ -252,7 +252,7 @@ def score_channel(raw, freq, pol, model, args):
     print(f"  tile grid: {n_pt} x {n_rt} = {n_tiles} tiles")
 
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
-    global_all = np.zeros((n_tiles, 2), dtype=np.float32)
+    global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)   # linear, descending
     power_db = np.zeros(n_tiles, dtype=np.float32)
     valid_frac = np.zeros(n_tiles, dtype=np.float32)
