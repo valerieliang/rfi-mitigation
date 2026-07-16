@@ -818,30 +818,39 @@ def mountains_clean_check(model, args):
 
     # Load tile specifications from H5
     with h5py.File(args.h5_file, 'r') as f:
-        # Frequency is stored per-group, not at root level
-        # Infer from first group name or use 'A' as default
-        first_key = list(f.keys())[0] if f.keys() else None
-        if first_key and first_key.startswith('freq_'):
-            freq = first_key.split('_')[1]  # Extract freq from 'freq_A_pol_HH'
-        else:
-            freq = 'A'  # Default for NISAR data
-
-        # Get polarizations and their tile specifications
+        # H5 structure: groups like 'freq_A_pol_HH', 'freq_A_pol_HV'
+        # Extract frequency and polarizations from group names
         pols = []
         tile_specs = {}
+        freq = None
 
         for key in f.keys():
-            if key.endswith('_pulse_tiles'):
-                pol = key.replace('_pulse_tiles', '')
-                pols.append(pol)
+            if key.startswith('freq_') and '_pol_' in key:
+                parts = key.split('_')
+                # Format: freq_A_pol_HH -> parts = ['freq', 'A', 'pol', 'HH']
+                if len(parts) == 4:
+                    grp_freq = parts[1]
+                    pol = parts[3]
 
-                pulse_tiles = f[f'{pol}_pulse_tiles'][:]
-                range_tiles = f[f'{pol}_range_tiles'][:]
+                    if freq is None:
+                        freq = grp_freq
+                    elif freq != grp_freq:
+                        continue  # Skip other frequencies
 
-                tile_specs[pol] = {
-                    'pulse_tiles': pulse_tiles,
-                    'range_tiles': range_tiles,
-                }
+                    pols.append(pol)
+                    grp = f[key]
+
+                    # Datasets are 'pulse_idx' and 'range_idx', not '_tiles'
+                    pulse_tiles = grp['pulse_idx'][:]
+                    range_tiles = grp['range_idx'][:]
+
+                    tile_specs[pol] = {
+                        'pulse_tiles': pulse_tiles,
+                        'range_tiles': range_tiles,
+                    }
+
+        if freq is None:
+            freq = 'A'  # Fallback default
 
     print(f"Frequency: {freq}")
     print(f"Polarizations: {pols}")
