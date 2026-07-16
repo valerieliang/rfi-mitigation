@@ -818,7 +818,13 @@ def mountains_clean_check(model, args):
 
     # Load tile specifications from H5
     with h5py.File(args.h5_file, 'r') as f:
-        freq = str(f.attrs['frequency'])
+        # Frequency is stored per-group, not at root level
+        # Infer from first group name or use 'A' as default
+        first_key = list(f.keys())[0] if f.keys() else None
+        if first_key and first_key.startswith('freq_'):
+            freq = first_key.split('_')[1]  # Extract freq from 'freq_A_pol_HH'
+        else:
+            freq = 'A'  # Default for NISAR data
 
         # Get polarizations and their tile specifications
         pols = []
