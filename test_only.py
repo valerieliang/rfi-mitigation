@@ -171,18 +171,44 @@ def features_from_eigenvalues(eigvals_linear, diag_lin, diag_valid_idx):
 
 def load_synthetic_data(data_dir):
     """Load synthetic test data from a data directory."""
+    # Try standard test.h5 first
     test_file = os.path.join(data_dir, 'test.h5')
-    if not os.path.exists(test_file):
-        raise FileNotFoundError(f"No test.h5 found in {data_dir}")
+    if os.path.exists(test_file):
+        with h5py.File(test_file, 'r') as f:
+            eigen = f['eigen_features'][:]
+            global_feat = f['global_features'][:]
+            labels = f['labels'][:]
+            if 'jsr_db' in f:
+                jsr_db = f['jsr_db'][:]
+            else:
+                jsr_db = None
+        return {
+            'eigen': eigen,
+            'global': global_feat,
+            'labels': labels,
+            'jsr_db': jsr_db,
+            'source': os.path.basename(data_dir),
+        }
 
-    with h5py.File(test_file, 'r') as f:
-        eigen = f['eigen_features'][:]
-        global_feat = f['global_features'][:]
-        labels = f['labels'][:]
-        if 'jsr_db' in f:
-            jsr_db = f['jsr_db'][:]
-        else:
-            jsr_db = None
+    # Otherwise, look for separate polarization files
+    h5_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.h5')])
+    if not h5_files:
+        raise FileNotFoundError(f"No .h5 files found in {data_dir}")
+
+    all_eigen, all_global, all_labels, all_jsr = [], [], [], []
+    for h5_file in h5_files:
+        fpath = os.path.join(data_dir, h5_file)
+        with h5py.File(fpath, 'r') as f:
+            all_eigen.append(f['eigen_features'][:])
+            all_global.append(f['global_features'][:])
+            all_labels.append(f['labels'][:])
+            if 'jsr_db' in f:
+                all_jsr.append(f['jsr_db'][:])
+
+    eigen = np.concatenate(all_eigen, axis=0)
+    global_feat = np.concatenate(all_global, axis=0)
+    labels = np.concatenate(all_labels, axis=0)
+    jsr_db = np.concatenate(all_jsr, axis=0) if all_jsr else None
 
     return {
         'eigen': eigen,
