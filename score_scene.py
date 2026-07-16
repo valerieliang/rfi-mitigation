@@ -95,7 +95,7 @@ import h5py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from generate_rfi_data import (  # noqa: E402
+from generate_amazon_data import (  # noqa: E402
     read_raw_data_batch,
     get_subswath_mask,
     compute_scm_and_eigs,

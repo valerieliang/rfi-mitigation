@@ -1,5 +1,5 @@
 """
-generate_rfi_data.py
+generate_amazon_data.py
 
 Builds ONE labeled CPI training set from real NISAR L0B data by overlaying
 synthetic Gaussian RFI bands on top of real CPI tiles.
@@ -19,7 +19,7 @@ the row placement changed.
 
 Why JSR (not JNR)
 -----------------
-generate_synthetic_data.py builds fully synthetic frames (synthetic noise +
+generate_amazon_data.py builds fully synthetic frames (synthetic noise +
 synthetic signal), so RFI strength is naturally expressed against a synthetic
 noise floor (JNR). Here the background is real L0B data: there is no separate
 synthetic noise component to reference. The only meaningful reference is the
@@ -31,9 +31,9 @@ Each band draws its own JSR independently and uniformly from
 [JSR_MIN_DB, JSR_MAX_DB] = [3, 30] dB, so the weakest interferer sits 3 dB above
 the tile's own baseline power and the strongest sits 30 dB above it. Bands
 within a tile therefore generally differ in strength, matching how
-generate_synthetic_data.py draws an independent per-band JNR from JNR_RANGE_DB.
+generate_amazon_data.py draws an independent per-band JNR from JNR_RANGE_DB.
 
-RFI injection model (adapted from generate_synthetic_data.py and
+RFI injection model (adapted from generate_amazon_data.py and
 score_anomaly_jsr_sweep.py)
 --------------------------------------------------------------------
 For each band injected into a tile:
@@ -83,7 +83,7 @@ identifies its role, so no two streams can share state:
     plot tile selection           : [plot_seed, SALT_PLOT, chan]
 
 The JSR draws come from their own child stream (mirroring the JNR_SEED offset in
-generate_synthetic_data.py) so that changing the JSR range does not perturb band
+generate_amazon_data.py) so that changing the JSR range does not perturb band
 placement or the coefficient vectors.
 
 'chan' is a channel id derived from (frequency, polarization) via CHANNEL_IDS.
@@ -128,7 +128,7 @@ granule name, frequency, polarization, and the final label histogram.
 Usage
 -----
     # Every frequency and polarization in the granule (the default)
-    python generate_rfi_data.py granule.h5 \
+    python generate_amazon_data.py granule.h5 \
         --pulse-start 813924 --pulse-end 888222 \
         --range-start 2000 --range-end 25000 \
         --compute-subswath-mask \
@@ -137,7 +137,7 @@ Usage
         --seed 0 --plot-seed 99
 
     # Restrict to one channel, and also keep the complex CPI tiles
-    python generate_rfi_data.py granule.h5 --freq A --pol HH --save-cpi
+    python generate_amazon_data.py granule.h5 --freq A --pol HH --save-cpi
 
 One HDF5 file per channel is written: rfi_data_<freq>_<pol>.h5
 """
