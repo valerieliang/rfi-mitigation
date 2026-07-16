@@ -171,7 +171,7 @@ def features_from_eigenvalues(eigvals_linear, diag_lin, diag_valid_idx):
 
 def load_synthetic_data(data_dir):
     """Load synthetic test data from a data directory."""
-    # Try standard test.h5 first
+    # Try standard test.h5 first (preprocessed features)
     test_file = os.path.join(data_dir, 'test.h5')
     if os.path.exists(test_file):
         with h5py.File(test_file, 'r') as f:
@@ -190,7 +190,7 @@ def load_synthetic_data(data_dir):
             'source': os.path.basename(data_dir),
         }
 
-    # Otherwise, look for separate polarization files
+    # Otherwise, look for separate polarization files with raw eigenvalues
     h5_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.h5')])
     if not h5_files:
         raise FileNotFoundError(f"No .h5 files found in {data_dir}")
@@ -199,9 +199,21 @@ def load_synthetic_data(data_dir):
     for h5_file in h5_files:
         fpath = os.path.join(data_dir, h5_file)
         with h5py.File(fpath, 'r') as f:
-            all_eigen.append(f['eigen_features'][:])
-            all_global.append(f['global_features'][:])
-            all_labels.append(f['labels'][:])
+            # Load raw eigenvalues and preprocess them
+            eigvals = f['eigenvalues'][:]
+            diag = f['diagonal'][:]
+            diag_valid_idx = f['diag_valid_idx'][:]
+            labels_pol = f['labels'][:]
+
+            # Preprocess raw eigenvalues into model features
+            eigen_feat, global_feat = preprocess_eigenvalues_to_model_inputs(
+                eigvals, diag, diag_valid_idx
+            )
+
+            all_eigen.append(eigen_feat)
+            all_global.append(global_feat)
+            all_labels.append(labels_pol)
+
             if 'jsr_db' in f:
                 all_jsr.append(f['jsr_db'][:])
 
