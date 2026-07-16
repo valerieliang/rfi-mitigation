@@ -616,7 +616,7 @@ def score_clean_channel(raw, freq, pol, model, args, ground_truth_label=0):
     print(f"Tile grid: {n_pt} x {n_rt} = {n_tiles} tiles")
 
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
-    global_all = np.zeros((n_tiles, 2), dtype=np.float32)
+    global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)
     power_db = np.zeros(n_tiles, dtype=np.float32)
     tile_pulse = np.zeros(n_tiles, dtype=np.int32)
