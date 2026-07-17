@@ -43,14 +43,14 @@ the full linear eigenvalue vector, tile origin), so any flagged tile can be
 pulled back out and inspected against the raw data.
 
 If you want an actual NUMBER on this scene, the only honest way is to overlay
-synthetic RFI on it -- real background, known labels -- which is what
-generate_rfi_data.py does. Point it at this granule and retest. That measures
+synthetic RFI on it -- real background, known labels. That measures
 transfer to this scene's backscatter statistics; it cannot tell you what RFI is
 already there.
 
-Feature extraction and the SCM convention are imported from train_db.py and
-generate_rfi_data.py rather than reimplemented, so the model sees exactly the
-features it was trained on.
+Feature extraction follows the same convention used during training: eigenvalues
+are computed via the gap-exclusion SCM from nisar_utils.py (via ISCE3 subswaths),
+normalized by lambda_max, converted to dB, and augmented with global features.
+This ensures the model sees exactly the features it was trained on.
 
 By default the FULL range extent of the granule is scored. --range-start and
 --range-end are there to narrow it, not to define it. Note that the training set
@@ -101,11 +101,8 @@ import argparse
 import numpy as np
 import h5py
 
-# Reuse the project's SCM / feature code so the model sees identical inputs
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from generate_amazon_data import (  # noqa: E402
+# Import NISAR reading and covariance utilities from read_nisar_isce3
+from read_nisar_isce3 import (
     read_raw_data_batch,
     get_subswath_mask,
     compute_scm_and_eigs,
@@ -114,9 +111,13 @@ from generate_amazon_data import (  # noqa: E402
     CPI_WIDTH_DEFAULT,
     OFF_DIAG_OVERLAP_RATIO_DEFAULT,
     DIAG_VALID_RATIO_DEFAULT,
-    PULSE_CHUNK_DEFAULT,
 )
-from nisar.products.readers.Raw import Raw  # noqa: E402
+from nisar.products.readers.Raw import Raw
+
+
+# Processing chunk size
+PULSE_CHUNK_DEFAULT = 1600
+EPS = 1e-12
 
 
 EPS = 1e-12

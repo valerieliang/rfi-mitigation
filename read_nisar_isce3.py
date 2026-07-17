@@ -170,6 +170,60 @@ def compute_gap_exclusion_cov(
     return cov, diag_valid_idx
 
 
+def compute_scm_and_eigs(cpi, cpi_mask, off_diag_overlap_ratio, diag_valid_ratio):
+    """
+    Compute the SCM, its descending LINEAR eigenvalues, its LINEAR diagonal,
+    and the per-index diagonal validity mask for one CPI tile.
+
+    Uses the gap-exclusion covariance when a mask is supplied, otherwise the
+    plain (M @ M^H) / K estimate.
+
+    The diagonal is the entry-level counterpart to the eigenvalue profile: RFI
+    shows up as a jump in specific pulse rows of the diagonal, whereas a clean
+    tile's diagonal stays comparatively flat across rows. diag_valid_idx marks
+    which rows had enough non-gap samples to be trusted, so a downstream jump
+    metric can skip entries that are invalid rather than real.
+
+    Returns
+    -------
+    scm : (M, M) complex64
+    eigvals : (M,) float32, descending, linear scale
+    diag_lin : (M,) float64, linear scale, unnormalized power per pulse row
+    diag_valid_idx : (M,) bool
+    """
+    if cpi_mask is not None:
+        scm, diag_valid_idx = compute_gap_exclusion_cov(
+            cpi,
+            mask_valid_cpi=cpi_mask,
+            off_diag_overlap_ratio=off_diag_overlap_ratio,
+            diag_valid_ratio=diag_valid_ratio,
+        )
+    else:
+        M, K = cpi.shape
+        scm = ((cpi @ cpi.conj().T) / K).astype(np.complex64)
+        diag_valid_idx = np.ones(M, dtype=bool)
+
+    eigvals = np.linalg.eigvalsh(scm)          # ascending, real
+    eigvals = np.sort(eigvals)[::-1]           # descending
+
+    diag_lin = np.real(np.diag(scm)).astype(np.float64)
+
+    return scm, eigvals.astype(np.float32), diag_lin, diag_valid_idx
+
+
+def tile_signal_power(cpi, cpi_mask):
+    """
+    Baseline power of a real CPI tile: mean(|x|^2) over its valid samples.
+    This is the "signal" that JSR is referenced to.
+    """
+    EPS = 1e-12
+    if cpi_mask is not None and cpi_mask.any():
+        vals = cpi[cpi_mask]
+    else:
+        vals = cpi.ravel()
+    return max(float(np.mean(np.abs(vals) ** 2)), EPS)
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
