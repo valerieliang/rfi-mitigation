@@ -1,0 +1,35 @@
+{
+  "run": "combined_all_amazon_low_jsr_mountain",
+  "n_train": 887709,
+  "n_val": 15457,
+  "n_classes": 7,
+  "n_keep": 12,
+  "epochs": 40,
+  "batch_size": 256,
+  "learning_rate": 0.0003,
+  "dropout_rate": 0.6,
+  "weight_decay": 0.0001,
+  "train_provenance": {
+    "dirs": [
+      "data/amazon_train/",
+      "data/mountain_train_low_jsr/"
+    ],
+    "files": [
+      "rfi_data_A_HH.h5",
+      "rfi_data_A_HV.h5",
+      "mountain_rfi_data_A_HH.h5",
+      "mountain_rfi_data_A_HV.h5"
+    ],
+    "channels": [
+      "A-HH",
+      "A-HV"
+    ],
+    "pulse_window": [
+      813924,
+      888212
+    ],
+    "seed": 100,
+    "min_bands": 0,
+    "max_bands": 6
+  }
+}
