@@ -293,6 +293,7 @@ def load_nisar(path, freq, pol, diag_valid_frac_thresh, n_keep,
         ) from exc
 
     raw = Raw(hdf5file=path)
+    raw.parsePolarizations()
     raw_dataset = raw.getRawDataset(freq, pol)
     n_pulses_total, n_range_total = raw_dataset.shape
 
@@ -307,30 +308,45 @@ def load_nisar(path, freq, pol, diag_valid_frac_thresh, n_keep,
     n_cpi_pulse = (p_end - p_start) // CPI_PULSES
     n_cpi_range = (r_end - r_start) // CPI_RANGE
 
-    for ip in range(n_cpi_pulse):
-        p0 = p_start + ip * CPI_PULSES
-        for ir in range(n_cpi_range):
-            r0 = r_start + ir * CPI_RANGE
-            block = load_raw_cpi_block(raw_dataset, p0, r0, CPI_PULSES, CPI_RANGE)
+    # Read data in larger chunks (1000 pulses at a time) to avoid slow random access
+    CHUNK_PULSES = 1000
+    chunk_cpi = CHUNK_PULSES // CPI_PULSES
 
-            cov, dvf = compute_gap_exclusion_cov_simple(block, gap_mag_frac)
-            diag_valid_fracs.append(dvf)
+    for chunk_idx in range(0, n_cpi_pulse, chunk_cpi):
+        chunk_n = min(chunk_cpi, n_cpi_pulse - chunk_idx)
+        chunk_p0 = p_start + chunk_idx * CPI_PULSES
+        chunk_p1 = chunk_p0 + chunk_n * CPI_PULSES
 
-            if dvf < diag_valid_frac_thresh:
-                eig_rows.append(np.full(CPI_PULSES, np.nan))
-                continue
+        # Read entire chunk once
+        raw_chunk = raw_dataset[chunk_p0:chunk_p1, r_start:r_end]
 
-            valid_idx = np.where(~np.isnan(np.diag(cov)))[0]
-            if valid_idx.size < 2:
-                eig_rows.append(np.full(CPI_PULSES, np.nan))
-                continue
+        for ip_local in range(chunk_n):
+            lp0 = ip_local * CPI_PULSES
+            lp1 = lp0 + CPI_PULSES
 
-            sub_cov = cov[np.ix_(valid_idx, valid_idx)]
-            eigvals = np.linalg.eigvalsh(sub_cov)  # ascending, real (Hermitian)
-            eigvals = np.sort(eigvals)[::-1]        # descending
-            padded = np.full(CPI_PULSES, np.nan)
-            padded[: eigvals.size] = np.real(eigvals)
-            eig_rows.append(padded)
+            for ir in range(n_cpi_range):
+                lr0 = ir * CPI_RANGE
+                lr1 = lr0 + CPI_RANGE
+                block = raw_chunk[lp0:lp1, lr0:lr1]
+
+                cov, dvf = compute_gap_exclusion_cov_simple(block, gap_mag_frac)
+                diag_valid_fracs.append(dvf)
+
+                if dvf < diag_valid_frac_thresh:
+                    eig_rows.append(np.full(CPI_PULSES, np.nan))
+                    continue
+
+                valid_idx = np.where(~np.isnan(np.diag(cov)))[0]
+                if valid_idx.size < 2:
+                    eig_rows.append(np.full(CPI_PULSES, np.nan))
+                    continue
+
+                sub_cov = cov[np.ix_(valid_idx, valid_idx)]
+                eigvals = np.linalg.eigvalsh(sub_cov)  # ascending, real (Hermitian)
+                eigvals = np.sort(eigvals)[::-1]        # descending
+                padded = np.full(CPI_PULSES, np.nan)
+                padded[: eigvals.size] = np.real(eigvals)
+                eig_rows.append(padded)
 
     eigenvalues = np.array(eig_rows)
     diag_valid_frac_arr = np.array(diag_valid_fracs)
