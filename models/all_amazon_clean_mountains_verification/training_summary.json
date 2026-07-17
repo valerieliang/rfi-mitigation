@@ -1,5 +1,5 @@
 {
-  "run": "amazon_mountains_verification",
+  "run": "all_amazon_clean_mountains_verification",
   "n_train": 767370,
   "n_val": 132889,
   "n_train_amazon": 724776,
