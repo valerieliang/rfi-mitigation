@@ -21,6 +21,22 @@ Only valid data is used in every metric:
   - only CPI tiles whose SCM diagonal validity fraction meets
     --diag-valid-frac-thresh (default 0.8) are included
 
+SYNTHETIC RFI-ONLY METRIC (--mode preprocessed only):
+If the input file carries a per-tile "labels" dataset (knee = number of
+injected RFI bands, 0 = clean; e.g. the rfi_data_<freq>_<pol>.h5 output of
+generate_amazon_data.py / generate_mountain_data.py, or a grouped
+freq_X_pol_Y file with a "labels" dataset alongside "eigenvalues"), a
+second report is printed alongside the usual "all valid tiles" report. This
+second report computes the exact same three metrics (condition number,
+effective rank, median/max ratio) but restricted to tiles whose label falls
+in [--rfi-label-min, --rfi-label-max] (default 1..6) -- i.e. only tiles that
+actually received injected RFI. Clean tiles (label 0) are disregarded for
+this metric so they cannot dilute the RFI-only statistics.
+
+If no "labels" dataset is present (e.g. clean_mountains_filtered.h5, or any
+--mode nisar input, since raw NISAR data has no injected-RFI ground truth),
+the RFI-only report is skipped and a note is printed instead.
+
 IMPORTANT NOTE ON THE NISAR PATH:
 The gap-exclusion covariance construction used here (see
 `compute_gap_exclusion_cov_simple`) is a best-effort reconstruction based on
@@ -46,6 +62,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 
 import h5py
@@ -58,6 +75,13 @@ CPI_RANGE = 250
 DEFAULT_N_KEEP = 12
 DEFAULT_DIAG_VALID_FRAC_THRESH = 0.8
 DEFAULT_GAP_MAG_FRAC = 0.10  # transmission-gap detection threshold, per project notes
+
+# Label convention for generate_amazon_data.py / generate_mountain_data.py
+# output: labels[i] == 0 means a clean tile, labels[i] in [1, max_bands] means
+# knee = number of injected RFI bands. Default RFI-only range matches the
+# project's default --max-bands of 6.
+DEFAULT_RFI_LABEL_MIN = 1
+DEFAULT_RFI_LABEL_MAX = 6
 
 
 # ---------------------------------------------------------------------------
@@ -154,31 +178,74 @@ def summarize(values, name):
 # Preprocessed-file loader (e.g. clean_mountains_filtered.h5)
 # ---------------------------------------------------------------------------
 
-def load_preprocessed(path, freq, pol, diag_valid_frac_thresh, n_keep,
-                       pulse_start=None, pulse_end=None,
-                       range_start=None, range_end=None):
+def _read_preprocessed_arrays(path, freq, pol):
     """
-    Load per-CPI eigenvalues from a preprocessed HDF5 file with layout:
-        freq_{freq}_pol_{pol}/eigenvalues       (n_cpi, 16) linear scale
-        freq_{freq}_pol_{pol}/diag_valid_frac   (n_cpi,)
-        freq_{freq}_pol_{pol}/pulse_idx         (n_cpi,)
-        freq_{freq}_pol_{pol}/range_idx         (n_cpi,)
+    Read the raw per-tile arrays from a preprocessed HDF5 file, supporting
+    both layouts used in this project:
 
-    Returns eig_kept (n_valid, n_keep), plus counts for reporting.
+      1. Grouped layout (e.g. clean_mountains_filtered.h5):
+             freq_{freq}_pol_{pol}/eigenvalues       (n_cpi, 16)
+             freq_{freq}_pol_{pol}/diag_valid_frac   (n_cpi,)
+             freq_{freq}_pol_{pol}/pulse_idx         (n_cpi,)
+             freq_{freq}_pol_{pol}/range_idx         (n_cpi,)
+             freq_{freq}_pol_{pol}/labels            (n_cpi,)  [optional]
+
+      2. Flat, one-file-per-channel layout (rfi_data_<freq>_<pol>.h5, written
+         by generate_amazon_data.py / generate_mountain_data.py):
+             /eigenvalues       (n_cpi, cpi_len)
+             /diag_valid_idx    (n_cpi, cpi_len)  bool, per-index validity
+             /tile_pulse        (n_cpi,)
+             /tile_range        (n_cpi,)
+             /labels            (n_cpi,)          knee, 0 = clean
+
+    Returns eigenvalues, diag_valid_frac, pulse_idx, range_idx, labels
+    (labels is None if no "labels" dataset is present in either layout).
     """
     group_name = f"freq_{freq}_pol_{pol}"
     with h5py.File(path, "r") as f:
-        if group_name not in f:
+        if group_name in f:
+            g = f[group_name]
+            eigenvalues = g["eigenvalues"][:]
+            diag_valid_frac = g["diag_valid_frac"][:]
+            pulse_idx = g["pulse_idx"][:]
+            range_idx = g["range_idx"][:]
+            labels = g["labels"][:] if "labels" in g else None
+        elif "eigenvalues" in f:
+            eigenvalues = f["eigenvalues"][:]
+            diag_valid_idx = f["diag_valid_idx"][:]  # (n_cpi, cpi_len) bool
+            diag_valid_frac = diag_valid_idx.mean(axis=1)
+            pulse_idx = f["tile_pulse"][:]
+            range_idx = f["tile_range"][:]
+            labels = f["labels"][:] if "labels" in f else None
+        else:
             available = list(f.keys())
             raise KeyError(
-                f"Group '{group_name}' not found in {path}. "
-                f"Available groups: {available}"
+                f"Neither group '{group_name}' nor a root-level 'eigenvalues' "
+                f"dataset was found in {path}. Available top-level keys: "
+                f"{available}"
             )
-        g = f[group_name]
-        eigenvalues = g["eigenvalues"][:]         # (n_cpi, 16), linear scale
-        diag_valid_frac = g["diag_valid_frac"][:]  # (n_cpi,)
-        pulse_idx = g["pulse_idx"][:]
-        range_idx = g["range_idx"][:]
+    return eigenvalues, diag_valid_frac, pulse_idx, range_idx, labels
+
+
+def load_preprocessed(path, freq, pol, diag_valid_frac_thresh, n_keep,
+                       pulse_start=None, pulse_end=None,
+                       range_start=None, range_end=None,
+                       rfi_label_min=DEFAULT_RFI_LABEL_MIN,
+                       rfi_label_max=DEFAULT_RFI_LABEL_MAX):
+    """
+    Load per-CPI eigenvalues from a preprocessed HDF5 file (either the
+    grouped freq_X_pol_Y layout or the flat rfi_data_<freq>_<pol>.h5 layout;
+    see _read_preprocessed_arrays for both schemas).
+
+    Returns:
+        eig_kept          : (n_valid, n_keep) all valid tiles, linear scale
+        eig_kept_rfi_only : (n_rfi, n_keep) subset of eig_kept whose label is
+                             in [rfi_label_min, rfi_label_max], or None if the
+                             file carries no "labels" dataset
+        counts            : dict of tile counts for reporting
+    """
+    eigenvalues, diag_valid_frac, pulse_idx, range_idx, labels = \
+        _read_preprocessed_arrays(path, freq, pol)
 
     n_total = eigenvalues.shape[0]
 
@@ -205,7 +272,16 @@ def load_preprocessed(path, freq, pol, diag_valid_frac_thresh, n_keep,
         "n_in_requested_scene": n_in_scene,
         "n_passing_diag_valid_frac": n_valid,
     }
-    return eig_kept, counts
+
+    eig_kept_rfi_only = None
+    if labels is not None:
+        labels_valid = labels[valid_mask]
+        rfi_mask = (labels_valid >= rfi_label_min) & (labels_valid <= rfi_label_max)
+        eig_kept_rfi_only = eig_kept[rfi_mask]
+        counts["n_rfi_labeled_1_to_6"] = int(rfi_mask.sum())
+        counts["n_clean_labeled_0"] = int((labels_valid == 0).sum())
+
+    return eig_kept, eig_kept_rfi_only, counts
 
 
 # ---------------------------------------------------------------------------
@@ -363,16 +439,21 @@ def load_nisar(path, freq, pol, diag_valid_frac_thresh, n_keep,
         "n_total_cpi_tiles": n_total,
         "n_passing_diag_valid_frac": n_valid,
     }
-    return eig_kept, counts
+    # Raw NISAR L0B data carries no injected-RFI ground truth, so there is no
+    # "labels" dataset to restrict to here. Kept as None for a consistent
+    # return signature with load_preprocessed.
+    eig_kept_rfi_only = None
+    return eig_kept, eig_kept_rfi_only, counts
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def print_report(mode, args, counts, summaries, ratio_definition):
+def print_report(mode, args, counts, summaries, ratio_definition, report_name="All valid CPI tiles"):
     print("=" * 70)
     print(f"Mode: {mode}")
+    print(f"Report: {report_name}")
     print(f"Input: {args.input}")
     print(f"Frequency / Polarization: {args.freq} / {args.pol}")
     print(f"n_keep (eigenvalues used): {args.n_keep}")
@@ -430,6 +511,13 @@ def main():
                         help=f"[nisar mode only] fraction of max mean-magnitude used as the "
                              f"transmission-gap threshold (default: {DEFAULT_GAP_MAG_FRAC})")
 
+    parser.add_argument("--rfi-label-min", type=int, default=DEFAULT_RFI_LABEL_MIN,
+                        help="[preprocessed mode only] minimum knee label (inclusive) counted "
+                             f"as synthetic RFI for the RFI-only report (default: {DEFAULT_RFI_LABEL_MIN})")
+    parser.add_argument("--rfi-label-max", type=int, default=DEFAULT_RFI_LABEL_MAX,
+                        help="[preprocessed mode only] maximum knee label (inclusive) counted "
+                             f"as synthetic RFI for the RFI-only report (default: {DEFAULT_RFI_LABEL_MAX})")
+
     parser.add_argument("--output-json", default=None,
                         help="Optional path to write summary statistics as JSON.")
     parser.add_argument("--output-csv", default=None,
@@ -437,15 +525,17 @@ def main():
 
     args = parser.parse_args()
 
+    eig_kept_rfi_only = None
     if args.mode == "preprocessed":
-        eig_kept, counts = load_preprocessed(
+        eig_kept, eig_kept_rfi_only, counts = load_preprocessed(
             args.input, args.freq, args.pol,
             args.diag_valid_frac_thresh, args.n_keep,
             args.pulse_start, args.pulse_end,
             args.range_start, args.range_end,
+            args.rfi_label_min, args.rfi_label_max,
         )
     else:
-        eig_kept, counts = load_nisar(
+        eig_kept, eig_kept_rfi_only, counts = load_nisar(
             args.input, args.freq, args.pol,
             args.diag_valid_frac_thresh, args.n_keep,
             args.pulse_start, args.pulse_end,
@@ -460,7 +550,34 @@ def main():
     metrics = compute_all_metrics(eig_kept, args.median_max_ratio_def)
     summaries = [summarize(v, name) for name, v in metrics.items()]
 
-    print_report(args.mode, args, counts, summaries, args.median_max_ratio_def)
+    print_report(args.mode, args, counts, summaries, args.median_max_ratio_def,
+                 report_name="All valid CPI tiles")
+
+    # Synthetic RFI-only report: same three metrics, restricted to tiles
+    # whose label (knee) falls in [rfi_label_min, rfi_label_max]. Clean
+    # tiles (label 0) are excluded so they cannot dilute these statistics.
+    metrics_rfi_only = None
+    summaries_rfi_only = None
+    if eig_kept_rfi_only is None:
+        print()
+        print(f"[RFI-only report skipped: no 'labels' dataset found for "
+              f"{args.mode} input -- this report requires a labeled RFI "
+              f"training file such as rfi_data_<freq>_<pol>.h5, produced by "
+              f"generate_amazon_data.py / generate_mountain_data.py]")
+    elif eig_kept_rfi_only.shape[0] == 0:
+        print()
+        print(f"[RFI-only report skipped: no valid tiles with label in "
+              f"[{args.rfi_label_min}, {args.rfi_label_max}] found]")
+    else:
+        metrics_rfi_only = compute_all_metrics(eig_kept_rfi_only, args.median_max_ratio_def)
+        summaries_rfi_only = [summarize(v, name) for name, v in metrics_rfi_only.items()]
+        rfi_counts = {
+            "n_rfi_only_tiles": int(eig_kept_rfi_only.shape[0]),
+            "rfi_label_range": f"[{args.rfi_label_min}, {args.rfi_label_max}]",
+        }
+        print()
+        print_report(args.mode, args, rfi_counts, summaries_rfi_only, args.median_max_ratio_def,
+                     report_name=f"Synthetic RFI tiles only (labels {args.rfi_label_min}-{args.rfi_label_max})")
 
     if args.output_json:
         payload = {
@@ -472,7 +589,10 @@ def main():
             "diag_valid_frac_thresh": args.diag_valid_frac_thresh,
             "median_max_ratio_def": args.median_max_ratio_def,
             "counts": counts,
-            "summaries": summaries,
+            "summaries_all": summaries,
+            "rfi_label_min": args.rfi_label_min,
+            "rfi_label_max": args.rfi_label_max,
+            "summaries_rfi_only": summaries_rfi_only,
         }
         with open(args.output_json, "w") as f:
             json.dump(payload, f, indent=2)
@@ -486,6 +606,16 @@ def main():
             for row in zip(*metrics.values()):
                 writer.writerow(row)
         print(f"Wrote per-CPI metrics CSV to {args.output_csv}")
+
+        if metrics_rfi_only is not None:
+            root, ext = os.path.splitext(args.output_csv)
+            rfi_csv_path = f"{root}_rfi_only{ext or '.csv'}"
+            with open(rfi_csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(list(metrics_rfi_only.keys()))
+                for row in zip(*metrics_rfi_only.values()):
+                    writer.writerow(row)
+            print(f"Wrote RFI-only per-CPI metrics CSV to {rfi_csv_path}")
 
 
 if __name__ == "__main__":
