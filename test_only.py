@@ -7,18 +7,9 @@ Unified test script with multiple modes:
    Test synthetic data from multiple data/<folders>, produce confusion matrix,
    accuracy vs JSR, etc.
 
-2. AMAZON CLEAN CHECK
-   Test real Amazon NISAR data (assumed clean) against both HH and HV.
-   Produces clean check accuracy and confusion matrices.
-
-3. MOUNTAINS CLEAN CHECK
+2. MOUNTAINS CLEAN CHECK
    Test real Mountains NISAR data (assumed clean) using H5 file to specify tiles.
    HH and HV tiles may be distinct. Produces clean check accuracy and confusion matrices.
-
-4. SCORE SCENE (NO GROUND TRUTH)
-   Score specific pulse/range windows with no ground truth labels.
-   Analog to score_scene.py but integrated here for convenience.
-   Outputs predictions, confidence maps, eigenvalue profiles, etc.
 
 Usage Examples
 --------------
@@ -28,46 +19,12 @@ py-isce3 test_only.py combined \\
     --data-dirs data/amazon_synthetic data/mountain_synthetic \\
     --output-dir results/combined_test
 
-# Amazon clean check (full extent)
-py-isce3 test_only.py amazon-clean \\
-    --model models/combined_amazon_mountain/best_model.keras \\
-    --nisar-file /path/to/amazon.h5 \\
-    --freq A \\
-    --output-dir results/amazon_clean
-
-# Amazon clean check (specific window)
-py-isce3 test_only.py amazon-clean \\
-    --model models/combined_amazon_mountain/best_model.keras \\
-    --nisar-file /path/to/amazon.h5 \\
-    --pulse-start 46528 --pulse-end 124580 \\
-    --range-start 0 --range-end 25600 \\
-    --freq A \\
-    --output-dir results/amazon_clean
-
 # Mountains clean check
 py-isce3 test_only.py mountains-clean \\
     --model models/combined_amazon_mountain/best_model.keras \\
     --h5-file data/mountains_test.h5 \\
     --nisar-file /path/to/berlin.h5 \\
     --output-dir results/mountains_clean
-
-# Score scene (no ground truth, full extent)
-py-isce3 test_only.py score-scene \\
-    --model models/combined_amazon_mountain/best_model.keras \\
-    --nisar-file /path/to/scene.h5 \\
-    --freq A --pol HH \\
-    --save-predictions --save-confidence --save-profiles --save-diagnostics \\
-    --output-dir results/scene_score
-
-# Score scene (no ground truth, specific window)
-py-isce3 test_only.py score-scene \\
-    --model models/combined_amazon_mountain/best_model.keras \\
-    --nisar-file /path/to/scene.h5 \\
-    --pulse-start 0 --pulse-end 50000 \\
-    --range-start 0 --range-end 25600 \\
-    --freq A --pol HH \\
-    --save-predictions --save-confidence --save-profiles --save-diagnostics \\
-    --output-dir results/scene_score
 """
 
 import os
@@ -91,7 +48,6 @@ from generate_amazon_data import (
     CPI_WIDTH_DEFAULT,
     OFF_DIAG_OVERLAP_RATIO_DEFAULT,
     DIAG_VALID_RATIO_DEFAULT,
-    PULSE_CHUNK_DEFAULT,
 )
 from nisar.products.readers.Raw import Raw
 
@@ -491,312 +447,7 @@ def plot_confidence_distribution(confidence, labels, preds, n_classes, out_dir, 
 
 
 # ===========================================================================
-# MODE 2: AMAZON CLEAN CHECK
-# ===========================================================================
-
-def amazon_clean_check(model, args):
-    """
-    Test model on real Amazon NISAR data assumed to be clean.
-    Tests both HH and HV polarizations.
-    Reports false positive rate (any knee>0 detection is a false positive).
-    """
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    from sklearn.metrics import confusion_matrix
-
-    print(f"\n{'='*70}")
-    print('AMAZON CLEAN CHECK')
-    print(f"{'='*70}")
-    print(f"NISAR file: {args.nisar_file}")
-    print(f"Frequency: {args.freq}")
-
-    pulse_str = (f"[{args.pulse_start if args.pulse_start is not None else 'full'}, "
-                 f"{args.pulse_end if args.pulse_end is not None else 'full'})")
-    print(f"Pulses: {pulse_str}")
-
-    rng_str = (f"[{args.range_start if args.range_start is not None else 'full'}, "
-               f"{args.range_end if args.range_end is not None else 'full'})")
-    print(f"Range: {rng_str}")
-    print("\nASSUMPTION: Real data is CLEAN (label=0 ground truth)")
-
-    raw = Raw(hdf5file=args.nisar_file)
-    raw.parsePolarizations()
-
-    freq = args.freq
-    if freq not in raw.polarizations:
-        raise ValueError(f"Frequency {freq} not found in NISAR file")
-
-    pols = list(raw.polarizations[freq])
-    print(f"Testing polarizations: {pols}")
-
-    results = {
-        'mode': 'amazon_clean',
-        'nisar_file': args.nisar_file,
-        'frequency': freq,
-        'pulse_window': [args.pulse_start, args.pulse_end],
-        'range_window': [args.range_start, args.range_end],
-        'polarizations': {},
-    }
-
-    all_recs = []
-
-    for pol in pols:
-        print(f"\n--- Testing {freq}-{pol} ---")
-        rec = score_clean_channel(raw, freq, pol, model, args, ground_truth_label=0)
-        all_recs.append(rec)
-
-        # Analyze results
-        preds = rec['predictions']
-        n_tiles = len(preds)
-        false_positives = (preds > 0).sum()
-        fpr = false_positives / n_tiles
-
-        print(f"Total tiles: {n_tiles}")
-        print(f"False positives (knee>0): {false_positives} ({100*fpr:.2f}%)")
-        print(f"Mean confidence: {rec['confidence'].mean():.3f}")
-        print(f"Mean confidence on false positives: {rec['confidence'][preds > 0].mean() if false_positives > 0 else 'N/A'}")
-
-        # Confusion matrix (all should be class 0)
-        n_classes = rec['n_classes']
-        cm = confusion_matrix([0]*n_tiles, preds, labels=range(n_classes))
-
-        results['polarizations'][pol] = {
-            'n_tiles': int(n_tiles),
-            'false_positives': int(false_positives),
-            'false_positive_rate': float(fpr),
-            'mean_confidence': float(rec['confidence'].mean()),
-            'confusion_matrix': cm.tolist(),
-        }
-
-        # Plot confusion matrix
-        plot_clean_confusion_matrix(cm, n_classes, f"{freq}-{pol}", args.output_dir)
-
-        # Save predictions
-        save_clean_check_h5(rec, args, args.output_dir)
-
-    # Combined summary plot
-    plot_clean_check_summary(all_recs, args.output_dir, 'Amazon')
-
-    # Save results
-    with open(os.path.join(args.output_dir, 'results_amazon_clean.json'), 'w') as f:
-        json.dump(results, f, indent=2)
-
-    return results
-
-
-def score_clean_channel(raw, freq, pol, model, args, ground_truth_label=0):
-    """
-    Score a channel assumed to be clean (or with known label).
-    Similar to score_channel from score_scene.py but with ground truth.
-    """
-    cpi_len, cpi_width = args.cpi_len, args.cpi_width
-
-    dataset = raw.getRawDataset(freq, pol)
-    total_pulses, total_range = dataset.shape
-
-    # Default to full extent if not specified
-    p_start = args.pulse_start if args.pulse_start is not None else 0
-    p_end = args.pulse_end if args.pulse_end is not None else total_pulses
-    p_end = min(p_end, total_pulses)
-
-    r_start = args.range_start if args.range_start is not None else 0
-    r_end = args.range_end if args.range_end is not None else total_range
-    r_end = min(r_end, total_range)
-
-    n_pt = (p_end - p_start) // cpi_len
-    n_rt = (r_end - r_start) // cpi_width
-    p_end = p_start + n_pt * cpi_len
-    r_end = r_start + n_rt * cpi_width
-
-    if n_pt <= 0 or n_rt <= 0:
-        raise ValueError('Window is smaller than one CPI tile')
-
-    n_tiles = n_pt * n_rt
-    print(f"Tile grid: {n_pt} x {n_rt} = {n_tiles} tiles")
-
-    eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
-    global_all = np.zeros((n_tiles, 3), dtype=np.float32)
-    eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)
-    power_db = np.zeros(n_tiles, dtype=np.float32)
-    tile_pulse = np.zeros(n_tiles, dtype=np.int32)
-    tile_range = np.zeros(n_tiles, dtype=np.int32)
-
-    chunk_tiles = max(1, args.pulse_chunk // cpi_len)
-    k = 0
-
-    for chunk_start in range(0, n_pt, chunk_tiles):
-        n_here = min(chunk_tiles, n_pt - chunk_start)
-        cp0 = p_start + chunk_start * cpi_len
-        cp1 = cp0 + n_here * cpi_len
-
-        raw_chunk = read_raw_data_batch(
-            raw, freq, pol, slice(cp0, cp1), slice(r_start, r_end)
-        )
-        mask_chunk = (
-            get_subswath_mask(raw, freq, pol,
-                            np.arange(cp0, cp1), np.arange(r_start, r_end))
-            if args.compute_subswath_mask else None
-        )
-
-        for lp in range(n_here):
-            pt = chunk_start + lp
-            lp0, lp1 = lp * cpi_len, (lp + 1) * cpi_len
-
-            for rt in range(n_rt):
-                lr0, lr1 = rt * cpi_width, (rt + 1) * cpi_width
-
-                cpi = np.ascontiguousarray(
-                    raw_chunk[lp0:lp1, lr0:lr1]).astype(np.complex64)
-                cpi_mask = (np.ascontiguousarray(mask_chunk[lp0:lp1, lr0:lr1])
-                           if mask_chunk is not None else None)
-
-                _, eigvals, diag_lin, diag_valid = compute_scm_and_eigs(
-                    cpi, cpi_mask,
-                    args.off_diag_overlap_ratio, args.diag_valid_ratio
-                )
-
-                eigen_all[k], global_all[k] = features_from_eigenvalues(
-                    eigvals, diag_lin, diag_valid
-                )
-                eigvals_all[k] = eigvals
-                power_db[k] = 10.0 * np.log10(tile_signal_power(cpi, cpi_mask))
-                tile_pulse[k] = p_start + pt * cpi_len
-                tile_range[k] = r_start + lr0
-                k += 1
-
-    print("Predicting...")
-    probs = model.predict([eigen_all, global_all],
-                         batch_size=args.batch_size, verbose=0)
-
-    preds = np.argmax(probs, axis=-1).astype(np.int8)
-    confidence = np.max(probs, axis=-1).astype(np.float32)
-    entropy = (-np.sum(probs * np.log(probs + EPS), axis=-1)).astype(np.float32)
-
-    return {
-        'freq': freq,
-        'pol': pol,
-        'predictions': preds,
-        'confidence': confidence,
-        'entropy': entropy,
-        'eigvals': eigvals_all,
-        'power_db': power_db,
-        'tile_pulse': tile_pulse,
-        'tile_range': tile_range,
-        'n_pt': n_pt,
-        'n_rt': n_rt,
-        'pulse_window': [p_start, p_end],
-        'range_window': [r_start, r_end],
-        'n_classes': probs.shape[-1],
-        'ground_truth_label': ground_truth_label,
-    }
-
-
-def plot_clean_confusion_matrix(cm, n_classes, channel_name, out_dir):
-    """Plot confusion matrix for clean check (single ground truth class)."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    class_names = ['clean'] + [f'knee@{k}' for k in range(1, n_classes)]
-
-    fig, ax = plt.subplots(figsize=(10, 3))
-    im = ax.imshow(cm[:1, :], cmap='Blues', aspect='auto')
-
-    ax.set_xticks(range(n_classes))
-    ax.set_yticks([0])
-    ax.set_xticklabels(class_names)
-    ax.set_yticklabels(['clean (truth)'])
-    ax.set_xlabel('Predicted')
-    ax.set_ylabel('True')
-    ax.set_title(f'Clean Check Confusion Matrix - {channel_name}')
-
-    for j in range(n_classes):
-        text = ax.text(j, 0, str(cm[0, j]),
-                      ha='center', va='center',
-                      color='white' if cm[0, j] > cm.max()/2 else 'black',
-                      fontsize=12)
-
-    plt.colorbar(im, ax=ax)
-    fig.tight_layout()
-    out_path = os.path.join(out_dir, f'confusion_matrix_{channel_name}_clean.png')
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {out_path}")
-
-
-def plot_clean_check_summary(recs, out_dir, dataset_name):
-    """Summary plot for clean check across polarizations."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # False positive rates
-    channels = [f"{r['freq']}-{r['pol']}" for r in recs]
-    fprs = [(r['predictions'] > 0).mean() for r in recs]
-
-    axes[0].bar(channels, fprs, color='steelblue', alpha=0.7)
-    axes[0].set_ylabel('False Positive Rate')
-    axes[0].set_xlabel('Channel')
-    axes[0].set_title('False Positive Rate by Channel')
-    axes[0].grid(True, axis='y', linestyle='--', alpha=0.5)
-
-    for i, (ch, fpr) in enumerate(zip(channels, fprs)):
-        axes[0].text(i, fpr, f'{100*fpr:.2f}%', ha='center', va='bottom')
-
-    # Confidence on false positives
-    for rec in recs:
-        fp_mask = (rec['predictions'] > 0)
-        if fp_mask.sum() > 0:
-            conf_fp = rec['confidence'][fp_mask]
-            axes[1].hist(conf_fp, bins=30, alpha=0.6,
-                        label=f"{rec['freq']}-{rec['pol']}", density=True)
-
-    axes[1].set_xlabel('Confidence (max softmax)')
-    axes[1].set_ylabel('Density')
-    axes[1].set_title('Confidence Distribution on False Positives')
-    axes[1].legend()
-    axes[1].grid(True, linestyle='--', alpha=0.5)
-
-    fig.suptitle(f'{dataset_name} Clean Check Summary', fontsize=14)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    out_path = os.path.join(out_dir, f'{dataset_name.lower()}_clean_summary.png')
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {out_path}")
-
-
-def save_clean_check_h5(rec, args, out_dir):
-    """Save clean check predictions to HDF5."""
-    path = os.path.join(out_dir, f"predictions_{rec['freq']}_{rec['pol']}_clean.h5")
-    with h5py.File(path, 'w') as f:
-        f.attrs['mode'] = 'clean_check'
-        f.attrs['nisar_file'] = args.nisar_file
-        f.attrs['frequency'] = rec['freq']
-        f.attrs['polarization'] = rec['pol']
-        f.attrs['ground_truth_label'] = rec['ground_truth_label']
-        f.attrs['pulse_start'] = rec['pulse_window'][0]
-        f.attrs['pulse_end'] = rec['pulse_window'][1]
-        f.attrs['range_start'] = rec['range_window'][0]
-        f.attrs['range_end'] = rec['range_window'][1]
-        f.attrs['n_pulse_tiles'] = rec['n_pt']
-        f.attrs['n_range_tiles'] = rec['n_rt']
-
-        f.create_dataset('predictions', data=rec['predictions'])
-        f.create_dataset('confidence', data=rec['confidence'])
-        f.create_dataset('entropy', data=rec['entropy'])
-        f.create_dataset('eigenvalues', data=rec['eigvals'], compression='gzip')
-        f.create_dataset('signal_power_db', data=rec['power_db'])
-        f.create_dataset('tile_pulse', data=rec['tile_pulse'])
-        f.create_dataset('tile_range', data=rec['tile_range'])
-
-    print(f"Saved {path}")
-
-
-# ===========================================================================
-# MODE 3: MOUNTAINS CLEAN CHECK
+# MODE 2: MOUNTAINS CLEAN CHECK
 # ===========================================================================
 
 def mountains_clean_check(model, args):
@@ -1003,95 +654,91 @@ def score_mountain_tiles(raw, freq, pol, model, args, tile_spec, ground_truth_la
     }
 
 
-# ===========================================================================
-# MODE 4: SCORE SCENE (NO GROUND TRUTH)
-# ===========================================================================
-
-def score_scene_mode(model, args):
-    """
-    Score a scene with no ground truth labels.
-    Analog to score_scene.py integrated into test_only.py.
-    """
+def plot_clean_confusion_matrix(cm, n_classes, channel_name, out_dir):
+    """Plot confusion matrix for clean check (single ground truth class)."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    print(f"\n{'='*70}")
-    print('SCORE SCENE (NO GROUND TRUTH)')
-    print(f"{'='*70}")
-    print(f"NISAR file: {args.nisar_file}")
-    print(f"Frequency: {args.freq}, Polarization: {args.pol}")
+    class_names = ['clean'] + [f'knee@{k}' for k in range(1, n_classes)]
 
-    pulse_str = (f"[{args.pulse_start if args.pulse_start is not None else 'full'}, "
-                 f"{args.pulse_end if args.pulse_end is not None else 'full'})")
-    print(f"Pulses: {pulse_str}")
+    fig, ax = plt.subplots(figsize=(10, 3))
+    im = ax.imshow(cm[:1, :], cmap='Blues', aspect='auto')
 
-    rng_str = (f"[{args.range_start if args.range_start is not None else 'full'}, "
-               f"{args.range_end if args.range_end is not None else 'full'})")
-    print(f"Range: {rng_str}")
+    ax.set_xticks(range(n_classes))
+    ax.set_yticks([0])
+    ax.set_xticklabels(class_names)
+    ax.set_yticklabels(['clean (truth)'])
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('True')
+    ax.set_title(f'Clean Check Confusion Matrix - {channel_name}')
 
-    raw = Raw(hdf5file=args.nisar_file)
-    raw.parsePolarizations()
+    for j in range(n_classes):
+        text = ax.text(j, 0, str(cm[0, j]),
+                      ha='center', va='center',
+                      color='white' if cm[0, j] > cm.max()/2 else 'black',
+                      fontsize=12)
 
-    rec = score_clean_channel(raw, args.freq, args.pol, model, args, ground_truth_label=None)
-
-    # Report statistics
-    preds = rec['predictions']
-    n_tiles = len(preds)
-    n_classes = rec['n_classes']
-
-    print(f"\nTotal tiles: {n_tiles}")
-    print(f"Prediction distribution:")
-    dist = np.bincount(preds, minlength=n_classes)[:n_classes]
-    for k, count in enumerate(dist):
-        label = 'clean' if k == 0 else f'knee@{k}'
-        print(f"  {label}: {count} ({100*count/n_tiles:.2f}%)")
-
-    print(f"\nMean confidence: {rec['confidence'].mean():.3f}")
-
-    results = {
-        'mode': 'score_scene',
-        'nisar_file': args.nisar_file,
-        'frequency': rec['freq'],
-        'polarization': rec['pol'],
-        'pulse_window': rec['pulse_window'],
-        'range_window': rec['range_window'],
-        'n_tiles': int(n_tiles),
-        'prediction_distribution': {str(k): int(v) for k, v in enumerate(dist)},
-        'mean_confidence': float(rec['confidence'].mean()),
-    }
-
-    # Save outputs based on flags
-    if args.save_predictions:
-        save_scene_predictions_h5(rec, args, args.output_dir)
-
-    if args.save_confidence:
-        plot_confidence_maps(rec, args.output_dir)
-
-    if args.save_profiles:
-        plot_eigenvalue_profiles(rec, args.output_dir)
-
-    if args.save_diagnostics:
-        plot_diagnostic_plots(rec, args.output_dir)
-
-    # Save results JSON
-    with open(os.path.join(args.output_dir, 'results_scene.json'), 'w') as f:
-        json.dump(results, f, indent=2)
-
-    print(f"\nResults saved to {args.output_dir}")
-
-    return results
+    plt.colorbar(im, ax=ax)
+    fig.tight_layout()
+    out_path = os.path.join(out_dir, f'confusion_matrix_{channel_name}_clean.png')
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
 
 
-def save_scene_predictions_h5(rec, args, out_dir):
-    """Save scene predictions to HDF5."""
-    path = os.path.join(out_dir, f"predictions_{rec['freq']}_{rec['pol']}_scene.h5")
+def plot_clean_check_summary(recs, out_dir, dataset_name):
+    """Summary plot for clean check across polarizations."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # False positive rates
+    channels = [f"{r['freq']}-{r['pol']}" for r in recs]
+    fprs = [(r['predictions'] > 0).mean() for r in recs]
+
+    axes[0].bar(channels, fprs, color='steelblue', alpha=0.7)
+    axes[0].set_ylabel('False Positive Rate')
+    axes[0].set_xlabel('Channel')
+    axes[0].set_title('False Positive Rate by Channel')
+    axes[0].grid(True, axis='y', linestyle='--', alpha=0.5)
+
+    for i, (ch, fpr) in enumerate(zip(channels, fprs)):
+        axes[0].text(i, fpr, f'{100*fpr:.2f}%', ha='center', va='bottom')
+
+    # Confidence on false positives
+    for rec in recs:
+        fp_mask = (rec['predictions'] > 0)
+        if fp_mask.sum() > 0:
+            conf_fp = rec['confidence'][fp_mask]
+            axes[1].hist(conf_fp, bins=30, alpha=0.6,
+                        label=f"{rec['freq']}-{rec['pol']}", density=True)
+
+    axes[1].set_xlabel('Confidence (max softmax)')
+    axes[1].set_ylabel('Density')
+    axes[1].set_title('Confidence Distribution on False Positives')
+    axes[1].legend()
+    axes[1].grid(True, linestyle='--', alpha=0.5)
+
+    fig.suptitle(f'{dataset_name} Clean Check Summary', fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    out_path = os.path.join(out_dir, f'{dataset_name.lower()}_clean_summary.png')
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved {out_path}")
+
+
+def save_clean_check_h5(rec, args, out_dir):
+    """Save clean check predictions to HDF5."""
+    path = os.path.join(out_dir, f"predictions_{rec['freq']}_{rec['pol']}_clean.h5")
     with h5py.File(path, 'w') as f:
-        f.attrs['mode'] = 'score_scene'
+        f.attrs['mode'] = 'clean_check'
         f.attrs['nisar_file'] = args.nisar_file
         f.attrs['frequency'] = rec['freq']
         f.attrs['polarization'] = rec['pol']
-        f.attrs['labeled'] = False
+        f.attrs['ground_truth_label'] = rec['ground_truth_label']
         f.attrs['pulse_start'] = rec['pulse_window'][0]
         f.attrs['pulse_end'] = rec['pulse_window'][1]
         f.attrs['range_start'] = rec['range_window'][0]
@@ -1107,193 +754,7 @@ def save_scene_predictions_h5(rec, args, out_dir):
         f.create_dataset('tile_pulse', data=rec['tile_pulse'])
         f.create_dataset('tile_range', data=rec['tile_range'])
 
-    print(f"Saved predictions: {path}")
-
-
-def plot_confidence_maps(rec, out_dir):
-    """Plot knee map and confidence map."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    n_pt, n_rt = rec['n_pt'], rec['n_rt']
-
-    # Knee map
-    grid = rec['predictions'].reshape(n_pt, n_rt)
-    fig, ax = plt.subplots(figsize=(13, 6))
-    im = ax.imshow(grid, aspect='auto', cmap='inferno', origin='upper',
-                   vmin=0, vmax=max(rec['n_classes'] - 1, 1),
-                   interpolation='nearest',
-                   extent=[rec['range_window'][0], rec['range_window'][1],
-                          rec['pulse_window'][1], rec['pulse_window'][0]])
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Predicted knee (0 = clean)')
-    ax.set_xlabel('Range sample')
-    ax.set_ylabel('Pulse')
-    ax.set_title(f"Predicted Knee Map - {rec['freq']}-{rec['pol']}")
-    fig.tight_layout()
-    path = os.path.join(out_dir, f"knee_map_{rec['freq']}_{rec['pol']}.png")
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
     print(f"Saved {path}")
-
-    # Confidence map
-    grid = rec['confidence'].reshape(n_pt, n_rt)
-    fig, ax = plt.subplots(figsize=(13, 6))
-    im = ax.imshow(grid, aspect='auto', cmap='viridis', origin='upper',
-                   vmin=0, vmax=1, interpolation='nearest',
-                   extent=[rec['range_window'][0], rec['range_window'][1],
-                          rec['pulse_window'][1], rec['pulse_window'][0]])
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Confidence (max softmax)')
-    ax.set_xlabel('Range sample')
-    ax.set_ylabel('Pulse')
-    ax.set_title(f"Confidence Map - {rec['freq']}-{rec['pol']}")
-    fig.tight_layout()
-    path = os.path.join(out_dir, f"confidence_map_{rec['freq']}_{rec['pol']}.png")
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {path}")
-
-
-def plot_eigenvalue_profiles(rec, out_dir):
-    """Plot eigenvalue profiles by predicted class."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-    import matplotlib.colors as mcolors
-
-    n_classes = rec['n_classes']
-    preds = rec['predictions']
-
-    ev = np.maximum(rec['eigvals'][:, :N_KEEP], EPS)
-    ev_db = 10.0 * np.log10(ev / np.maximum(ev[:, :1], EPS))
-    idx = np.arange(1, N_KEEP + 1)
-
-    norm = mcolors.Normalize(vmin=0, vmax=max(n_classes - 1, 1))
-    cmap_colors = cm.plasma
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for k in range(n_classes):
-        sel = (preds == k)
-        if sel.sum() < 5:
-            continue
-        mean_prof = ev_db[sel].mean(axis=0)
-        ax.plot(idx, mean_prof, color=cmap_colors(norm(k)), linewidth=2,
-               label=f"{'clean' if k == 0 else f'knee@{k}'} (n={int(sel.sum())})")
-        if k > 0:
-            ax.plot(k, mean_prof[k - 1], 'rx', markersize=8, markeredgewidth=2)
-
-    ax.set_xlabel('Eigenvalue index (1-based, descending)')
-    ax.set_ylabel('Eigenvalue (dB, normalized to lambda_max)')
-    ax.grid(True, linestyle='--', alpha=0.4)
-    ax.legend(fontsize=9)
-    ax.set_title(f"Mean Eigenvalue Profile by Predicted Class - {rec['freq']}-{rec['pol']}")
-
-    fig.tight_layout()
-    path = os.path.join(out_dir, f"eigen_profiles_{rec['freq']}_{rec['pol']}.png")
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {path}")
-
-
-def plot_diagnostic_plots(rec, out_dir):
-    """Plot diagnostic plots: power vs prediction, confidence by class."""
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    n_classes = rec['n_classes']
-    preds = rec['predictions']
-    power = rec['power_db']
-    conf = rec['confidence']
-    entropy = rec['entropy']
-
-    # Power vs prediction
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-    groups, labels, counts = [], [], []
-    for k in range(n_classes):
-        sel = (preds == k)
-        if sel.sum() >= 10:
-            groups.append(power[sel])
-            labels.append('clean' if k == 0 else f'knee@{k}')
-            counts.append(int(sel.sum()))
-
-    if groups:
-        bp = ax1.boxplot(groups, labels=labels, showfliers=False, patch_artist=True)
-        for patch in bp['boxes']:
-            patch.set_facecolor('steelblue')
-            patch.set_alpha(0.6)
-        ax1.set_ylabel('Tile baseline power (dB)')
-        ax1.set_xlabel('Predicted class')
-        ax1.grid(True, axis='y', linestyle='--', alpha=0.5)
-        ax1.set_title('Baseline Power by Predicted Class')
-
-    # Scatter
-    n = len(preds)
-    if n > 20000:
-        idx = np.random.default_rng(0).choice(n, size=20000, replace=False)
-    else:
-        idx = np.arange(n)
-
-    sc = ax2.scatter(preds[idx] + np.random.default_rng(1).uniform(-0.25, 0.25, len(idx)),
-                    power[idx], c=conf[idx], cmap='viridis',
-                    s=3, alpha=0.4, vmin=0, vmax=1)
-    fig.colorbar(sc, ax=ax2, label='Confidence')
-    ax2.set_xticks(range(n_classes))
-    ax2.set_xticklabels(['clean'] + [f'{k}' for k in range(1, n_classes)])
-    ax2.set_xlabel('Predicted knee')
-    ax2.set_ylabel('Tile baseline power (dB)')
-    ax2.grid(True, linestyle='--', alpha=0.4)
-    ax2.set_title('Power vs Prediction (subsample)')
-
-    fig.suptitle(f"Power Diagnostics - {rec['freq']}-{rec['pol']}", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    path = os.path.join(out_dir, f"power_diagnostics_{rec['freq']}_{rec['pol']}.png")
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
-    print(f"Saved {path}")
-
-    # Confidence by class
-    conf_groups, ent_groups, labels2, counts2 = [], [], [], []
-    for k in range(n_classes):
-        sel = (preds == k)
-        if sel.sum() >= 10:
-            conf_groups.append(conf[sel])
-            ent_groups.append(entropy[sel])
-            labels2.append('clean' if k == 0 else f'knee@{k}')
-            counts2.append(int(sel.sum()))
-
-    if conf_groups:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-        bp1 = ax1.boxplot(conf_groups, labels=labels2, showfliers=False, patch_artist=True)
-        for patch in bp1['boxes']:
-            patch.set_facecolor('steelblue')
-            patch.set_alpha(0.6)
-        ax1.set_ylabel('Max softmax probability')
-        ax1.set_xlabel('Predicted class')
-        ax1.set_ylim(0, 1.02)
-        ax1.grid(True, axis='y', linestyle='--', alpha=0.5)
-        ax1.set_title('Confidence per Prediction')
-
-        bp2 = ax2.boxplot(ent_groups, labels=labels2, showfliers=False, patch_artist=True)
-        for patch in bp2['boxes']:
-            patch.set_facecolor('indianred')
-            patch.set_alpha(0.6)
-        ax2.set_ylabel('Posterior entropy (nats)')
-        ax2.set_xlabel('Predicted class')
-        ax2.grid(True, axis='y', linestyle='--', alpha=0.5)
-        ax2.set_title('Uncertainty per Prediction')
-
-        fig.suptitle(f"Confidence Diagnostics - {rec['freq']}-{rec['pol']}", fontsize=12)
-        fig.tight_layout(rect=(0, 0, 1, 0.94))
-        path = os.path.join(out_dir, f"confidence_diagnostics_{rec['freq']}_{rec['pol']}.png")
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        print(f"Saved {path}")
 
 
 # ===========================================================================
@@ -1317,31 +778,6 @@ def parse_args():
     combined.add_argument('--batch-size', type=int, default=4096)
     combined.add_argument('--output-dir', required=True)
 
-    # Amazon clean check
-    amazon = subparsers.add_parser('amazon-clean',
-                                  help='Test real Amazon data (assumed clean)')
-    amazon.add_argument('--model', required=True, help='Trained Keras model')
-    amazon.add_argument('--nisar-file', required=True, help='NISAR L0B file')
-    amazon.add_argument('--freq', required=True, choices=['A', 'B'])
-    amazon.add_argument('--pulse-start', type=int, default=None,
-                       help='Default: 0 (start of acquisition)')
-    amazon.add_argument('--pulse-end', type=int, default=None,
-                       help='Default: full pulse extent')
-    amazon.add_argument('--range-start', type=int, default=None,
-                       help='Default: 0 (start of swath)')
-    amazon.add_argument('--range-end', type=int, default=None,
-                       help='Default: full range extent')
-    amazon.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT)
-    amazon.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
-    amazon.add_argument('--pulse-chunk', type=int, default=PULSE_CHUNK_DEFAULT)
-    amazon.add_argument('--compute-subswath-mask', action='store_true')
-    amazon.add_argument('--off-diag-overlap-ratio', type=float,
-                       default=OFF_DIAG_OVERLAP_RATIO_DEFAULT)
-    amazon.add_argument('--diag-valid-ratio', type=float,
-                       default=DIAG_VALID_RATIO_DEFAULT)
-    amazon.add_argument('--batch-size', type=int, default=4096)
-    amazon.add_argument('--output-dir', required=True)
-
     # Mountains clean check
     mountains = subparsers.add_parser('mountains-clean',
                                      help='Test real Mountains data (assumed clean)')
@@ -1358,40 +794,6 @@ def parse_args():
                           default=DIAG_VALID_RATIO_DEFAULT)
     mountains.add_argument('--batch-size', type=int, default=4096)
     mountains.add_argument('--output-dir', required=True)
-
-    # Score scene (no ground truth)
-    scene = subparsers.add_parser('score-scene',
-                                 help='Score scene with no ground truth')
-    scene.add_argument('--model', required=True, help='Trained Keras model')
-    scene.add_argument('--nisar-file', required=True, help='NISAR L0B file')
-    scene.add_argument('--freq', required=True, choices=['A', 'B'])
-    scene.add_argument('--pol', required=True, help='Polarization (e.g. HH, HV)')
-    scene.add_argument('--pulse-start', type=int, default=None,
-                      help='Default: 0 (start of acquisition)')
-    scene.add_argument('--pulse-end', type=int, default=None,
-                      help='Default: full pulse extent')
-    scene.add_argument('--range-start', type=int, default=None,
-                      help='Default: 0 (start of swath)')
-    scene.add_argument('--range-end', type=int, default=None,
-                      help='Default: full range extent')
-    scene.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT)
-    scene.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
-    scene.add_argument('--pulse-chunk', type=int, default=PULSE_CHUNK_DEFAULT)
-    scene.add_argument('--compute-subswath-mask', action='store_true')
-    scene.add_argument('--off-diag-overlap-ratio', type=float,
-                      default=OFF_DIAG_OVERLAP_RATIO_DEFAULT)
-    scene.add_argument('--diag-valid-ratio', type=float,
-                      default=DIAG_VALID_RATIO_DEFAULT)
-    scene.add_argument('--save-predictions', action='store_true',
-                      help='Save predictions to HDF5')
-    scene.add_argument('--save-confidence', action='store_true',
-                      help='Save knee and confidence maps')
-    scene.add_argument('--save-profiles', action='store_true',
-                      help='Save eigenvalue profiles')
-    scene.add_argument('--save-diagnostics', action='store_true',
-                      help='Save diagnostic plots (power, confidence)')
-    scene.add_argument('--batch-size', type=int, default=4096)
-    scene.add_argument('--output-dir', required=True)
 
     return parser.parse_args()
 
@@ -1413,12 +815,8 @@ def main():
     # Dispatch to appropriate mode
     if args.mode == 'combined':
         combined_synthetic_test(model, args.data_dirs, args)
-    elif args.mode == 'amazon-clean':
-        amazon_clean_check(model, args)
     elif args.mode == 'mountains-clean':
         mountains_clean_check(model, args)
-    elif args.mode == 'score-scene':
-        score_scene_mode(model, args)
     else:
         print(f"Unknown mode: {args.mode}")
         return 1
