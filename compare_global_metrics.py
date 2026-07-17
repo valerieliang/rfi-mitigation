@@ -284,15 +284,15 @@ def load_nisar(path, freq, pol, diag_valid_frac_thresh, n_keep,
     Requires isce3 to decode the BFPQLUT-compressed raw data.
     """
     try:
-        import isce3
+        from nisar.products.readers.Raw import Raw
     except ImportError as exc:
         raise RuntimeError(
-            "isce3 is required for --mode nisar (BFPQLUT decoding). "
+            "nisar.products.readers.Raw is required for --mode nisar (BFPQLUT decoding). "
             "Run this script inside the project's 'isce3' conda environment "
             "(py-isce3) on nisar-adt-dev-5."
         ) from exc
 
-    raw = isce3.io.Raw(path)
+    raw = Raw(hdf5file=path)
     raw_dataset = raw.getRawDataset(freq, pol)
     n_pulses_total, n_range_total = raw_dataset.shape
 
