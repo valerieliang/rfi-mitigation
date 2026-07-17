@@ -618,6 +618,14 @@ def main():
     parser.add_argument("--rfi-label-max", type=int, default=DEFAULT_RFI_LABEL_MAX,
                         help="[preprocessed mode only] maximum knee label (inclusive) counted "
                              f"as synthetic RFI for the RFI-only report (default: {DEFAULT_RFI_LABEL_MAX})")
+    parser.add_argument("--rfi-only", action="store_true",
+                        help="[preprocessed mode only] drop clean tiles (label 0) entirely and "
+                             "restrict the MAIN report/tracking row -- not just the secondary "
+                             "report -- to tiles labeled in [--rfi-label-min, --rfi-label-max]. "
+                             "Requires the input to carry a 'labels' dataset. Use this instead "
+                             "of eyeballing the '(rfi only)' rows when you want clean tiles "
+                             "excluded from the primary output, not just given a side-by-side "
+                             "comparison.")
 
     parser.add_argument("--output-json", default=None,
                         help="Optional path to write summary statistics as JSON.")
@@ -657,11 +665,35 @@ def main():
         print("No valid CPI tiles found with the given filters.", file=sys.stderr)
         sys.exit(1)
 
+    primary_report_name = "All valid CPI tiles"
+    if args.rfi_only:
+        if eig_kept_rfi_only is None:
+            print(
+                "--rfi-only requires a 'labels' dataset (e.g. a rfi_data_<freq>_<pol>.h5 "
+                "file produced by generate_amazon_data.py / generate_mountain_data.py); "
+                f"none was found in {args.input}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if eig_kept_rfi_only.shape[0] == 0:
+            print(
+                f"--rfi-only found no tiles with label in "
+                f"[{args.rfi_label_min}, {args.rfi_label_max}] in {args.input}.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Clean tiles are dropped here, before any report/tracking-row is
+        # built, rather than only being excluded from a secondary report.
+        counts["n_clean_tiles_dropped_by_rfi_only"] = int(eig_kept.shape[0] - eig_kept_rfi_only.shape[0])
+        eig_kept = eig_kept_rfi_only
+        eig_kept_rfi_only = None  # secondary report below would now be redundant
+        primary_report_name = f"RFI-contaminated tiles only (--rfi-only, labels {args.rfi_label_min}-{args.rfi_label_max})"
+
     metrics = compute_all_metrics(eig_kept, args.median_max_ratio_def)
     summaries = [summarize(v, name) for name, v in metrics.items()]
 
     print_report(args.mode, args, counts, summaries, args.median_max_ratio_def,
-                 report_name="All valid CPI tiles")
+                 report_name=primary_report_name)
 
     if args.run_name:
         written_paths = update_all_metrics_tables(args.metrics_dir, args.run_name, summaries)
@@ -670,9 +702,14 @@ def main():
     # Synthetic RFI-only report: same three metrics, restricted to tiles
     # whose label (knee) falls in [rfi_label_min, rfi_label_max]. Clean
     # tiles (label 0) are excluded so they cannot dilute these statistics.
+    # Skipped entirely under --rfi-only, since the primary report above
+    # already *is* this restriction -- printing it again would just repeat
+    # the same numbers under a different heading.
     metrics_rfi_only = None
     summaries_rfi_only = None
-    if eig_kept_rfi_only is None:
+    if args.rfi_only:
+        pass
+    elif eig_kept_rfi_only is None:
         print()
         print(f"[RFI-only report skipped: no 'labels' dataset found for "
               f"{args.mode} input -- this report requires a labeled RFI "
