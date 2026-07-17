@@ -37,6 +37,26 @@ If no "labels" dataset is present (e.g. clean_mountains_filtered.h5, or any
 --mode nisar input, since raw NISAR data has no injected-RFI ground truth),
 the RFI-only report is skipped and a note is printed instead.
 
+CROSS-RUN METRICS TRACKING TABLE (--run-name):
+Pass --run-name "<some label>" (e.g. "amazon train", "mountains czech") to
+additionally update a small set of tracking CSVs under --metrics-dir
+(default: metrics/), one file per global metric:
+
+    metrics/condition_number_db.csv
+    metrics/effective_rank.csv
+    metrics/median_max_ratio.csv
+
+Each file has one row per run name (mean, median, std, min, max, p05, p95,
+iqr, count). Calling this script again with the same --run-name overwrites
+that run's row in place; a new --run-name appends a new row. This is how
+the same three metrics get compared across many datasets/runs over time
+without hand-copying numbers into a spreadsheet.
+
+If the input also has a "labels" dataset (see above), the RFI-only report's
+numbers are written to the same tracking CSVs under a second row named
+"<run-name> (rfi only)", so both the mixed and RFI-only statistics for a
+run can be compared side by side.
+
 IMPORTANT NOTE ON THE NISAR PATH:
 The gap-exclusion covariance construction used here (see
 `compute_gap_exclusion_cov_simple`) is a best-effort reconstruction based on
@@ -58,15 +78,22 @@ Usage:
     python compare_global_metrics.py --mode nisar \\
         --input NISAR_L0_..._h5 --freq A --pol HH \\
         --pulse-start 0 --pulse-end 10000 --range-start 0 --range-end 5000
+
+  Recording a run in the cross-run tracking table:
+    python compare_global_metrics.py --mode preprocessed \\
+        --input rfi_data_A_HH.h5 --freq A --pol HH \\
+        --run-name "amazon train" --metrics-dir metrics
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
 
 import h5py
 import numpy as np
+
 
 # CPI tile size -- always 16 pulses x 250 range samples, per project convention
 CPI_PULSES = 16
@@ -172,6 +199,80 @@ def summarize(values, name):
         "p95": float(np.percentile(arr, 95)),
         "iqr": float(np.percentile(arr, 75) - np.percentile(arr, 25)),
     }
+
+
+# Column order used by both the tracking CSVs and every row written into them.
+TRACKING_TABLE_FIELDS = ["run", "mean", "median", "std", "min", "max", "p05", "p95", "iqr", "count"]
+
+
+def update_metrics_table(metrics_dir, metric_name, run_name, summary):
+    """
+    Insert or update a single named row in metrics_dir/<metric_name>.csv.
+
+    Each per-metric CSV is a small table with one row per run name (e.g.
+    "amazon train", "mountains czech (rfi only)"). Calling this again with
+    a run_name that already has a row overwrites that row in place; a new
+    run_name is appended as a new row. Row order otherwise follows first
+    appearance, so re-running an existing name does not reshuffle the file.
+
+    metrics_dir : directory to create/write the CSV in (created if missing)
+    metric_name : e.g. "condition_number_db" -- becomes the CSV filename
+    run_name    : the row label, e.g. "amazon train"
+    summary     : a dict as returned by summarize() for this metric
+    """
+    os.makedirs(metrics_dir, exist_ok=True)
+    path = os.path.join(metrics_dir, f"{metric_name}.csv")
+
+    rows = {}
+    order = []
+    if os.path.exists(path):
+        with open(path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                rows[r["run"]] = r
+                order.append(r["run"])
+
+    if run_name not in rows:
+        order.append(run_name)
+
+    if summary.get("count", 0) == 0:
+        # No valid tiles for this run -- still record the row so the run
+        # shows up in the table, with blank statistics.
+        rows[run_name] = {"run": run_name, "count": 0}
+    else:
+        rows[run_name] = {
+            "run": run_name,
+            "mean": summary["mean"],
+            "median": summary["median"],
+            "std": summary["std"],
+            "min": summary["min"],
+            "max": summary["max"],
+            "p05": summary["p05"],
+            "p95": summary["p95"],
+            "iqr": summary["iqr"],
+            "count": summary["count"],
+        }
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=TRACKING_TABLE_FIELDS)
+        writer.writeheader()
+        for name in order:
+            writer.writerow(rows[name])
+
+    return path
+
+
+def update_all_metrics_tables(metrics_dir, run_name, summaries):
+    """
+    Call update_metrics_table once per metric in `summaries` (the list
+    returned by [summarize(v, name) for name, v in metrics.items()]).
+
+    Returns the list of CSV paths written/updated.
+    """
+    paths = []
+    for s in summaries:
+        paths.append(update_metrics_table(metrics_dir, s["metric"], run_name, s))
+    return paths
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +624,15 @@ def main():
     parser.add_argument("--output-csv", default=None,
                         help="Optional path to write per-CPI metric values as CSV.")
 
+    parser.add_argument("--run-name", default=None,
+                        help="If given, record this run's summary statistics as a named "
+                             "row in the cross-run tracking CSVs under --metrics-dir "
+                             "(one CSV per global metric). Re-using a run name overwrites "
+                             "its row; a new name appends a row.")
+    parser.add_argument("--metrics-dir", default="metrics",
+                        help="Directory holding the per-metric cross-run tracking CSVs "
+                             "(default: metrics)")
+
     args = parser.parse_args()
 
     eig_kept_rfi_only = None
@@ -553,6 +663,10 @@ def main():
     print_report(args.mode, args, counts, summaries, args.median_max_ratio_def,
                  report_name="All valid CPI tiles")
 
+    if args.run_name:
+        written_paths = update_all_metrics_tables(args.metrics_dir, args.run_name, summaries)
+        print(f"Updated tracking row '{args.run_name}' in: {', '.join(written_paths)}")
+
     # Synthetic RFI-only report: same three metrics, restricted to tiles
     # whose label (knee) falls in [rfi_label_min, rfi_label_max]. Clean
     # tiles (label 0) are excluded so they cannot dilute these statistics.
@@ -579,6 +693,11 @@ def main():
         print_report(args.mode, args, rfi_counts, summaries_rfi_only, args.median_max_ratio_def,
                      report_name=f"Synthetic RFI tiles only (labels {args.rfi_label_min}-{args.rfi_label_max})")
 
+        if args.run_name:
+            rfi_run_name = f"{args.run_name} (rfi only)"
+            written_paths = update_all_metrics_tables(args.metrics_dir, rfi_run_name, summaries_rfi_only)
+            print(f"Updated tracking row '{rfi_run_name}' in: {', '.join(written_paths)}")
+
     if args.output_json:
         payload = {
             "mode": args.mode,
@@ -599,7 +718,6 @@ def main():
         print(f"Wrote summary JSON to {args.output_json}")
 
     if args.output_csv:
-        import csv
         with open(args.output_csv, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(list(metrics.keys()))
