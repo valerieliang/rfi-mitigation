@@ -712,7 +712,8 @@ def plot_selected_predictions(rec, out_dir, n_per_class, seed):
 
     # Shared y-range so panels are directly comparable to each other
     sample_all = ev_db[rng.choice(len(knee), size=min(5000, len(knee)), replace=False)]
-    ylim = [float(np.percentile(sample_all, 0.5)) - 3.0, 3.0]
+    # Use low percentile to ensure all 12 eigenvalues are visible
+    ylim = [float(np.percentile(sample_all.ravel(), 0.01)) - 5.0, 3.0]
 
     n_rows, n_cols = len(present), n_per_class
     fig, axes = plt.subplots(n_rows, n_cols,
