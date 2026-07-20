@@ -395,19 +395,30 @@ def plot_knee_map(rec, out_dir):
 
     grid = rec['knee'].reshape(rec['n_pt'], rec['n_rt'])
 
+    # Convert pulse/range indices to CPI index and range blocks
+    # CPI index = pulse_index / cpi_len (typically 16)
+    # Range blocks = range_index / cpi_width (typically 250)
+    cpi_len = CPI_LEN_DEFAULT
+    cpi_width = CPI_WIDTH_DEFAULT
+
+    cpi_start = rec['pulse_window'][0] / cpi_len
+    cpi_end = rec['pulse_window'][1] / cpi_len
+    range_block_start = rec['range_window'][0] / cpi_width
+    range_block_end = rec['range_window'][1] / cpi_width
+
     fig, ax = plt.subplots(figsize=(13, 6))
     # origin='upper' plus a top-down extent puts the FIRST pulse at the top of the
     # axis and runs time downward, matching how a radar swath is normally read.
     im = ax.imshow(grid, aspect='auto', cmap='inferno', origin='upper',
                    vmin=0, vmax=max(rec['n_classes'] - 1, 1),
                    interpolation='nearest',
-                   extent=[rec['range_window'][0], rec['range_window'][1],
-                           rec['pulse_window'][1], rec['pulse_window'][0]])
+                   extent=[range_block_start, range_block_end,
+                           cpi_end, cpi_start])
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Predicted knee (0 = clean)')
+    cbar.set_label('Number of RFI eigenvalues')
 
-    ax.set_xlabel('Range sample')
-    ax.set_ylabel('Pulse')
+    ax.set_xlabel('Range blocks')
+    ax.set_ylabel('CPI index')
     ax.set_title(f"Predicted knee across scene -- {rec['chan']} (UNMODIFIED data)\n"
                  f"no ground truth: knee > 0 are candidate detections. "
                  f"Look for coherent range columns / slow-time blocks.")
@@ -433,17 +444,28 @@ def plot_confidence_map(rec, out_dir):
 
     grid = rec['confidence'].reshape(rec['n_pt'], rec['n_rt'])
 
+    # Convert pulse/range indices to CPI index and range blocks
+    # CPI index = pulse_index / cpi_len (typically 16)
+    # Range blocks = range_index / cpi_width (typically 250)
+    cpi_len = CPI_LEN_DEFAULT
+    cpi_width = CPI_WIDTH_DEFAULT
+
+    cpi_start = rec['pulse_window'][0] / cpi_len
+    cpi_end = rec['pulse_window'][1] / cpi_len
+    range_block_start = rec['range_window'][0] / cpi_width
+    range_block_end = rec['range_window'][1] / cpi_width
+
     fig, ax = plt.subplots(figsize=(13, 6))
     # Same top-down pulse axis as the knee map so the two can be read side by side
     im = ax.imshow(grid, aspect='auto', cmap='viridis', origin='upper',
                    vmin=0, vmax=1, interpolation='nearest',
-                   extent=[rec['range_window'][0], rec['range_window'][1],
-                           rec['pulse_window'][1], rec['pulse_window'][0]])
+                   extent=[range_block_start, range_block_end,
+                           cpi_end, cpi_start])
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label('Max softmax probability')
 
-    ax.set_xlabel('Range sample')
-    ax.set_ylabel('Pulse')
+    ax.set_xlabel('Range blocks')
+    ax.set_ylabel('CPI index')
     ax.set_title(f"Model confidence across scene -- {rec['chan']}\n"
                  f"compare against the knee map: coherent AND confident is the "
                  f"strongest evidence")
