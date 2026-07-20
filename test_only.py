@@ -270,7 +270,8 @@ def combined_synthetic_test(model, data_dirs, args):
 
     # Classification report
     print("\nClassification Report:")
-    class_names = ['clean'] + [f'knee@{k}' for k in range(1, n_classes)]
+    class_names = ['clean'] + [(f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues')
+                                 for k in range(1, n_classes)]
     print(classification_report(labels_all, preds, target_names=class_names, digits=3))
 
     # Save results
@@ -371,7 +372,8 @@ def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title=''):
     jsr_bins = np.arange(-10, 35, 2)
     bin_centers = (jsr_bins[:-1] + jsr_bins[1:]) / 2
 
-    class_names = ['clean'] + [f'knee@{k}' for k in range(1, n_classes)]
+    class_names = ['clean'] + [(f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues')
+                                 for k in range(1, n_classes)]
 
     for k in range(n_classes):
         mask = (labels == k)
@@ -534,7 +536,7 @@ def mountains_clean_check(model, args):
         fpr = false_positives / n_tiles
 
         print(f"Total tiles: {n_tiles}")
-        print(f"False positives (knee>0): {false_positives} ({100*fpr:.2f}%)")
+        print(f"False positives (k>0 RFI eigs): {false_positives} ({100*fpr:.2f}%)")
         print(f"Mean confidence: {rec['confidence'].mean():.3f}")
 
         # Confusion matrix
@@ -660,7 +662,8 @@ def plot_clean_confusion_matrix(cm, n_classes, channel_name, out_dir):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    class_names = ['clean'] + [f'knee@{k}' for k in range(1, n_classes)]
+    class_names = ['clean'] + [(f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues')
+                                 for k in range(1, n_classes)]
 
     fig, ax = plt.subplots(figsize=(10, 3))
     im = ax.imshow(cm[:1, :], cmap='Blues', aspect='auto')

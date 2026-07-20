@@ -551,7 +551,8 @@ def evaluate_source(model, eigen, global_, labels, source_name):
         result['per_class_accuracy'] = per_class
         print(f"  [{source_name}] tiles: {len(labels)}  overall accuracy: {overall_acc:.4f}")
         for cls, acc in per_class.items():
-            tag = 'clean' if cls == 0 else f'knee@{cls}'
+            tag = ('clean' if cls == 0
+                   else (f'{cls} RFI eig' if cls == 1 else f'{cls} RFI eigs'))
             print(f"      label {cls} ({tag}): acc={acc:.4f}")
 
     return result
@@ -644,7 +645,9 @@ def main():
           f"classes: {n_classes}   channels: {', '.join(amazon_data['meta']['channels'])}")
     uniq, counts = np.unique(amazon_data['labels'], return_counts=True)
     for u, c in zip(uniq.tolist(), counts.tolist()):
-        print(f"  label {u} ({'clean' if u == 0 else f'knee@{u}'}): {c}")
+        tag = ('clean' if u == 0
+               else (f'{u} RFI eig' if u == 1 else f'{u} RFI eigs'))
+        print(f"  label {u} ({tag}): {c}")
 
     print(f"\nMountain region: {len(mountain_data['labels'])} tiles   "
           f"(forced label 0, clean-only)   channels: {', '.join(mountain_data['meta']['channels'])}")

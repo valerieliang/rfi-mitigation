@@ -425,7 +425,9 @@ def main():
           f"classes: {n_classes}   channels: {', '.join(train_data['meta']['channels'])}")
     uniq, counts = np.unique(train_data['labels'], return_counts=True)
     for u, c in zip(uniq.tolist(), counts.tolist()):
-        print(f"  label {u} ({'clean' if u == 0 else f'knee@{u}'}): {c}")
+        tag = ('clean' if u == 0
+               else (f'{u} RFI eig' if u == 1 else f'{u} RFI eigs'))
+        print(f"  label {u} ({tag}): {c}")
 
     # Split train/val
     idx_train, idx_val = split_train_val(

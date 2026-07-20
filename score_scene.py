@@ -4,8 +4,8 @@ score_scene.py
 Run a PRETRAINED knee classifier over a NISAR L0B scene that has NO LABELS.
 
 There is no ground truth on a real scene, so there is no accuracy number to
-report, and this script never pretends otherwise. A predicted knee > 0 is a
-CANDIDATE DETECTION -- it may be genuine RFI (an urban descending pass very
+report, and this script never pretends otherwise. A prediction with k > 0 RFI
+eigenvalues is a CANDIDATE DETECTION -- it may be genuine RFI (an urban descending pass very
 plausibly contains some) or a model error, and nothing in the data alone
 distinguishes the two. What the script produces instead is the evidence you need
 to judge the detections yourself:
@@ -29,14 +29,15 @@ to judge the detections yourself:
   3. CONFIDENCE PER GUESS
      Max softmax and the entropy of the full posterior, per predicted class.
      Low-confidence / high-entropy detections are the ones to distrust first.
-     Training showed clean-vs-knee@1 is the genuinely hard boundary, so expect
-     the knee@1 column to carry the least confident calls.
+     Training showed clean-vs-1 RFI eigenvalue is the genuinely hard boundary,
+     so expect the 1 RFI eigenvalue column to carry the least confident calls.
 
   4. EIGENVALUE PROFILES BY PREDICTED CLASS
      The mean normalized eigenvalue profile for each predicted class. A tile
-     called knee@3 should show three eigenvalues standing above the floor. If
-     the knee@3 profile does not have a visible knee at index 3, the model is
-     not doing what its label says.
+     called k RFI eigenvalues should show k eigenvalues standing above the floor.
+     A dotted line marks the separation point between the RFI and noise subspace.
+     If the k RFI eigenvalues profile does not have a visible knee at index k,
+     the model is not doing what its label says.
 
 The per-tile HDF5 keeps everything (knee, confidence, entropy, baseline power,
 the full linear eigenvalue vector, tile origin), so any flagged tile can be
@@ -333,7 +334,7 @@ def save_predictions_h5(rec, args, out_dir):
         f.attrs['granule'] = os.path.basename(args.l0b_file)
         f.attrs['model'] = os.path.basename(args.model)
         f.attrs['labeled'] = False
-        f.attrs['note'] = ('unlabeled scene: knee > 0 are candidate detections, '
+        f.attrs['note'] = ('unlabeled scene: k > 0 RFI eigenvalues are candidate detections, '
                            'not verified RFI and not errors')
         f.attrs['frequency'] = rec['freq']
         f.attrs['polarization'] = rec['pol']
@@ -419,8 +420,8 @@ def plot_knee_map(rec, out_dir):
 
     ax.set_xlabel('Range blocks')
     ax.set_ylabel('CPI index')
-    ax.set_title(f"Predicted knee across scene -- {rec['chan']} (UNMODIFIED data)\n"
-                 f"no ground truth: knee > 0 are candidate detections. "
+    ax.set_title(f"Number of RFI eigenvalues across scene -- {rec['chan']} (UNMODIFIED data)\n"
+                 f"no ground truth: k > 0 are candidate detections. "
                  f"Look for coherent range columns / slow-time blocks.")
 
     fig.tight_layout()
@@ -500,7 +501,9 @@ def plot_power_vs_knee(rec, out_dir):
         sel = (knee == k)
         if sel.sum() >= 10:
             groups.append(power[sel])
-            labels.append('clean' if k == 0 else f'knee@{k}')
+            label = ('clean' if k == 0
+                    else (f'{k} RFI\neigenvalue' if k == 1 else f'{k} RFI\neigenvalues'))
+            labels.append(label)
             counts.append(int(sel.sum()))
 
     if not groups:
@@ -531,7 +534,7 @@ def plot_power_vs_knee(rec, out_dir):
     fig.colorbar(sc, ax=ax2, label='Confidence')
     ax2.set_xticks(range(n_classes))
     ax2.set_xticklabels(['clean'] + [f'{k}' for k in range(1, n_classes)])
-    ax2.set_xlabel('Predicted knee')
+    ax2.set_xlabel('Number of RFI eigenvalues')
     ax2.set_ylabel('Tile baseline power (dB)')
     ax2.grid(True, linestyle='--', alpha=0.4)
     ax2.set_title('Power vs prediction (subsample), colored by confidence')
@@ -550,9 +553,9 @@ def plot_confidence_by_knee(rec, out_dir):
 
     Without labels, confidence is the closest thing to a per-guess quality score.
     Low confidence / high entropy marks the calls to distrust first. Training
-    showed clean-vs-knee@1 is the genuinely hard boundary (the weakest band
-    barely clears the clutter floor), so a soft knee@1 column is expected, not
-    alarming.
+    showed clean-vs-1 RFI eigenvalue is the genuinely hard boundary (the weakest
+    band barely clears the clutter floor), so a soft 1 RFI eigenvalue column is
+    expected, not alarming.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -567,7 +570,9 @@ def plot_confidence_by_knee(rec, out_dir):
         if sel.sum() >= 10:
             conf_groups.append(rec['confidence'][sel])
             ent_groups.append(rec['entropy'][sel])
-            labels.append('clean' if k == 0 else f'knee@{k}')
+            label = ('clean' if k == 0
+                    else (f'{k} RFI\neigenvalue' if k == 1 else f'{k} RFI\neigenvalues'))
+            labels.append(label)
             counts.append(int(sel.sum()))
 
     if not conf_groups:
@@ -608,10 +613,10 @@ def plot_eigen_profiles_by_class(rec, out_dir):
     """
     Mean normalized eigenvalue profile per predicted class -- the physical check.
 
-    A tile the model calls knee@k should show k eigenvalues standing above the
-    clutter floor, with the drop-off right after index k. If the knee@3 curve has
-    no visible knee at 3, the model is not doing what its label claims, and no
-    amount of spatial coherence in the map would redeem that.
+    A tile the model calls k RFI eigenvalues should show k eigenvalues standing
+    above the clutter floor, with the drop-off right after index k. If the
+    k RFI eigenvalues curve has no visible knee at k, the model is not doing what
+    its label claims, and no amount of spatial coherence in the map would redeem that.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -636,18 +641,22 @@ def plot_eigen_profiles_by_class(rec, out_dir):
         if sel.sum() < 10:
             continue
         mean_prof = ev_db[sel].mean(axis=0)
+        label = ('clean' if k == 0
+                 else (f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues'))
         ax.plot(idx, mean_prof, color=cmap(norm(k)), linewidth=2,
-                label=f"{'clean' if k == 0 else f'knee@{k}'} (n={int(sel.sum())})")
+                label=f"{label} (n={int(sel.sum())})")
+
+        # Draw a dotted vertical line through the separation point (the knee)
         if k > 0:
-            ax.plot(k, mean_prof[k - 1], 'rx', markersize=8, markeredgewidth=2)
+            ax.axvline(x=k + 0.5, color=cmap(norm(k)), linestyle=':',
+                      linewidth=2, alpha=0.7)
 
     ax.set_xlabel('Eigenvalue index (1-based, descending)')
     ax.set_ylabel('Eigenvalue (dB, normalized to lambda_max)')
     ax.grid(True, linestyle='--', alpha=0.4)
     ax.legend(fontsize=9)
     ax.set_title(f"Mean eigenvalue profile by predicted class -- {rec['chan']}\n"
-                 f"a knee@k call should show its drop-off right after index k "
-                 f"(red x)")
+                 f"dotted line marks the separation point between RFI and noise subspace")
 
     fig.tight_layout()
     path = os.path.join(out_dir, f"eigen_profiles_{rec['freq']}_{rec['pol']}.png")
@@ -667,9 +676,9 @@ def plot_selected_predictions(rec, out_dir, n_per_class, seed):
 
     One row per predicted class, n_per_class randomly chosen examples across the
     row (fixed seed, so the selection is reproducible). Each panel draws the
-    tile's normalized eigenvalue profile with a red marker at the predicted knee
-    index. The panel is believable when the drop-off sits right after that
-    marker, and suspicious when it does not.
+    tile's normalized eigenvalue profile with a dotted line through the separation
+    point between RFI and noise subspace. The panel is believable when the drop-off
+    sits right at that line, and suspicious when it does not.
 
     Panel titles carry the numbers needed to triage a detection without labels:
     confidence, tile baseline power, and the tile's (pulse, range) origin so it
@@ -727,11 +736,11 @@ def plot_selected_predictions(rec, out_dir, n_per_class, seed):
             ax.plot(idx, ev_db[t], color=cmap(norm(k)), linewidth=1.6)
 
             if k > 0:
-                # Red marker at the predicted knee: the drop-off should follow it
-                ax.plot(k, ev_db[t, k - 1], 'rx', markersize=8, markeredgewidth=2)
-                ax.axvline(x=k, color='red', linestyle='--', alpha=0.35, linewidth=1)
+                # Dotted vertical line through the separation point
+                ax.axvline(x=k + 0.5, color='red', linestyle=':', linewidth=1.5, alpha=0.7)
 
-            label = 'CLEAN' if k == 0 else f'knee@{k}'
+            label = ('CLEAN' if k == 0
+                    else (f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues'))
             ax.set_title(
                 f"{label}  conf={rec['confidence'][t]:.2f}\n"
                 f"p={rec['tile_pulse'][t]} r={rec['tile_range'][t]}  "
@@ -751,7 +760,7 @@ def plot_selected_predictions(rec, out_dir, n_per_class, seed):
     fig.suptitle(
         f"Selected predictions -- {rec['chan']}  "
         f"({n_per_class} random tiles per predicted class, seed={seed})\n"
-        f"red x = predicted knee; the profile should drop off just after it",
+        f"dotted line marks the separation point between RFI and noise subspace",
         fontsize=11,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -779,13 +788,14 @@ def plot_pred_hist(recs, out_dir):
                label=f"{rec['chan']} (n={len(rec['knee'])})")
 
     ax.set_xticks(x)
-    ax.set_xticklabels(['clean'] + [f'knee@{k}' for k in range(1, n_classes)])
+    ax.set_xticklabels(['clean'] + [(f'{k} RFI\neigenvalue' if k == 1 else f'{k} RFI\neigenvalues')
+                                      for k in range(1, n_classes)])
     ax.set_ylabel('Fraction of tiles')
     ax.set_xlabel('Predicted class')
     ax.grid(True, axis='y', linestyle='--', alpha=0.5)
     ax.legend()
     ax.set_title('Predictions on UNMODIFIED scene\n'
-                 'no ground truth: knee > 0 are candidate detections, not errors')
+                 'no ground truth: k RFI eigenvalues are candidate detections, not errors')
 
     fig.tight_layout()
     path = os.path.join(out_dir, 'pred_hist.png')
@@ -845,14 +855,14 @@ def report(recs, results):
         results['channels'][rec['chan']] = s
 
         print(f"\n  {rec['chan']}: {n} tiles")
-        print(f"    flagged knee>0   : {n_flag} ({100 * n_flag / n:.2f}%)")
+        print(f"    flagged (k>0)    : {n_flag} ({100 * n_flag / n:.2f}%)")
         print(f"    distribution     : "
-              + ", ".join(f"{'clean' if k == 0 else f'knee@{k}'}={v}"
+              + ", ".join(f"{'clean' if k == 0 else (f'{k} RFI eig' if k == 1 else f'{k} RFI eigs')}={v}"
                           for k, v in enumerate(dist) if v))
         print(f"    mean confidence  : {s['mean_confidence']:.3f}  "
               f"(flagged {s['mean_confidence_flagged']:.3f}, "
               f"clean {s['mean_confidence_clean']:.3f})")
-        print(f"    knee vs power r  : {corr:.3f}   "
+        print(f"    RFI eigs vs power r : {corr:.3f}   "
               f"<- should be near 0; a large value means the model is keying on "
               f"brightness, not structure")
         print(f"    range columns flagged in >50% of the scene: "

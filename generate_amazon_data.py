@@ -995,12 +995,13 @@ def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
     for prof, knee in zip(profiles_db, knees):
         ax1.plot(ev_index, prof, color=cmap(norm(knee)), alpha=0.75, linewidth=1.2)
         if knee > 0:
-            ax1.plot(knee, prof[knee - 1], 'rx', markersize=6, alpha=0.7)
+            ax1.axvline(x=knee + 0.5, color=cmap(norm(knee)), linestyle=':',
+                       linewidth=1.5, alpha=0.5)
 
     sm = cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig1.colorbar(sm, ax=ax1)
-    cbar.set_label('Label (knee = number of injected RFI bands)', fontsize=10)
+    cbar.set_label('Number of RFI eigenvalues (injected RFI bands)', fontsize=10)
 
     ax1.set_xlabel('Eigenvalue index (1-based, descending)', fontsize=11)
     ax1.set_ylabel('Eigenvalue (dB)', fontsize=11)
@@ -1029,9 +1030,9 @@ def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
         knee = meta.knee
         ax.plot(ev_index, prof, color=cmap(norm(knee)), linewidth=1.5)
         if knee > 0:
-            ax.plot(knee, prof[knee - 1], 'rx', markersize=7, markeredgewidth=2)
-            ax.axvline(x=knee, color='red', linestyle='--', alpha=0.35, linewidth=1)
-        label = 'CLEAN' if knee == 0 else f'RFI={knee}'
+            ax.axvline(x=knee + 0.5, color='red', linestyle=':', linewidth=1.5, alpha=0.7)
+        label = ('CLEAN' if knee == 0
+                else (f'{knee} RFI eigenvalue' if knee == 1 else f'{knee} RFI eigenvalues'))
         # Bands now differ in strength, so show the range actually realized here
         if meta.bands:
             jsrs = [b.jsr_db for b in meta.bands]
