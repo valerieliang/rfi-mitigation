@@ -397,13 +397,12 @@ def plot_knee_map(rec, out_dir):
     grid = rec['knee'].reshape(rec['n_pt'], rec['n_rt'])
 
     # Convert pulse/range indices to CPI index and range blocks
-    # CPI index = pulse_index / cpi_len (typically 16)
+    # CPI index starts at 0 and goes to n_pt
     # Range blocks = range_index / cpi_width (typically 250)
-    cpi_len = CPI_LEN_DEFAULT
     cpi_width = CPI_WIDTH_DEFAULT
 
-    cpi_start = rec['pulse_window'][0] / cpi_len
-    cpi_end = rec['pulse_window'][1] / cpi_len
+    cpi_start = 0
+    cpi_end = rec['n_pt']
     range_block_start = rec['range_window'][0] / cpi_width
     range_block_end = rec['range_window'][1] / cpi_width
 
@@ -446,13 +445,12 @@ def plot_confidence_map(rec, out_dir):
     grid = rec['confidence'].reshape(rec['n_pt'], rec['n_rt'])
 
     # Convert pulse/range indices to CPI index and range blocks
-    # CPI index = pulse_index / cpi_len (typically 16)
+    # CPI index starts at 0 and goes to n_pt
     # Range blocks = range_index / cpi_width (typically 250)
-    cpi_len = CPI_LEN_DEFAULT
     cpi_width = CPI_WIDTH_DEFAULT
 
-    cpi_start = rec['pulse_window'][0] / cpi_len
-    cpi_end = rec['pulse_window'][1] / cpi_len
+    cpi_start = 0
+    cpi_end = rec['n_pt']
     range_block_start = rec['range_window'][0] / cpi_width
     range_block_end = rec['range_window'][1] / cpi_width
 
@@ -648,7 +646,7 @@ def plot_eigen_profiles_by_class(rec, out_dir):
 
         # Draw a dotted vertical line through the separation point (the knee)
         if k > 0:
-            ax.axvline(x=k + 0.5, color=cmap(norm(k)), linestyle=':',
+            ax.axvline(x=k + 1, color=cmap(norm(k)), linestyle=':',
                       linewidth=2, alpha=0.7)
 
     ax.set_xlabel('Eigenvalue index (1-based, descending)')
@@ -737,7 +735,7 @@ def plot_selected_predictions(rec, out_dir, n_per_class, seed):
 
             if k > 0:
                 # Dotted vertical line through the separation point
-                ax.axvline(x=k + 0.5, color='red', linestyle=':', linewidth=1.5, alpha=0.7)
+                ax.axvline(x=k + 1, color='red', linestyle=':', linewidth=1.5, alpha=0.7)
 
             label = ('CLEAN' if k == 0
                     else (f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues'))
