@@ -114,6 +114,63 @@ from read_nisar_isce3 import (
     DIAG_VALID_RATIO_DEFAULT,
 )
 from nisar.products.readers.Raw import Raw
+from isce3.focus import ToneRemover
+
+
+# ---------------------------------------------------------------------------
+# CALTONE REMOVAL
+# ---------------------------------------------------------------------------
+#
+# NISAR L0B raw data carries an instrument calibration tone (caltone) as a
+# narrowband sinusoid in fast time (range). Left in place it adds an extra
+# rank-1 term to every slow-time CPI, nudging the eigenvalue/knee structure up
+# by roughly one. The training sets (generate_amazon_data.py /
+# generate_mountain_data.py) now subtract it before featurizing, so scoring
+# MUST do the same or the model sees a feature distribution it was not trained
+# on. This mirrors the ST-EVD detection path (test_rfi_check.py).
+#
+# ToneRemover builds an ABSOLUTE phase reference exp(-1j*2*pi*f*arange(n))
+# anchored at range sample 0, so remove_tone() must be handed the FULL-WIDTH
+# range line (length == the dataset's range width), aligned to sample 0. The
+# CPI window is therefore sliced out only AFTER the tone is removed from the
+# whole line.
+
+CALTONE_WINDOW_SIZE = 64
+CALTONE_DEFAULT_FREQ_HZ = 1214.88e6
+CALTONE_LO_HZ = 1200e6
+CALTONE_CLOCK_HZ = 240e6
+
+
+def parse_caltone_freq_from_drt(raw: Raw, txrx_pol: str) -> float:
+    """
+    Caltone frequency (Hz) for one TxRx polarization, read from the DRT
+    CALTONE phase-step telemetry. Falls back to CALTONE_DEFAULT_FREQ_HZ when
+    the telemetry path is missing. (Mirrors test_rfi_check.py.)
+    """
+    path = (f'{raw.TelemetryPath}/DRT/MISC/'
+            f'CP_IFSW_CALTONE_PHASE_STEP_{txrx_pol[1]}')
+    with h5py.File(raw.filename, mode='r', swmr=True) as f:
+        try:
+            ds = f[path]
+        except KeyError:
+            print(f'  caltone: missing "{path}"; using default '
+                  f'{CALTONE_DEFAULT_FREQ_HZ} Hz')
+            return CALTONE_DEFAULT_FREQ_HZ
+        i_cal = np.median(ds[()]).astype(int)
+        return (i_cal / 2 ** 32) * CALTONE_CLOCK_HZ + CALTONE_LO_HZ
+
+
+def build_tone_remover(raw: Raw, freq: str, pol: str, num_rng_samples: int):
+    """
+    Construct a ToneRemover sized to the full range width for one channel,
+    plus the caltone frequency used (for provenance).
+    """
+    tx_pol = pol[0]
+    fc, fs, _, _ = raw.getChirpParameters(freq, tx_pol)
+    caltone_freq = parse_caltone_freq_from_drt(raw, pol)
+    remover = ToneRemover((caltone_freq - fc) / fs, num_rng_samples,
+                          CALTONE_WINDOW_SIZE)
+    return remover, caltone_freq
 
 
 # Processing chunk size
@@ -209,8 +266,10 @@ def score_channel(raw, freq, pol, model, args):
     """
     Stream one channel of the scene, featurize every CPI tile, and predict.
 
-    The tiles are left completely unmodified -- this is the real scene as
-    recorded. Per tile we keep the prediction, its confidence and entropy, the
+    No synthetic RFI is added -- this is the real scene. The only preprocessing
+    is caltone removal (on by default), which subtracts the instrument
+    calibration tone so the features match the caltone-removed training set.
+    Per tile we keep the prediction, its confidence and entropy, the
     baseline power (so power can be cross-plotted against the prediction), and
     the full linear eigenvalue vector (so any tile can be re-examined later
     without re-reading the granule).
@@ -253,6 +312,17 @@ def score_channel(raw, freq, pol, model, args):
     print(f"\n[{freq}-{pol}]  pulses [{p_start}:{p_end}]  range [{r_start}:{r_end}]")
     print(f"  tile grid: {n_pt} x {n_rt} = {n_tiles} tiles")
 
+    # Build the caltone remover once per channel, sized to the FULL range width
+    # so remove_tone() sees each range line at its true sample offset. Must match
+    # how the training data was generated.
+    if args.remove_caltone:
+        remover, caltone_freq = build_tone_remover(raw, freq, pol, total_range)
+        print(f"  caltone removal ON  (f_caltone = {caltone_freq/1e6:.4f} MHz, "
+              f"window = {CALTONE_WINDOW_SIZE})")
+    else:
+        remover = None
+        print("  caltone removal OFF")
+
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
     global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)   # linear, descending
@@ -269,9 +339,21 @@ def score_channel(raw, freq, pol, model, args):
         cp0 = p_start + chunk_start * cpi_len
         cp1 = cp0 + n_here * cpi_len
 
-        raw_chunk = read_raw_data_batch(
-            raw, freq, pol, slice(cp0, cp1), slice(r_start, r_end)
-        )
+        if remover is not None:
+            # Read full-width lines, subtract the caltone at the correct
+            # absolute range phase, then slice out the CPI window.
+            raw_full = np.ascontiguousarray(
+                read_raw_data_batch(
+                    raw, freq, pol, slice(cp0, cp1), slice(0, total_range)
+                )
+            ).astype(np.complex64)
+            for ip in range(raw_full.shape[0]):
+                raw_full[ip] = remover.remove_tone(raw_full[ip])
+            raw_chunk = raw_full[:, r_start:r_end]
+        else:
+            raw_chunk = read_raw_data_batch(
+                raw, freq, pol, slice(cp0, cp1), slice(r_start, r_end)
+            )
         mask_chunk = (
             get_subswath_mask(raw, freq, pol,
                               np.arange(cp0, cp1), np.arange(r_start, r_end))
@@ -349,6 +431,7 @@ def save_predictions_h5(rec, args, out_dir):
         f.attrs['gap_exclusion_used'] = bool(args.compute_subswath_mask)
         f.attrs['off_diag_overlap_ratio'] = args.off_diag_overlap_ratio
         f.attrs['diag_valid_ratio'] = args.diag_valid_ratio
+        f.attrs['caltone_removed'] = bool(args.remove_caltone)
         f.attrs['n_keep'] = N_KEEP
 
         f.create_dataset('knee', data=rec['knee'])
@@ -905,6 +988,15 @@ def parse_args():
     parser.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
     parser.add_argument('--pulse-chunk', type=int, default=PULSE_CHUNK_DEFAULT)
 
+    parser.add_argument('--remove-caltone', dest='remove_caltone',
+                        action='store_true', default=True,
+                        help='Subtract the instrument caltone from the raw data '
+                             'before featurizing. Must match how the training '
+                             'data was generated (default: on).')
+    parser.add_argument('--no-remove-caltone', dest='remove_caltone',
+                        action='store_false',
+                        help='Leave the caltone in the raw data (legacy behavior).')
+
     parser.add_argument('--compute-subswath-mask', action='store_true',
                         help='Gap-exclusion SCM via ISCE3 subswaths. Must match how '
                              'the training data was generated.')
@@ -945,6 +1037,7 @@ def main():
     print(f"  features: top {N_KEEP} eigenvalues, gap_exclusion="
           f"{args.compute_subswath_mask} "
           f"({args.off_diag_overlap_ratio}/{args.diag_valid_ratio})")
+    print(f"  caltone removal: {args.remove_caltone}")
 
     model = tf.keras.models.load_model(args.model)
 

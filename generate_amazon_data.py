@@ -201,6 +201,83 @@ def _silence_third_party_noise():
 _silence_third_party_noise()
 
 from nisar.products.readers.Raw import Raw  # noqa: E402  (import after silencing)
+from isce3.focus import ToneRemover          # noqa: E402  (import after silencing)
+
+
+# ---------------------------------------------------------------------------
+# CALTONE REMOVAL
+# ---------------------------------------------------------------------------
+#
+# NISAR L0B raw data carries an instrument calibration tone (caltone) as a
+# narrowband sinusoid in fast time (range). Left in place it injects an extra
+# rank-1 term into every slow-time CPI, which biases the eigenvalue/knee
+# structure the model learns from -- in practice it nudges the effective RFI
+# count up by one. We coherently estimate and subtract that tone from the raw
+# complex data BEFORE any RFI injection or SCM computation, exactly as the
+# ST-EVD detection path (test_rfi_check.py) does.
+#
+# ToneRemover builds an ABSOLUTE phase reference exp(-1j*2*pi*f*arange(n))
+# anchored at range sample 0, so remove_tone() must be handed the FULL-WIDTH
+# range line (length == the dataset's range width), aligned to sample 0. It is
+# therefore applied to whole range lines and the CPI window is sliced out only
+# afterwards -- never fed a pre-sliced sub-tile, which would carry the wrong
+# tone phase.
+
+# Estimation block length for ToneRemover (matches the ST-EVD detection path).
+CALTONE_WINDOW_SIZE = 64
+
+# Fallback caltone frequency (Hz) when the DRT phase-step telemetry is absent.
+CALTONE_DEFAULT_FREQ_HZ = 1214.88e6
+CALTONE_LO_HZ = 1200e6
+CALTONE_CLOCK_HZ = 240e6
+
+
+def parse_caltone_freq_from_drt(raw: Raw, txrx_pol: str) -> float:
+    """
+    Caltone frequency (Hz) for one TxRx polarization, read from the DRT
+    CALTONE phase-step telemetry. Falls back to CALTONE_DEFAULT_FREQ_HZ when
+    the telemetry path is missing. (Mirrors test_rfi_check.py.)
+    """
+    path = (f'{raw.TelemetryPath}/DRT/MISC/'
+            f'CP_IFSW_CALTONE_PHASE_STEP_{txrx_pol[1]}')
+    with h5py.File(raw.filename, mode='r', swmr=True) as f:
+        try:
+            ds = f[path]
+        except KeyError:
+            print(f'  caltone: missing "{path}"; using default '
+                  f'{CALTONE_DEFAULT_FREQ_HZ} Hz')
+            return CALTONE_DEFAULT_FREQ_HZ
+        i_cal = np.median(ds[()]).astype(int)
+        return (i_cal / 2 ** 32) * CALTONE_CLOCK_HZ + CALTONE_LO_HZ
+
+
+def build_tone_remover(raw: Raw, freq: str, pol: str, num_rng_samples: int):
+    """
+    Construct a ToneRemover sized to the full range width for one channel,
+    plus the caltone frequency used (for provenance).
+
+    Returns
+    -------
+    remover : ToneRemover
+    caltone_freq : float   caltone frequency in Hz
+    """
+    tx_pol = pol[0]
+    fc, fs, _, _ = raw.getChirpParameters(freq, tx_pol)
+    caltone_freq = parse_caltone_freq_from_drt(raw, pol)
+    remover = ToneRemover((caltone_freq - fc) / fs, num_rng_samples,
+                          CALTONE_WINDOW_SIZE)
+    return remover, caltone_freq
+
+
+def remove_caltone_lines(lines: np.ndarray, remover: ToneRemover) -> np.ndarray:
+    """
+    Subtract the caltone from each full-width range line (pulse row) in place.
+    `lines` is (num_pulses, num_rng_samples) and its width MUST equal the width
+    the remover was built with.
+    """
+    for ip in range(lines.shape[0]):
+        lines[ip] = remover.remove_tone(lines[ip])
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -803,11 +880,25 @@ def generate_dataset(raw, freq, pol, args, out_dir):
     plot_records = []
     knee_counts = {}
 
+    # Build the caltone remover once per channel, sized to the FULL range width
+    # so remove_tone() sees each range line at its true sample offset.
+    if args.remove_caltone:
+        remover, caltone_freq = build_tone_remover(raw, freq, pol, total_range)
+        print(f"  caltone removal ON  (f_caltone = {caltone_freq/1e6:.4f} MHz, "
+              f"window = {CALTONE_WINDOW_SIZE})")
+    else:
+        remover, caltone_freq = None, None
+        print("  caltone removal OFF")
+
     chunk_tiles = max(1, args.pulse_chunk // cpi_len)
 
     with h5py.File(out_path, 'w') as f:
         write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
                          n_pulse_tiles, n_range_tiles, use_mask)
+        f.attrs['caltone_removed'] = bool(args.remove_caltone)
+        if caltone_freq is not None:
+            f.attrs['caltone_freq_hz'] = float(caltone_freq)
+            f.attrs['caltone_window_size'] = CALTONE_WINDOW_SIZE
         writer = TileWriter(f, cpi_len, cpi_width, max_bands, args.save_cpi)
 
         for chunk_start_tile in range(0, n_pulse_tiles, chunk_tiles):
@@ -815,11 +906,24 @@ def generate_dataset(raw, freq, pol, args, out_dir):
             cp0 = p_start + chunk_start_tile * cpi_len
             cp1 = cp0 + n_tiles_here * cpi_len
 
-            raw_chunk = read_raw_data_batch(
-                raw, freq, pol,
-                pulse_slice=slice(cp0, cp1),
-                range_slice=slice(r_start, r_end),
-            )
+            if remover is not None:
+                # Read the full-width lines, subtract the caltone at the correct
+                # absolute range phase, then slice out the CPI window.
+                raw_full = np.ascontiguousarray(
+                    read_raw_data_batch(
+                        raw, freq, pol,
+                        pulse_slice=slice(cp0, cp1),
+                        range_slice=slice(0, total_range),
+                    )
+                ).astype(np.complex64)
+                remove_caltone_lines(raw_full, remover)
+                raw_chunk = raw_full[:, r_start:r_end]
+            else:
+                raw_chunk = read_raw_data_batch(
+                    raw, freq, pol,
+                    pulse_slice=slice(cp0, cp1),
+                    range_slice=slice(r_start, r_end),
+                )
 
             if use_mask:
                 mask_chunk = get_subswath_mask(
@@ -1154,6 +1258,14 @@ def parse_args():
     parser.add_argument('--jsr-max-db', type=float, default=JSR_MAX_DB_DEFAULT,
                         help='Upper bound of the per-band jammer-to-signal ratio, in dB.')
 
+    parser.add_argument('--remove-caltone', dest='remove_caltone',
+                        action='store_true', default=True,
+                        help='Subtract the instrument caltone from the raw data '
+                             'before RFI injection / SCM (default: on).')
+    parser.add_argument('--no-remove-caltone', dest='remove_caltone',
+                        action='store_false',
+                        help='Leave the caltone in the raw data (legacy behavior).')
+
     parser.add_argument('--compute-subswath-mask', action='store_true',
                         help='Use ISCE3 subswath boundaries for gap-exclusion SCM.')
     parser.add_argument('--off-diag-overlap-ratio', type=float,
@@ -1213,6 +1325,7 @@ def main():
     print(f'  JSR            : [{args.jsr_min_db}, {args.jsr_max_db}] dB above each tile '
           f'baseline power (drawn per band)')
     print(f'  gap exclusion  : {args.compute_subswath_mask}')
+    print(f'  caltone removal: {args.remove_caltone}')
     print(f'  save CPI       : {args.save_cpi}')
     print(f'  seeds          : injection={args.seed}, plot={args.plot_seed}')
 

@@ -44,8 +44,10 @@ from generate_amazon_data import (
     get_subswath_mask,
     compute_scm_and_eigs,
     tile_signal_power,
+    build_tone_remover,
     CPI_LEN_DEFAULT,
     CPI_WIDTH_DEFAULT,
+    CALTONE_WINDOW_SIZE,
     OFF_DIAG_OVERLAP_RATIO_DEFAULT,
     DIAG_VALID_RATIO_DEFAULT,
 )
@@ -580,6 +582,19 @@ def score_mountain_tiles(raw, freq, pol, model, args, tile_spec, ground_truth_la
 
     print(f"Scoring {n_tiles} specified tiles...")
 
+    # Build the caltone remover once per channel, sized to the FULL range width
+    # so remove_tone() sees each range line at its true sample offset. Must match
+    # how the training data was generated.
+    remove_caltone = getattr(args, 'remove_caltone', True)
+    if remove_caltone:
+        full_range = raw.getRawDataset(freq, pol).shape[1]
+        remover, caltone_freq = build_tone_remover(raw, freq, pol, full_range)
+        print(f"  caltone removal ON  (f_caltone = {caltone_freq/1e6:.4f} MHz, "
+              f"window = {CALTONE_WINDOW_SIZE})")
+    else:
+        remover = None
+        print("  caltone removal OFF")
+
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
     global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)
@@ -591,10 +606,21 @@ def score_mountain_tiles(raw, freq, pol, model, args, tile_spec, ground_truth_la
         r_start = int(rt)
         r_end = r_start + cpi_width
 
-        # Read tile
-        raw_tile = read_raw_data_batch(
-            raw, freq, pol, slice(p_start, p_end), slice(r_start, r_end)
-        )
+        # Read tile. With caltone removal, read the FULL-WIDTH lines, subtract
+        # the tone at the correct absolute range phase, then slice the tile.
+        if remover is not None:
+            lines = np.ascontiguousarray(
+                read_raw_data_batch(
+                    raw, freq, pol, slice(p_start, p_end), slice(None, None)
+                )
+            ).astype(np.complex64)
+            for ip in range(lines.shape[0]):
+                lines[ip] = remover.remove_tone(lines[ip])
+            raw_tile = lines[:, r_start:r_end]
+        else:
+            raw_tile = read_raw_data_batch(
+                raw, freq, pol, slice(p_start, p_end), slice(r_start, r_end)
+            )
 
         tile_mask = (
             get_subswath_mask(raw, freq, pol,
@@ -791,6 +817,14 @@ def parse_args():
     mountains.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT)
     mountains.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
     mountains.add_argument('--compute-subswath-mask', action='store_true')
+    mountains.add_argument('--remove-caltone', dest='remove_caltone',
+                          action='store_true', default=True,
+                          help='Subtract the instrument caltone from the raw data '
+                               'before featurizing. Must match how the training '
+                               'data was generated (default: on).')
+    mountains.add_argument('--no-remove-caltone', dest='remove_caltone',
+                          action='store_false',
+                          help='Leave the caltone in the raw data (legacy behavior).')
     mountains.add_argument('--off-diag-overlap-ratio', type=float,
                           default=OFF_DIAG_OVERLAP_RATIO_DEFAULT)
     mountains.add_argument('--diag-valid-ratio', type=float,
