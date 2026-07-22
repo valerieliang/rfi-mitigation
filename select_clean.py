@@ -101,16 +101,18 @@ PULSE_CHUNK_DEFAULT = 512
 # range line (aligned to sample 0); the range window is sliced out afterward.
 
 CALTONE_WINDOW_SIZE = 64
-CALTONE_DEFAULT_FREQ_HZ = 1214.88e6
+# Fallback default matches isce3's caltone_frequency_from_raw.
+CALTONE_DEFAULT_FREQ_HZ = 1214.883e6
 CALTONE_LO_HZ = 1200e6
 CALTONE_CLOCK_HZ = 240e6
 
 
 def parse_caltone_freq_from_drt(raw, txrx_pol):
     """
-    Caltone frequency (Hz) for one TxRx polarization from the DRT phase-step
-    telemetry, with a default fallback when the path is absent. (Mirrors
-    test_rfi_check.py.)
+    Local fallback for isce3's caltone_frequency_from_raw: caltone frequency
+    (Hz) for one TxRx polarization from the DRT CALTONE phase-step telemetry,
+    with CALTONE_DEFAULT_FREQ_HZ when the path is missing. Only used when the
+    official helper cannot be imported.
     """
     path = f'{raw.TelemetryPath}/DRT/MISC/CP_IFSW_CALTONE_PHASE_STEP_{txrx_pol[1]}'
     with h5py.File(raw.filename, mode='r', swmr=True) as f:
@@ -128,11 +130,21 @@ def build_tone_remover(raw, freq, pol, num_rng_samples):
     """
     ToneRemover sized to the full range width for one channel, plus the caltone
     frequency used. ToneRemover is imported lazily so --help works without isce3.
+    The caltone frequency prefers isce3's official caltone_frequency_from_raw,
+    falling back to the local parse_caltone_freq_from_drt if it cannot import.
     """
     from isce3.focus import ToneRemover
+    try:
+        from nisar.products.readers.Raw import caltone_frequency_from_raw
+    except ImportError:
+        caltone_frequency_from_raw = None
+
     tx_pol = pol[0]
     fc, fs, _, _ = raw.getChirpParameters(freq, tx_pol)
-    caltone_freq = parse_caltone_freq_from_drt(raw, pol)
+    if caltone_frequency_from_raw is not None:
+        caltone_freq = caltone_frequency_from_raw(raw, pol)
+    else:
+        caltone_freq = parse_caltone_freq_from_drt(raw, pol)
     remover = ToneRemover((caltone_freq - fc) / fs, num_rng_samples,
                           CALTONE_WINDOW_SIZE)
     return remover, caltone_freq

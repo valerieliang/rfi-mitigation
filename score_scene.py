@@ -116,6 +116,11 @@ from read_nisar_isce3 import (
 from nisar.products.readers.Raw import Raw
 from isce3.focus import ToneRemover
 
+try:  # Prefer isce3's official caltone-frequency helper; fall back to the local copy.
+    from nisar.products.readers.Raw import caltone_frequency_from_raw
+except ImportError:
+    caltone_frequency_from_raw = None
+
 
 # ---------------------------------------------------------------------------
 # CALTONE REMOVAL
@@ -136,16 +141,18 @@ from isce3.focus import ToneRemover
 # whole line.
 
 CALTONE_WINDOW_SIZE = 64
-CALTONE_DEFAULT_FREQ_HZ = 1214.88e6
+# Fallback default matches isce3's caltone_frequency_from_raw.
+CALTONE_DEFAULT_FREQ_HZ = 1214.883e6
 CALTONE_LO_HZ = 1200e6
 CALTONE_CLOCK_HZ = 240e6
 
 
 def parse_caltone_freq_from_drt(raw: Raw, txrx_pol: str) -> float:
     """
-    Caltone frequency (Hz) for one TxRx polarization, read from the DRT
-    CALTONE phase-step telemetry. Falls back to CALTONE_DEFAULT_FREQ_HZ when
-    the telemetry path is missing. (Mirrors test_rfi_check.py.)
+    Local fallback for isce3's caltone_frequency_from_raw: caltone frequency
+    (Hz) for one TxRx polarization from the DRT CALTONE phase-step telemetry,
+    with CALTONE_DEFAULT_FREQ_HZ when the path is missing. Only used when the
+    official helper cannot be imported.
     """
     path = (f'{raw.TelemetryPath}/DRT/MISC/'
             f'CP_IFSW_CALTONE_PHASE_STEP_{txrx_pol[1]}')
@@ -167,7 +174,10 @@ def build_tone_remover(raw: Raw, freq: str, pol: str, num_rng_samples: int):
     """
     tx_pol = pol[0]
     fc, fs, _, _ = raw.getChirpParameters(freq, tx_pol)
-    caltone_freq = parse_caltone_freq_from_drt(raw, pol)
+    if caltone_frequency_from_raw is not None:
+        caltone_freq = caltone_frequency_from_raw(raw, pol)
+    else:
+        caltone_freq = parse_caltone_freq_from_drt(raw, pol)
     remover = ToneRemover((caltone_freq - fc) / fs, num_rng_samples,
                           CALTONE_WINDOW_SIZE)
     return remover, caltone_freq
