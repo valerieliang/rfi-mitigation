@@ -895,8 +895,21 @@ def iter_clean_channels(clean_path):
         paths = sorted(glob.glob(os.path.join(clean_path, '*clean_data_*.h5')))
         if not paths:
             raise FileNotFoundError(f"No *clean_data_*.h5 files found in {clean_path}")
+        n_ok = 0
         for p in paths:
-            yield _read_flat_clean_file(p)
+            try:
+                rec = _read_flat_clean_file(p)
+            except (OSError, KeyError) as exc:
+                # e.g. a 0-byte / truncated file from an interrupted select_clean.py
+                print(f"[warn] skipping '{p}': not a readable flat clean file "
+                      f"({type(exc).__name__}: {exc})")
+                continue
+            n_ok += 1
+            yield rec
+        if n_ok == 0:
+            raise RuntimeError(
+                f"No readable *clean_data_*.h5 files in {clean_path}. Check for "
+                f"empty/corrupt outputs (ls -la) and re-run select_clean.py.")
         return
 
     with h5py.File(clean_path, 'r') as f:
