@@ -157,9 +157,10 @@ def load_rfi_data_dir(data_dirs, max_samples=None, tag=''):
         data_dirs = [data_dirs]
 
     eigen_parts, global_parts = [], []
-    label_parts, group_parts = [], []
+    label_parts, group_parts, source_parts = [], [], []
     n_classes = 0
-    meta = {'dirs': list(data_dirs), 'files': [], 'channels': [], 'pulse_window': None}
+    meta = {'dirs': list(data_dirs), 'files': [], 'channels': [], 'pulse_window': None,
+            'source_names': [os.path.basename(os.path.normpath(d)) for d in data_dirs]}
 
     print(f"\nLoading {tag or data_dirs} ...")
 
@@ -208,6 +209,7 @@ def load_rfi_data_dir(data_dirs, max_samples=None, tag=''):
                 global_parts.append(global_)
                 label_parts.append(labels)
                 group_parts.append(source_id * GROUP_OFFSET + groups_raw)
+                source_parts.append(np.full(len(labels), source_id, dtype=np.int32))
 
                 n_classes = max(n_classes, int(f.attrs.get('n_classes', 0)))
 
@@ -230,6 +232,7 @@ def load_rfi_data_dir(data_dirs, max_samples=None, tag=''):
         'global': np.concatenate(global_parts, axis=0),
         'labels': labels,
         'groups': np.concatenate(group_parts, axis=0),
+        'sources': np.concatenate(source_parts, axis=0),
         'n_classes': n_classes or int(labels.max()) + 1,
         'meta': meta,
     }
@@ -265,6 +268,68 @@ def split_train_val(groups, val_frac, buffer_tiles):
     print(f"    val   pulses [{val_g.min()}, {val_g.max()}] -> {len(idx_val)} tiles")
 
     return idx_train, idx_val
+
+
+def _class_tag(u):
+    """Human label for a knee class (matches the reporting used elsewhere)."""
+    return ('clean' if u == 0
+            else (f'{u} RFI eig' if u == 1 else f'{u} RFI eigs'))
+
+
+def report_class_by_source_split(labels, sources, source_names,
+                                 idx_train, idx_val, n_classes):
+    """
+    Per-source class separation, shown for the train and val splits.
+
+    For each source selection (e.g. the amazon dir and the mountain dir) print
+    the number of clean / 1 RFI eig / ... tiles it contributed, and how those
+    split into train and val, so the class balance of BOTH splits is visible
+    per source. A final ALL block sums across sources. Tiles dropped in the
+    split buffer count toward 'total' but neither 'train' nor 'val', so
+    total >= train + val.
+
+    Returns a nested dict suitable for the training summary JSON.
+    """
+    labels = np.asarray(labels)
+    sources = np.asarray(sources)
+
+    split_id = np.full(len(labels), -1, dtype=np.int8)
+    split_id[idx_train] = 0
+    split_id[idx_val] = 1
+
+    print(f"\n{'='*70}")
+    print("Class separation by source  (total = train + val + split-buffer drops)")
+    print(f"{'='*70}")
+
+    report = {}
+    src_iter = list(enumerate(source_names)) + [('ALL', 'ALL')]
+
+    for sid, name in src_iter:
+        if sid == 'ALL':
+            mask_src = np.ones(len(labels), dtype=bool)
+        else:
+            mask_src = (sources == sid)
+
+        print(f"\n  {name}:")
+        print(f"    {'class':<12}  {'total':>8}  {'train':>8}  {'val':>8}")
+        src_report = {}
+        tot_t = tot_tr = tot_va = 0
+        for u in range(n_classes):
+            in_class = mask_src & (labels == u)
+            n_tot = int(np.count_nonzero(in_class))
+            n_tr = int(np.count_nonzero(in_class & (split_id == 0)))
+            n_va = int(np.count_nonzero(in_class & (split_id == 1)))
+            tot_t += n_tot
+            tot_tr += n_tr
+            tot_va += n_va
+            print(f"    {_class_tag(u):<12}  {n_tot:>8}  {n_tr:>8}  {n_va:>8}")
+            src_report[str(u)] = {'tag': _class_tag(u),
+                                  'total': n_tot, 'train': n_tr, 'val': n_va}
+        print(f"    {'TOTAL':<12}  {tot_t:>8}  {tot_tr:>8}  {tot_va:>8}")
+        src_report['total'] = {'total': tot_t, 'train': tot_tr, 'val': tot_va}
+        report[name] = src_report
+
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +499,13 @@ def main():
         train_data['groups'], args.val_frac, args.split_buffer
     )
 
+    # Per-source class separation, broken out by train / val split
+    class_distribution = report_class_by_source_split(
+        train_data['labels'], train_data['sources'],
+        train_data['meta']['source_names'],
+        idx_train, idx_val, n_classes,
+    )
+
     # Train model
     model, out_dir = train_model(
         run_name, n_classes,
@@ -458,6 +530,7 @@ def main():
         'learning_rate': args.learning_rate,
         'dropout_rate': args.dropout_rate,
         'weight_decay': args.weight_decay,
+        'class_distribution': class_distribution,
         'train_provenance': train_data['meta'],
     }
 

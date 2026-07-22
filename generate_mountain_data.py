@@ -620,6 +620,29 @@ def write_root_attrs(f, args, freq, pol, source_group, n_tiles, cpi_len, cpi_wid
 
 
 # ---------------------------------------------------------------------------
+# CLASS-BALANCE REPORTING
+# ---------------------------------------------------------------------------
+
+def format_class_distribution(knee_counts, n_classes, indent='  '):
+    """
+    Human-readable class-separation report for one set of generated tiles.
+
+    'Class separation' here is the per-label sample count and its share of the
+    group -- i.e. how the generated tiles separate across the knee classes
+    (0 = clean .. n_classes - 1). Returns (text, total).
+    """
+    total = int(sum(int(v) for v in knee_counts.values()))
+    parts = []
+    for k in range(n_classes):
+        c = int(knee_counts.get(k, 0))
+        frac = (100.0 * c / total) if total else 0.0
+        parts.append(f"knee={k}: {c} ({frac:.1f}%)")
+    text = (f"{indent}total samples: {total}\n"
+            f"{indent}class separation: " + ", ".join(parts))
+    return text, total
+
+
+# ---------------------------------------------------------------------------
 # SET GENERATION
 # ---------------------------------------------------------------------------
 
@@ -763,8 +786,8 @@ def generate_dataset_for_group(raw, freq, pol, grp_name, pulse_idx, range_idx,
         f.attrs['label_histogram'] = json.dumps(hist)
         f.attrs['n_records'] = writer.n
 
-    print("  label histogram: "
-          + ", ".join(f"knee={k}: {knee_counts[k]}" for k in sorted(knee_counts)))
+    report_text, _ = format_class_distribution(knee_counts, args.max_bands + 1)
+    print(report_text)
 
     return knee_counts, out_path
 
@@ -873,6 +896,8 @@ def main():
     h5_in = h5py.File(args.clean_h5, 'r')
 
     written = []
+    overall_counts = {}
+    group_totals = {}
     for grp_name in h5_in.keys():
         grp = h5_in[grp_name]
         freq = str(grp.attrs['frequency'])
@@ -893,16 +918,32 @@ def main():
             print(f"\n[warn] group {grp_name} has no clean tiles; skipping")
             continue
 
-        _, out_path = generate_dataset_for_group(
+        knee_counts, out_path = generate_dataset_for_group(
             raw, freq, pol, grp_name, pulse_idx, range_idx,
             cpi_len, cpi_width, args, args.output_dir
         )
         written.append(out_path)
 
+        group_totals[f'{freq}-{pol}'] = int(sum(int(v) for v in knee_counts.values()))
+        for k, v in knee_counts.items():
+            overall_counts[k] = overall_counts.get(k, 0) + int(v)
+
     h5_in.close()
 
     if not written:
         raise RuntimeError('No matching freq/pol groups were processed; check --freq/--pol filters')
+
+    # Combined pool = every group concatenated. train_only.py splits this into
+    # train/val by pulse tile (val_frac + split_buffer), so this is the total
+    # sample count and class separation that feed train/val downstream.
+    print('\n' + '=' * 70)
+    print('TRAIN/VAL POOL SUMMARY (all groups combined)')
+    print('=' * 70)
+    for chan, tot in group_totals.items():
+        print(f'  {chan:<8}: {tot} samples')
+    overall_text, grand_total = format_class_distribution(overall_counts, args.max_bands + 1)
+    print(f'  {"-"*40}')
+    print(overall_text)
 
     print('\nDone. Wrote:')
     for path in written:

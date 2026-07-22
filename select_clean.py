@@ -57,6 +57,60 @@ PULSE_CHUNK_DEFAULT = 512
 
 
 # ---------------------------------------------------------------------------
+# CALTONE REMOVAL
+# ---------------------------------------------------------------------------
+#
+# The instrument caltone is a narrowband sinusoid in fast time (range). Left in
+# place it adds a rank-1 term to every slow-time CPI, lifting the eigenvalue /
+# diagonal structure the IQR cleanliness test keys on -- i.e. it makes clean
+# tiles look marginally less clean. Because this file defines the CLEAN BASELINE
+# that the mountain training tiles are drawn from, the caltone is subtracted
+# from the raw data BEFORE the SCM / diagonal / cleanliness are computed, so the
+# baseline matches the caltone-removed generate_mountain_data.py path.
+#
+# ToneRemover builds an ABSOLUTE phase reference exp(-1j*2*pi*f*arange(n))
+# anchored at range sample 0, so the tone must be removed from the FULL-WIDTH
+# range line (aligned to sample 0); the range window is sliced out afterward.
+
+CALTONE_WINDOW_SIZE = 64
+CALTONE_DEFAULT_FREQ_HZ = 1214.88e6
+CALTONE_LO_HZ = 1200e6
+CALTONE_CLOCK_HZ = 240e6
+
+
+def parse_caltone_freq_from_drt(raw, txrx_pol):
+    """
+    Caltone frequency (Hz) for one TxRx polarization from the DRT phase-step
+    telemetry, with a default fallback when the path is absent. (Mirrors
+    test_rfi_check.py.)
+    """
+    path = f'{raw.TelemetryPath}/DRT/MISC/CP_IFSW_CALTONE_PHASE_STEP_{txrx_pol[1]}'
+    with h5py.File(raw.filename, mode='r', swmr=True) as f:
+        try:
+            ds = f[path]
+        except KeyError:
+            print(f'    caltone: missing "{path}"; using default '
+                  f'{CALTONE_DEFAULT_FREQ_HZ} Hz')
+            return CALTONE_DEFAULT_FREQ_HZ
+        i_cal = np.median(ds[()]).astype(int)
+        return (i_cal / 2 ** 32) * CALTONE_CLOCK_HZ + CALTONE_LO_HZ
+
+
+def build_tone_remover(raw, freq, pol, num_rng_samples):
+    """
+    ToneRemover sized to the full range width for one channel, plus the caltone
+    frequency used. ToneRemover is imported lazily so --help works without isce3.
+    """
+    from isce3.focus import ToneRemover
+    tx_pol = pol[0]
+    fc, fs, _, _ = raw.getChirpParameters(freq, tx_pol)
+    caltone_freq = parse_caltone_freq_from_drt(raw, pol)
+    remover = ToneRemover((caltone_freq - fc) / fs, num_rng_samples,
+                          CALTONE_WINDOW_SIZE)
+    return remover, caltone_freq
+
+
+# ---------------------------------------------------------------------------
 # GAP-EXCLUSION SCM (standalone - copied from anomaly_features.py)
 # ---------------------------------------------------------------------------
 
@@ -469,14 +523,26 @@ def resolve_freq_pols(raw, freq_arg, pol_arg):
     return pairs
 
 
-def read_scene_block(ds, p0, p1, r0, r1, pulse_chunk):
-    """Read and BFPQLUT-decode a [p0:p1, r0:r1] window in pulse chunks."""
+def read_scene_block(ds, p0, p1, r0, r1, pulse_chunk, remover=None):
+    """
+    Read and BFPQLUT-decode a [p0:p1, r0:r1] window in pulse chunks.
+
+    When `remover` is given, the caltone is subtracted from each FULL-WIDTH
+    range line before the [r0:r1] window is sliced out, so the tone is removed
+    at its true absolute range phase (the remover is anchored at sample 0).
+    """
     n_p = p1 - p0
     n_r = r1 - r0
     out = np.empty((n_p, n_r), dtype=np.complex64)
     for cs in range(p0, p1, pulse_chunk):
         ce = min(cs + pulse_chunk, p1)
-        out[cs - p0:ce - p0, :] = np.asarray(ds[cs:ce, r0:r1], dtype=np.complex64)
+        if remover is None:
+            out[cs - p0:ce - p0, :] = np.asarray(ds[cs:ce, r0:r1], dtype=np.complex64)
+        else:
+            lines = np.asarray(ds[cs:ce, :], dtype=np.complex64)   # full width
+            for ip in range(lines.shape[0]):
+                lines[ip] = remover.remove_tone(lines[ip])
+            out[cs - p0:ce - p0, :] = lines[:, r0:r1]
     return out
 
 
@@ -526,6 +592,16 @@ def main():
     parser.add_argument('--cpi-width', type=int, default=CPI_WIDTH_DEFAULT)
     parser.add_argument('--pulse-chunk', type=int, default=PULSE_CHUNK_DEFAULT)
 
+    parser.add_argument('--remove-caltone', dest='remove_caltone',
+                        action='store_true', default=True,
+                        help='Subtract the instrument caltone from the raw data '
+                             'before computing cleanliness. This defines the clean '
+                             'baseline for the mountain tiles (default: on).')
+    parser.add_argument('--no-remove-caltone', dest='remove_caltone',
+                        action='store_false',
+                        help='Compute cleanliness on the raw data with the caltone '
+                             'still in it (legacy behavior).')
+
     parser.add_argument('--compute-subswath-mask', action='store_true',
                         help='Apply gap-exclusion via amplitude-based subswath masking.')
     parser.add_argument('--off-diag-overlap-ratio', type=float,
@@ -560,6 +636,7 @@ def main():
     h5_out.attrs['range_end'] = args.range_end if args.range_end is not None else -1
     h5_out.attrs['n_check'] = args.n_check
     h5_out.attrs['std_threshold'] = args.std_threshold
+    h5_out.attrs['caltone_removed'] = bool(args.remove_caltone)
 
     # Process each frequency/polarization pair
     for freq, pol in freq_pols:
@@ -576,10 +653,21 @@ def main():
         r0 = args.range_start if args.range_start is not None else 0
         r1 = args.range_end if args.range_end is not None else rds.shape[1]
 
+        # Build the caltone remover once per channel, sized to the FULL range
+        # width so remove_tone() sees each range line at its true sample offset.
+        if args.remove_caltone:
+            remover, caltone_freq = build_tone_remover(raw, freq, pol, rds.shape[1])
+            print("    caltone removal ON  (f_caltone = {:.4f} MHz, window = {})".format(
+                caltone_freq / 1e6, CALTONE_WINDOW_SIZE))
+        else:
+            remover, caltone_freq = None, None
+            print("    caltone removal OFF")
+
         # Read scene block
         print("    Reading pulse range [{}:{}], range [{}:{}] ...".format(
             args.pulse_start, args.pulse_end, r0, r1))
-        data_block = read_scene_block(rds, args.pulse_start, args.pulse_end, r0, r1, args.pulse_chunk)
+        data_block = read_scene_block(rds, args.pulse_start, args.pulse_end, r0, r1,
+                                      args.pulse_chunk, remover)
         print("    Data block shape: {}".format(data_block.shape))
         print("    [DEBUG] Data block max magnitude: {:.6e}, all_zero: {}".format(
             np.max(np.abs(data_block)), np.all(data_block == 0)))
@@ -623,6 +711,9 @@ def main():
         grp.attrs['frequency'] = freq
         grp.attrs['polarization'] = pol
         grp.attrs['n_clean_tiles'] = n_clean
+        grp.attrs['caltone_removed'] = bool(args.remove_caltone)
+        if caltone_freq is not None:
+            grp.attrs['caltone_freq_hz'] = float(caltone_freq)
 
         print("    Saved to HDF5 group: {}".format(grp_name))
 
