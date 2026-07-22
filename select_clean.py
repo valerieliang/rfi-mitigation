@@ -1,34 +1,58 @@
 #!/usr/bin/env python
 """
-select_clean_mountain.py
+select_clean.py
 
-Scan a NISAR L0B scene for "clean" CPI tiles and save them to HDF5.
+Scan ANY NISAR L0B scene (mountain, rainforest, urban, ...) for "clean" CPI
+tiles and write them directly as a CLEAN (label-0) training set that
+train_only.py can load, with no separate filtering or generation step.
 
-A tile is considered clean using an IQR-based method:
-1. Compute gap-excluded SCM and identify valid diagonal entries
-2. Remove invalid diagonal entries
-3. Select middle 50% of remaining valid diagonals (IQR)
-4. Compute mean and std dev of the IQR
-5. Check if top n_check eigenvalues exceed mean + std_threshold * std_dev
-6. Flag as unclean if any exceed the threshold
+Nothing here is scene-specific: the cleanliness test is a per-tile signal
+statistic, so the same command works on any granule. Point it at a scene, give
+it a pulse window, and it emits that scene's clean background tiles.
 
-This approach uses signal noise statistics (IQR) free from drop-offs and RFI
-to detect outliers, rather than an absolute threshold.
+Pipeline per tile:
+1. Subtract the instrument caltone from the raw data (on by default), so
+   cleanliness and the stored features are computed on caltone-free data.
+2. Compute the gap-excluded SCM, its eigenvalues, its diagonal, and the
+   per-index diagonal validity mask.
+3. IQR cleanliness test: reject a tile if its top n_check eigenvalues exceed
+   the IQR mean + std_threshold * std_dev of the valid diagonal.
+4. Power / valid-eigenvalue filter (folded in from the old
+   filter_clean_mountains.py): reject a tile whose max eigenvalue power is below
+   min_power_db, or that has fewer than min_valid_eigvals eigenvalues above 0 dB.
 
-For each clean tile, we store:
-  - Full eigenvalue profile (16 values, unnormalized)
-  - Full diagonal (16 values, unnormalized)
-  - IQR mean and std dev (statistics used for cleanliness check)
-  - Number of std devs above mean for the max value checked
-  - Pulse start and range start indices
-  - Frequency and polarization
+Tiles that pass BOTH are written, one file per channel, in the exact layout
+train_only.py consumes (<name-prefix>_<freq>_<pol>.h5, default clean_data_*):
+
+    labels          int8    (N,)         all 0 (clean)
+    eigenvalues     float32 (N, cpi_len) descending, LINEAR scale
+    diagonal        float32 (N, cpi_len) SCM diagonal, LINEAR, unnormalized
+    diag_valid_idx  bool    (N, cpi_len) per-index diagonal validity
+    signal_power_db float32 (N,)         tile baseline power, 10*log10
+    valid_fraction  float32 (N,)         fraction of valid samples
+    tile_pulse      int32   (N,)         absolute pulse index of tile row 0
+    tile_range      int32   (N,)         absolute range index of tile col 0
+    (plus iqr_mean / iqr_std / n_std_above / diag_valid_frac / max_power_db /
+     n_valid_eigvals as clean-selection provenance)
 
 By default, the script processes both polarizations (if available) and
 allows frequency selection via --freq.
+
+Examples
+--------
+    # Clean tiles from a mountain scene
+    python select_clean.py mountain.h5 --pulse-start 435777 --pulse-end 489617 \
+        --compute-subswath-mask --output-dir data/mountain_clean
+
+    # Clean tiles from an Amazon scene, tagged so the files are distinguishable
+    python select_clean.py amazon.h5 --pulse-start 813924 --pulse-end 888222 \
+        --compute-subswath-mask --name-prefix amazon_clean_data \
+        --output-dir data/amazon_clean
 """
 
 import argparse
 import os
+from datetime import datetime, timezone
 
 import numpy as np
 import h5py
@@ -49,6 +73,10 @@ N_KEEP_DEFAULT = 12
 
 # Number of values to show in plots (all 16)
 N_SHOW = 16
+
+# Power / valid-eigenvalue filter defaults (folded in from filter_clean_mountains.py)
+MIN_POWER_DB_DEFAULT = 4.0
+MIN_VALID_EIGVALS_DEFAULT = 12
 
 EPS = 1e-12
 
@@ -331,31 +359,47 @@ def is_clean_tile(
     return is_clean, stats
 
 
-def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
-                     off_diag_ratio, diag_ratio, n_check, std_threshold):
-    """
-    Tile data_block into non-overlapping cpi_len x cpi_width CPIs, extract
-    eigenvalues and diagonal for each, and filter for clean tiles only.
+def tile_signal_power(cpi, cpi_mask):
+    """Baseline power of a tile: mean(|x|^2) over its valid samples (EPS-floored)."""
+    if cpi_mask is not None and cpi_mask.any():
+        vals = cpi[cpi_mask]
+    else:
+        vals = cpi.ravel()
+    return max(float(np.mean(np.abs(vals) ** 2)), EPS)
 
-    Returns a dict of arrays for clean tiles, or None if no clean tiles found.
+
+def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
+                     off_diag_ratio, diag_ratio, n_check, std_threshold,
+                     min_power_db, min_valid_eigvals):
+    """
+    Tile data_block into non-overlapping cpi_len x cpi_width CPIs and keep the
+    tiles that pass BOTH the IQR cleanliness test and the power / valid-eigenvalue
+    filter, returning per-tile arrays in the layout train_only.py consumes.
+
+    A tile is kept when:
+      1. is_clean_tile(...) finds no diagonal outlier above the IQR threshold,
+      2. its max eigenvalue power is >= min_power_db, and
+      3. at least min_valid_eigvals eigenvalues sit above 0 dB.
+
+    Returns a dict of arrays for the kept (clean, label-0) tiles, or None.
     """
     n_p, n_r = data_block.shape
     n_pt = n_p // cpi_len
     n_rt = n_r // cpi_width
 
-    eig_lin_list = []       # (16,) linear eigenvalues, descending, unnormalized
-    diag_lin_list = []      # (16,) per-pulse SCM diagonal power (linear, unnormalized)
-    diag_valid_list = []
+    eig_lin_list = []          # (16,) linear eigenvalues, descending
+    diag_lin_list = []         # (16,) SCM diagonal power (linear, unnormalized)
+    diag_valid_idx_list = []   # (16,) per-index bool -- required by train_only.py
+    diag_valid_frac_list = []  # scalar fraction, kept as provenance
+    sig_db_list = []           # tile baseline power, 10*log10
+    vfrac_list = []            # valid-sample fraction
     pulse_idx_list = []
     range_idx_list = []
-    iqr_mean_list = []      # IQR mean for each CPI
-    iqr_std_list = []       # IQR std dev for each CPI
-    n_std_above_list = []   # Number of std devs above mean for max value
+    iqr_mean_list = []
+    iqr_std_list = []
+    n_std_above_list = []
 
-    # DEBUG: Track first non-zero tile and rejection reasons
-    first_nonzero_logged = False
     rejection_counts = {'zero': 0, 'unclean': 0}
-    first_rejection_logged = False
 
     for pt in range(n_pt):
         ps = pt * cpi_len
@@ -367,20 +411,6 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
             cpi = data_block[ps:pe, rs:re]
             cpi_mask = None if mask_block is None else mask_block[ps:pe, rs:re]
 
-            # DEBUG: Check input data for first tile AND first non-zero tile
-            cpi_is_zero = np.all(cpi == 0)
-            if (pt == 0 and rt == 0) or (not first_nonzero_logged and not cpi_is_zero):
-                if pt == 0 and rt == 0:
-                    print(f"    [DEBUG] First CPI tile (pt={pt}, rt={rt}):")
-                else:
-                    print(f"    [DEBUG] First non-zero CPI tile (pt={pt}, rt={rt}):")
-                    first_nonzero_logged = True
-                print(f"      CPI shape: {cpi.shape}")
-                print(f"      CPI max magnitude: {np.max(np.abs(cpi)):.6e}")
-                print(f"      CPI all zero: {cpi_is_zero}")
-                if cpi_mask is not None:
-                    print(f"      Mask valid fraction: {np.mean(cpi_mask):.2%}")
-
             scm, diag_valid_idx, diag_valid_frac = compute_gap_exclusion_scm(
                 cpi,
                 mask_valid_cpi=cpi_mask,
@@ -388,92 +418,86 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
                 diag_valid_ratio=diag_ratio,
             )
 
-            # DEBUG: Check SCM before normalization (only for logged tiles)
-            if (pt == 0 and rt == 0) or (not cpi_is_zero and not first_nonzero_logged):
-                print(f"      SCM max (before norm): {np.max(np.abs(scm)):.6e}")
-
-            # Normalize SCM by number of range samples (CPI^H * CPI / 250)
+            # Normalize SCM by range width (CPI^H CPI / cpi_width), matching
+            # generate_mountain_data.py / generate_amazon_data.py.
             scm = scm / cpi_width
 
-            # DEBUG: Check SCM after normalization (only for logged tiles)
-            if (pt == 0 and rt == 0) or (not cpi_is_zero and not first_nonzero_logged):
-                print(f"      SCM max (after norm): {np.max(np.abs(scm)):.6e}")
-                print(f"      cpi_width: {cpi_width}")
-
-            eigvals = eigen_decompose_descending(scm)      # (16,) linear, unnormalized
+            eigvals = eigen_decompose_descending(scm)          # (16,) linear
             diag_lin = np.real(np.diag(scm)).astype(np.float64)
 
-            # Skip zero tiles (invalid/near-range data)
+            # Skip zero tiles (invalid / near-range data)
             if np.max(np.abs(eigvals)) < EPS:
                 rejection_counts['zero'] += 1
                 continue
 
-            # Filter: only keep clean tiles using new IQR-based method
             is_clean, stats = is_clean_tile(
-                diag_lin,
-                diag_valid_idx,
-                n_check=n_check,
-                std_threshold=std_threshold
+                diag_lin, diag_valid_idx,
+                n_check=n_check, std_threshold=std_threshold,
             )
-
             if not is_clean:
                 rejection_counts['unclean'] += 1
-                # DEBUG: Show first rejection reason
-                if not first_rejection_logged:
-                    print(f"    [DEBUG] First tile rejected as unclean at p={ps}, r={rs}:")
-                    print(f"      Eigvals: {eigvals[:5]}")
-                    print(f"      Diagonal: {diag_lin[:5]}")
-                    print(f"      IQR mean: {stats['iqr_mean']:.3f}, IQR std: {stats['iqr_std']:.3f}")
-                    print(f"      n_std_above: {stats['n_std_above']:.3f}, threshold: {std_threshold:.3f}")
-                    first_rejection_logged = True
                 continue
-
-            # DEBUG: Check for zero eigenvalues/diagonal (only first clean tile that passes filter)
-            if len(eig_lin_list) == 0:
-                print(f"    [DEBUG] First clean tile (passed all filters) at p={ps}, r={rs}:")
-                print(f"      SCM max: {np.max(np.abs(scm)):.6e}")
-                print(f"      Eigvals: {eigvals[:5]}")
-                print(f"      Diagonal: {diag_lin[:5]}")
-                print(f"      IQR mean: {stats['iqr_mean']:.3f}, IQR std: {stats['iqr_std']:.3f}")
-                print(f"      n_std_above: {stats['n_std_above']:.3f}")
 
             eig_lin_list.append(eigvals.astype(np.float64))
             diag_lin_list.append(diag_lin)
-            diag_valid_list.append(diag_valid_frac)
+            diag_valid_idx_list.append(diag_valid_idx.astype(bool))
+            diag_valid_frac_list.append(diag_valid_frac)
+            sig_db_list.append(10.0 * np.log10(tile_signal_power(cpi, cpi_mask)))
+            vfrac_list.append(float(cpi_mask.mean()) if cpi_mask is not None else 1.0)
             pulse_idx_list.append(p0 + ps)
             range_idx_list.append(r0 + rs)
             iqr_mean_list.append(stats['iqr_mean'])
             iqr_std_list.append(stats['iqr_std'])
             n_std_above_list.append(stats['n_std_above'])
 
-    # DEBUG: Report rejection statistics
     total_tiles = n_pt * n_rt
-    print(f"    [DEBUG] Tile filtering results:")
-    print(f"      Total tiles: {total_tiles}")
-    print(f"      Rejected (zero): {rejection_counts['zero']}")
-    print(f"      Rejected (unclean): {rejection_counts['unclean']}")
-    print(f"      Accepted (clean): {len(eig_lin_list)}")
+    n_iqr_clean = len(eig_lin_list)
+    print(f"    IQR clean test: {total_tiles} tiles -> {n_iqr_clean} clean "
+          f"(rejected zero={rejection_counts['zero']}, unclean={rejection_counts['unclean']})")
 
     if not eig_lin_list:
         return None
 
-    eig_lin = np.stack(eig_lin_list)             # (N, 16)
-    diag_lin = np.stack(diag_lin_list)           # (N, 16)
+    eig_lin = np.stack(eig_lin_list)                    # (N, 16)
+    diag_lin = np.stack(diag_lin_list)                  # (N, 16)
+    diag_valid_idx = np.stack(diag_valid_idx_list)      # (N, 16) bool
+    diag_valid_frac = np.array(diag_valid_frac_list, dtype=np.float32)
+    sig_db = np.array(sig_db_list, dtype=np.float32)
+    vfrac = np.array(vfrac_list, dtype=np.float32)
+    pulse_idx = np.array(pulse_idx_list, dtype=np.int64)
+    range_idx = np.array(range_idx_list, dtype=np.int64)
+    iqr_mean = np.array(iqr_mean_list, dtype=np.float32)
+    iqr_std = np.array(iqr_std_list, dtype=np.float32)
+    n_std_above = np.array(n_std_above_list, dtype=np.float32)
 
-    # DEBUG: Check if stacked arrays are non-zero
-    print(f"    [DEBUG] After stacking {len(eig_lin_list)} clean tiles:")
-    print(f"      eig_lin max: {np.max(eig_lin):.6e}, all_zero: {np.all(eig_lin == 0)}")
-    print(f"      diag_lin max: {np.max(diag_lin):.6e}, all_zero: {np.all(diag_lin == 0)}")
+    # Power / valid-eigenvalue filter (folded in from filter_clean_mountains.py):
+    # drop tiles whose max eigenvalue power is too low or that have too few
+    # eigenvalues above the 0 dB noise floor.
+    eig_db = eigvals_to_db(eig_lin)                     # (N, 16)
+    max_power_db = np.max(eig_db, axis=1)
+    n_valid_eigvals = np.sum(eig_db > 0, axis=1)
+    keep = (max_power_db >= min_power_db) & (n_valid_eigvals >= min_valid_eigvals)
+
+    print(f"    power/eigval filter (max >= {min_power_db} dB, >= {min_valid_eigvals} valid): "
+          f"{n_iqr_clean} -> {int(np.sum(keep))} kept ({int(np.sum(~keep))} removed)")
+
+    if not np.any(keep):
+        return None
 
     return {
-        "eig_lin": eig_lin,
-        "diag_lin": diag_lin.astype(np.float64),
-        "diag_valid_frac": np.array(diag_valid_list, dtype=np.float32),
-        "pulse_idx": np.array(pulse_idx_list, dtype=np.int64),
-        "range_idx": np.array(range_idx_list, dtype=np.int64),
-        "iqr_mean": np.array(iqr_mean_list, dtype=np.float32),
-        "iqr_std": np.array(iqr_std_list, dtype=np.float32),
-        "n_std_above": np.array(n_std_above_list, dtype=np.float32),
+        "eig_lin": eig_lin[keep].astype(np.float32),
+        "diag_lin": diag_lin[keep].astype(np.float32),
+        "diag_valid_idx": diag_valid_idx[keep],
+        "diag_valid_frac": diag_valid_frac[keep],
+        "signal_power_db": sig_db[keep],
+        "valid_fraction": vfrac[keep],
+        "pulse_idx": pulse_idx[keep],
+        "range_idx": range_idx[keep],
+        "iqr_mean": iqr_mean[keep],
+        "iqr_std": iqr_std[keep],
+        "n_std_above": n_std_above[keep],
+        "max_power_db": max_power_db[keep].astype(np.float32),
+        "n_valid_eigvals": n_valid_eigvals[keep].astype(np.int32),
     }
 
 
@@ -596,7 +620,7 @@ def main():
                         action='store_true', default=True,
                         help='Subtract the instrument caltone from the raw data '
                              'before computing cleanliness. This defines the clean '
-                             'baseline for the mountain tiles (default: on).')
+                             'baseline for the scene (default: on).')
     parser.add_argument('--no-remove-caltone', dest='remove_caltone',
                         action='store_false',
                         help='Compute cleanliness on the raw data with the caltone '
@@ -614,8 +638,18 @@ def main():
     parser.add_argument('--std-threshold', type=float, default=1.0,
                         help='Number of standard deviations above IQR mean to allow before flagging as unclean.')
 
-    parser.add_argument('--output-h5', default='clean_mountains.h5',
-                        help='Output HDF5 file path.')
+    parser.add_argument('--min-power-db', type=float, default=MIN_POWER_DB_DEFAULT,
+                        help='Drop tiles whose max eigenvalue power is below this (dB).')
+    parser.add_argument('--min-valid-eigvals', type=int, default=MIN_VALID_EIGVALS_DEFAULT,
+                        help='Drop tiles with fewer than this many eigenvalues above 0 dB.')
+
+    parser.add_argument('--name-prefix', default='clean_data',
+                        help='Filename prefix for the per-channel output files: '
+                             '<name-prefix>_<freq>_<pol>.h5. Use a scene-specific '
+                             'prefix (e.g. mountain_clean_data) to keep sets apart.')
+    parser.add_argument('--output-dir', default='data/clean',
+                        help='Output directory. One train-ready file per channel is '
+                             'written here: <name-prefix>_<freq>_<pol>.h5')
     args = parser.parse_args()
 
     # Open L0B granule
@@ -626,19 +660,10 @@ def main():
     freq_pols = resolve_freq_pols(raw, args.freq, args.pol)
     print("[+] Processing {} frequency/polarization pair(s): {}".format(len(freq_pols), freq_pols))
 
-    # Prepare output HDF5
-    os.makedirs(os.path.dirname(args.output_h5) or '.', exist_ok=True)
-    h5_out = h5py.File(args.output_h5, 'w')
-    h5_out.attrs['l0b_file'] = os.path.basename(args.l0b_file)
-    h5_out.attrs['pulse_start'] = args.pulse_start
-    h5_out.attrs['pulse_end'] = args.pulse_end
-    h5_out.attrs['range_start'] = args.range_start if args.range_start is not None else 0
-    h5_out.attrs['range_end'] = args.range_end if args.range_end is not None else -1
-    h5_out.attrs['n_check'] = args.n_check
-    h5_out.attrs['std_threshold'] = args.std_threshold
-    h5_out.attrs['caltone_removed'] = bool(args.remove_caltone)
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    # Process each frequency/polarization pair
+    written = []
+    group_totals = {}
     for freq, pol in freq_pols:
         print("\n[+] Processing freq={}, pol={}".format(freq, pol))
 
@@ -669,56 +694,100 @@ def main():
         data_block = read_scene_block(rds, args.pulse_start, args.pulse_end, r0, r1,
                                       args.pulse_chunk, remover)
         print("    Data block shape: {}".format(data_block.shape))
-        print("    [DEBUG] Data block max magnitude: {:.6e}, all_zero: {}".format(
-            np.max(np.abs(data_block)), np.all(data_block == 0)))
 
         # Compute validity mask if requested
         mask_block = None
         if args.compute_subswath_mask:
-            print("    Computing amplitude-based validity mask ...")
             mask_block = amplitude_gap_mask(data_block)
-            valid_frac = np.mean(mask_block)
-            print("    Valid fraction: {:.2%}".format(valid_frac))
+            print("    amplitude validity mask: {:.2%} valid".format(np.mean(mask_block)))
 
-        # Process tiles and filter for clean ones
-        print("    Tiling and filtering for clean tiles (std_threshold={} std devs) ...".format(args.std_threshold))
+        # Tile, apply the IQR cleanliness test AND the power/eigval filter
         result = process_freq_pol(
             data_block, mask_block,
             args.pulse_start, r0,
             args.cpi_len, args.cpi_width,
             args.off_diag_overlap_ratio, args.diag_valid_ratio,
-            args.n_check, args.std_threshold
+            args.n_check, args.std_threshold,
+            args.min_power_db, args.min_valid_eigvals,
         )
 
         if result is None:
-            print("    [warn] No clean tiles found for freq={}, pol={}".format(freq, pol))
+            print("    [warn] No clean tiles survived for freq={}, pol={}".format(freq, pol))
             continue
 
         n_clean = result['eig_lin'].shape[0]
-        print("    Found {} clean tile(s)".format(n_clean))
+        print("    Kept {} clean tile(s)".format(n_clean))
 
-        # Save to HDF5
-        grp_name = "freq_{}_pol_{}".format(freq, pol)
-        grp = h5_out.create_group(grp_name)
-        grp.create_dataset('eigenvalues', data=result['eig_lin'], compression='gzip')
-        grp.create_dataset('diagonal', data=result['diag_lin'], compression='gzip')
-        grp.create_dataset('diag_valid_frac', data=result['diag_valid_frac'], compression='gzip')
-        grp.create_dataset('pulse_idx', data=result['pulse_idx'], compression='gzip')
-        grp.create_dataset('range_idx', data=result['range_idx'], compression='gzip')
-        grp.create_dataset('iqr_mean', data=result['iqr_mean'], compression='gzip')
-        grp.create_dataset('iqr_std', data=result['iqr_std'], compression='gzip')
-        grp.create_dataset('n_std_above', data=result['n_std_above'], compression='gzip')
-        grp.attrs['frequency'] = freq
-        grp.attrs['polarization'] = pol
-        grp.attrs['n_clean_tiles'] = n_clean
-        grp.attrs['caltone_removed'] = bool(args.remove_caltone)
-        if caltone_freq is not None:
-            grp.attrs['caltone_freq_hz'] = float(caltone_freq)
+        # Write one train-ready file per channel (label 0, no RFI).
+        out_path = os.path.join(args.output_dir,
+                                "{}_{}_{}.h5".format(args.name_prefix, freq, pol))
+        with h5py.File(out_path, 'w') as f:
+            f.attrs['granule'] = os.path.basename(args.l0b_file)
+            f.attrs['granule_path'] = args.l0b_file
+            f.attrs['frequency'] = freq
+            f.attrs['polarization'] = pol
+            f.attrs['pulse_start'] = args.pulse_start
+            f.attrs['pulse_end'] = args.pulse_end
+            f.attrs['range_start'] = r0
+            f.attrs['range_end'] = r1
+            f.attrs['n_tiles'] = n_clean
+            f.attrs['n_records'] = n_clean
+            f.attrs['cpi_len'] = args.cpi_len
+            f.attrs['cpi_width'] = args.cpi_width
+            # Clean-only: label space is the single class {0}. train_only.py takes
+            # the max n_classes across loaded files, so this stays compatible with
+            # any RFI set that declares a larger n_classes (e.g. 7).
+            f.attrs['min_bands'] = 0
+            f.attrs['max_bands'] = 0
+            f.attrs['n_classes'] = 1
+            f.attrs['seed'] = 0
+            f.attrs['content'] = 'clean scene background, no RFI injected (all label 0)'
+            f.attrs['gap_exclusion_used'] = bool(args.compute_subswath_mask)
+            f.attrs['off_diag_overlap_ratio'] = args.off_diag_overlap_ratio
+            f.attrs['diag_valid_ratio'] = args.diag_valid_ratio
+            f.attrs['n_check'] = args.n_check
+            f.attrs['std_threshold'] = args.std_threshold
+            f.attrs['min_power_db'] = args.min_power_db
+            f.attrs['min_valid_eigvals'] = args.min_valid_eigvals
+            f.attrs['eigenvalue_scale'] = 'linear, descending'
+            f.attrs['diagonal_scale'] = 'linear, unnormalized'
+            f.attrs['caltone_removed'] = bool(args.remove_caltone)
+            if caltone_freq is not None:
+                f.attrs['caltone_freq_hz'] = float(caltone_freq)
+                f.attrs['caltone_window_size'] = CALTONE_WINDOW_SIZE
+            f.attrs['generated_utc'] = datetime.now(timezone.utc).isoformat()
 
-        print("    Saved to HDF5 group: {}".format(grp_name))
+            # train_only.py required datasets
+            f.create_dataset('labels', data=np.zeros(n_clean, dtype=np.int8))
+            f.create_dataset('eigenvalues', data=result['eig_lin'], compression='gzip')
+            f.create_dataset('diagonal', data=result['diag_lin'], compression='gzip')
+            f.create_dataset('diag_valid_idx', data=result['diag_valid_idx'], compression='gzip')
+            f.create_dataset('tile_pulse', data=result['pulse_idx'].astype(np.int32))
+            f.create_dataset('tile_range', data=result['range_idx'].astype(np.int32))
+            f.create_dataset('signal_power_db', data=result['signal_power_db'])
+            f.create_dataset('valid_fraction', data=result['valid_fraction'])
+            # Clean-selection provenance (ignored by train_only.py)
+            f.create_dataset('diag_valid_frac', data=result['diag_valid_frac'], compression='gzip')
+            f.create_dataset('iqr_mean', data=result['iqr_mean'], compression='gzip')
+            f.create_dataset('iqr_std', data=result['iqr_std'], compression='gzip')
+            f.create_dataset('n_std_above', data=result['n_std_above'], compression='gzip')
+            f.create_dataset('max_power_db', data=result['max_power_db'], compression='gzip')
+            f.create_dataset('n_valid_eigvals', data=result['n_valid_eigvals'], compression='gzip')
 
-    h5_out.close()
-    print("\n[+] Done. Clean tiles saved to: {}".format(args.output_h5))
+        written.append(out_path)
+        group_totals[f'{freq}-{pol}'] = n_clean
+        print("    Saved train-ready clean file: {}".format(out_path))
+
+    if not written:
+        raise RuntimeError("No clean tiles were written for any channel.")
+
+    print("\n" + "=" * 60)
+    print("[+] Done. Clean training files (all label 0):")
+    for chan, tot in group_totals.items():
+        print("    {:<8}: {} clean tiles".format(chan, tot))
+    print("    total   : {} clean tiles".format(sum(group_totals.values())))
+    for path in written:
+        print("    -> {}".format(path))
 
 
 if __name__ == '__main__':
