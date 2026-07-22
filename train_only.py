@@ -376,7 +376,8 @@ def save_training_curves_png(history, out_dir):
 def train_model(run_name, n_classes,
                 eigen_train, global_train, y_train,
                 eigen_val, global_val, y_val,
-                epochs, batch_size, learning_rate, dropout_rate, weight_decay):
+                epochs, batch_size, learning_rate, dropout_rate, weight_decay,
+                models_root=MODELS_ROOT):
     """
     Build and train the model on the training region, validating on the held-out
     pulse-tile block of that same region.
@@ -384,7 +385,7 @@ def train_model(run_name, n_classes,
     Returns:
         model, out_dir
     """
-    out_dir = os.path.join(MODELS_ROOT, run_name)
+    out_dir = os.path.join(models_root, run_name)
     os.makedirs(out_dir, exist_ok=True)
     model_path = os.path.join(out_dir, 'best_model.keras')
 

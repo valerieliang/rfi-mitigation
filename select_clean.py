@@ -786,9 +786,30 @@ def main():
             f.create_dataset('max_power_db', data=result['max_power_db'], compression='gzip')
             f.create_dataset('n_valid_eigvals', data=result['n_valid_eigvals'], compression='gzip')
 
+            # Force HDF5 metadata+data to disk before the handle closes.
+            f.flush()
+
+        # Verify the file actually persisted: read it back and report the
+        # on-disk size and tile count. If the file is empty/unreadable here,
+        # the write failed; if it is fine here but shows 0 bytes later, an
+        # external process (e.g. a repo sync) is truncating it after the fact.
+        size = os.path.getsize(out_path)
+        try:
+            with h5py.File(out_path, 'r') as fchk:
+                n_disk = int(fchk['tile_pulse'].shape[0])
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"Wrote '{out_path}' but it is unreadable immediately after "
+                f"close ({type(exc).__name__}: {exc}); size={size} bytes")
+        if size == 0 or n_disk != n_clean:
+            raise RuntimeError(
+                f"'{out_path}' did not persist correctly: {size} bytes, "
+                f"{n_disk} tiles on disk vs {n_clean} written")
+
         written.append(out_path)
         group_totals[f'{freq}-{pol}'] = n_clean
-        print("    Saved train-ready clean file: {}".format(out_path))
+        print("    Saved train-ready clean file: {}  ({:,} bytes, {} tiles verified on disk)"
+              .format(out_path, size, n_disk))
 
     if not written:
         raise RuntimeError("No clean tiles were written for any channel.")
