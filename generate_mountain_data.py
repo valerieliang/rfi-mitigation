@@ -65,6 +65,7 @@ Usage
 """
 
 import os
+import glob
 import json
 import argparse
 import warnings
@@ -811,7 +812,10 @@ def parse_args():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument('clean_h5', help='clean_mountains_filtered.h5 (or clean_mountains.h5)')
+    parser.add_argument('clean_h5',
+                        help='Clean-tile source: a directory of select_clean.py '
+                             'files (*clean_data_*.h5), a single flat clean file, '
+                             'or a legacy grouped clean_mountains_filtered.h5')
     parser.add_argument('l0b_file', help='Source NISAR L0B HDF5 granule the clean tiles were drawn from')
 
     parser.add_argument('--freq', default=None,
@@ -863,6 +867,58 @@ def parse_args():
     return parser.parse_args()
 
 
+def _read_flat_clean_file(path):
+    """
+    (freq, pol, name, pulse_idx, range_idx, cpi_len) from one flat per-channel
+    clean file (select_clean.py output: tile_pulse / tile_range).
+    """
+    with h5py.File(path, 'r') as f:
+        freq = str(f.attrs['frequency'])
+        pol = str(f.attrs['polarization'])
+        pulse_idx = f['tile_pulse'][:]
+        range_idx = f['tile_range'][:]
+        eig_shape = f['eigenvalues'].shape if 'eigenvalues' in f else None
+    cpi_len = eig_shape[1] if (eig_shape and len(eig_shape) == 2) else CPI_LEN_DEFAULT
+    return freq, pol, os.path.basename(path), pulse_idx, range_idx, cpi_len
+
+
+def iter_clean_channels(clean_path):
+    """
+    Yield (freq, pol, name, pulse_idx, range_idx, cpi_len) for every channel in
+    the clean-tile source, accepting any of:
+      - a DIRECTORY of flat per-channel files (*clean_data_*.h5, select_clean.py),
+      - a single flat per-channel file (tile_pulse / tile_range),
+      - a single legacy grouped file (clean_mountains_filtered.h5:
+        freq_X_pol_Y groups with pulse_idx / range_idx).
+    """
+    if os.path.isdir(clean_path):
+        paths = sorted(glob.glob(os.path.join(clean_path, '*clean_data_*.h5')))
+        if not paths:
+            raise FileNotFoundError(f"No *clean_data_*.h5 files found in {clean_path}")
+        for p in paths:
+            yield _read_flat_clean_file(p)
+        return
+
+    with h5py.File(clean_path, 'r') as f:
+        is_flat = ('tile_pulse' in f and 'frequency' in f.attrs)
+        grouped = [k for k in f.keys() if isinstance(f[k], h5py.Group)]
+
+    if is_flat:
+        yield _read_flat_clean_file(clean_path)
+        return
+
+    for grp_name in grouped:
+        with h5py.File(clean_path, 'r') as f:
+            grp = f[grp_name]
+            freq = str(grp.attrs['frequency'])
+            pol = str(grp.attrs['polarization'])
+            pulse_idx = grp['pulse_idx'][:]
+            range_idx = grp['range_idx'][:]
+            eig_shape = grp['eigenvalues'].shape
+            cpi_len = eig_shape[1] if len(eig_shape) == 2 else CPI_LEN_DEFAULT
+        yield freq, pol, grp_name, pulse_idx, range_idx, cpi_len
+
+
 def main():
     args = parse_args()
 
@@ -903,33 +959,23 @@ def main():
     raw = Raw(hdf5file=args.l0b_file)
     raw.parsePolarizations()
 
-    h5_in = h5py.File(args.clean_h5, 'r')
-
     written = []
     overall_counts = {}
     group_totals = {}
-    for grp_name in h5_in.keys():
-        grp = h5_in[grp_name]
-        freq = str(grp.attrs['frequency'])
-        pol = str(grp.attrs['polarization'])
-
+    for freq, pol, src_name, pulse_idx, range_idx, cpi_len in iter_clean_channels(args.clean_h5):
         if args.freq is not None and freq != args.freq:
             continue
         if args.pol is not None and pol != args.pol:
             continue
 
-        pulse_idx = grp['pulse_idx'][:]
-        range_idx = grp['range_idx'][:]
-        eig_shape = grp['eigenvalues'].shape
-        cpi_len = eig_shape[1] if len(eig_shape) == 2 else CPI_LEN_DEFAULT
         cpi_width = args.cpi_width if args.cpi_width is not None else CPI_WIDTH_DEFAULT
 
         if len(pulse_idx) == 0:
-            print(f"\n[warn] group {grp_name} has no clean tiles; skipping")
+            print(f"\n[warn] {src_name} ({freq}-{pol}) has no clean tiles; skipping")
             continue
 
         knee_counts, out_path = generate_dataset_for_group(
-            raw, freq, pol, grp_name, pulse_idx, range_idx,
+            raw, freq, pol, src_name, pulse_idx, range_idx,
             cpi_len, cpi_width, args, args.output_dir
         )
         written.append(out_path)
@@ -937,8 +983,6 @@ def main():
         group_totals[f'{freq}-{pol}'] = int(sum(int(v) for v in knee_counts.values()))
         for k, v in knee_counts.items():
             overall_counts[k] = overall_counts.get(k, 0) + int(v)
-
-    h5_in.close()
 
     if not written:
         raise RuntimeError('No matching freq/pol groups were processed; check --freq/--pol filters')
