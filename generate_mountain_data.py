@@ -892,15 +892,18 @@ def iter_clean_channels(clean_path):
         freq_X_pol_Y groups with pulse_idx / range_idx).
     """
     if os.path.isdir(clean_path):
-        paths = sorted(glob.glob(os.path.join(clean_path, '*clean_data_*.h5')))
+        # Accept ANY *.h5 in the directory; each is validated below and files
+        # that are not readable flat clean files are skipped with a warning.
+        paths = sorted(glob.glob(os.path.join(clean_path, '*.h5')))
         if not paths:
-            raise FileNotFoundError(f"No *clean_data_*.h5 files found in {clean_path}")
+            raise FileNotFoundError(f"No *.h5 files found in {clean_path}")
         n_ok = 0
         for p in paths:
             try:
                 rec = _read_flat_clean_file(p)
             except (OSError, KeyError) as exc:
-                # e.g. a 0-byte / truncated file from an interrupted select_clean.py
+                # e.g. a 0-byte / truncated file, or an h5 that isn't a flat
+                # clean file (missing 'frequency'/'tile_pulse').
                 print(f"[warn] skipping '{p}': not a readable flat clean file "
                       f"({type(exc).__name__}: {exc})")
                 continue
@@ -908,8 +911,9 @@ def iter_clean_channels(clean_path):
             yield rec
         if n_ok == 0:
             raise RuntimeError(
-                f"No readable *clean_data_*.h5 files in {clean_path}. Check for "
-                f"empty/corrupt outputs (ls -la) and re-run select_clean.py.")
+                f"No readable flat clean *.h5 files in {clean_path}. The files "
+                f"exist but could not be opened/parsed -- check 'ls -la' for "
+                f"0-byte or truncated outputs and re-run select_clean.py.")
         return
 
     with h5py.File(clean_path, 'r') as f:
