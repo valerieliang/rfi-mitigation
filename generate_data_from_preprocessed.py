@@ -1,26 +1,35 @@
 #!/usr/bin/env python
 """
-generate_mountain_data.py
+generate_data_from_preprocessed.py
 
 Build a labeled RFI training set by overlaying synthetic RFI bands onto the
-EXACT pulse tiles that select_clean_mountain.py / filter_clean_mountains.py
-already identified as clean mountain background.
+EXACT pulse tiles that a preprocessing step (e.g. select_clean.py, or a
+legacy target-specific variant like select_clean_mountain.py /
+filter_clean_mountains.py) already identified as clean background. The
+background scene type -- mountain, ocean, urban, or anything else -- is
+irrelevant to this script: all it needs is the tile locations recorded by
+that preprocessing step. This is what distinguishes it from a from-raw-scene
+generator like generate_rfi_data.py, which scans a dense grid over the raw
+CPI itself instead of a scattered set of pre-selected tile locations.
 
 Why re-read the raw CPI
 ------------------------
-clean_mountains_filtered.h5 only stores the reduced eigenvalue and diagonal
-profiles for each clean tile, not the underlying complex CPI matrix or the
-full SCM. RFI injection (adding a rank-1 interference term to specific pulse
-rows, then recomputing the covariance) has to happen on the raw complex data,
-so this script uses the tile_pulse / tile_range locations recorded in the
-filtered file to go back to the original L0B granule and re-read each tile's
-raw CPI matrix before injecting.
+The preprocessed clean-tile file only stores the reduced eigenvalue and
+diagonal profiles for each clean tile, not the underlying complex CPI matrix
+or the full SCM. RFI injection (adding a rank-1 interference term to specific
+pulse rows, then recomputing the covariance) has to happen on the raw complex
+data, so this script uses the tile_pulse / tile_range locations recorded in
+the preprocessed file to go back to the original L0B granule and re-read
+each tile's raw CPI matrix before injecting.
 
 Pipeline
 --------
-1. Open clean_mountains_filtered.h5 (or an unfiltered clean_mountains.h5; the
-   schema is the same). For each freq_X_pol_Y group, read pulse_idx[] and
-   range_idx[]: the absolute (row0, col0) location of every clean tile.
+1. Open the preprocessed clean-tile source -- a directory of flat
+   select_clean.py outputs, a single flat file, or a legacy grouped file such
+   as clean_mountains_filtered.h5 (the schema is the same regardless of
+   target type). For each channel, read pulse_idx[] / tile_pulse[] and
+   range_idx[] / tile_range[]: the absolute (row0, col0) location of every
+   clean tile.
 2. Open the source L0B granule and, for each recorded location, read back the
    cpi_len x cpi_width raw complex tile.
 3. Draw a band count (the label) for the tile and inject that many synthetic
@@ -48,20 +57,26 @@ convention in generate_rfi_data.py.
 Usage
 -----
     # Training set: one record per tile, band count drawn from [0, 6]
-    python generate_mountain_data.py clean_mountains_filtered.h5 granule.h5 \
+    python generate_data_from_preprocessed.py clean_tiles.h5 granule.h5 \
         --min-bands 0 --max-bands 6 \
         --jsr-min-db 3 --jsr-max-db 30 \
         --mask-mode subswath \
-        --output-dir data/mountain_rfi_train \
+        --output-dir data/rfi_train \
+        --target-tag mountain \
         --seed 0
 
     # Paired test set: two records per tile (clean + forced-RFI), same background
-    python generate_mountain_data.py clean_mountains_filtered.h5 granule.h5 \
+    python generate_data_from_preprocessed.py clean_tiles.h5 granule.h5 \
         --paired-test --max-bands 6 \
         --jsr-min-db 3 --jsr-max-db 30 \
         --mask-mode subswath \
-        --output-dir data/mountain_rfi_paired_test \
+        --output-dir data/rfi_paired_test \
+        --target-tag ocean \
         --seed 1
+
+`--target-tag` is purely for provenance/naming (it's stored as a root
+attribute and, if given, prefixes the output filename); the generation logic
+itself does not depend on the target type at all.
 """
 
 import os
@@ -513,8 +528,8 @@ class TileWriter:
         self.pair_id = mk('pair_id', (), np.int32, 4096)
 
         self.pair_id.attrs['description'] = (
-            'index into the source clean_mountains file for this tile. In '
-            '--paired-test mode the clean record and its contaminated '
+            'index into the source preprocessed clean-tile file for this '
+            'tile. In --paired-test mode the clean record and its contaminated '
             'counterpart share the same pair_id, so they can be matched up '
             'as the SAME background under the two conditions.'
         )
@@ -587,6 +602,7 @@ def write_root_attrs(f, args, freq, pol, source_group, n_tiles, cpi_len, cpi_wid
     f.attrs['granule_path'] = args.l0b_file
     f.attrs['frequency'] = freq
     f.attrs['polarization'] = pol
+    f.attrs['target_tag'] = args.target_tag if args.target_tag else ''
 
     f.attrs['n_tiles'] = n_tiles
     f.attrs['cpi_len'] = cpi_len
@@ -690,7 +706,8 @@ def generate_dataset_for_group(raw, freq, pol, grp_name, pulse_idx, range_idx,
                                 cpi_len, cpi_width, args, out_dir):
     """
     Inject RFI onto every tile location listed for one freq_X_pol_Y group of
-    the clean-mountain source file, and write the labeled records to HDF5.
+    the preprocessed clean-tile source file, and write the labeled records to
+    HDF5.
 
     Default mode: one record per tile, band count drawn from
     [min_bands, max_bands] (0 = clean, interspersed at random) -- suitable
@@ -714,7 +731,8 @@ def generate_dataset_for_group(raw, freq, pol, grp_name, pulse_idx, range_idx,
     paired = bool(args.paired_test)
 
     suffix = '_paired' if paired else ''
-    out_path = os.path.join(out_dir, f"mountain_rfi_data{suffix}_{freq}_{pol}.h5")
+    base_name = f"{args.target_tag}_rfi_data" if args.target_tag else "rfi_data"
+    out_path = os.path.join(out_dir, f"{base_name}{suffix}_{freq}_{pol}.h5")
     print(f"\n[{freq}-{pol}] source group: {grp_name}  ({n_tiles} clean tiles)"
           + ("  [paired-test mode]" if paired else ""))
     print(f"  -> {out_path}")
@@ -815,8 +833,17 @@ def parse_args():
     parser.add_argument('clean_h5',
                         help='Clean-tile source: a directory of select_clean.py '
                              'files (*clean_data_*.h5), a single flat clean file, '
-                             'or a legacy grouped clean_mountains_filtered.h5')
+                             'or a legacy grouped file such as '
+                             'clean_mountains_filtered.h5. The schema is the same '
+                             'regardless of target/scene type.')
     parser.add_argument('l0b_file', help='Source NISAR L0B HDF5 granule the clean tiles were drawn from')
+
+    parser.add_argument('--target-tag', default=None,
+                        help='Optional label for the background/scene type this clean-tile '
+                             'source was drawn from (e.g. "mountain", "ocean", "urban"). '
+                             'Purely for provenance: stored as a root attribute and, if given, '
+                             'prefixes the output filename. Generation logic is identical '
+                             'regardless of this value.')
 
     parser.add_argument('--freq', default=None,
                         help='Restrict to one frequency group (e.g. "A"). Default: all groups present.')
@@ -845,11 +872,11 @@ def parse_args():
                         help='Validity mask used for gap-exclusion SCM recompute and for the '
                              'injection JSR reference. "subswath" uses ISCE3 subswath boundaries '
                              '(matches generate_rfi_data.py); "amplitude" uses the ADC fill-level '
-                             'heuristic (matches select_clean_mountain.py --compute-subswath-mask).')
+                             'heuristic (matches select_clean.py / legacy select_clean_mountain.py --compute-subswath-mask).')
     parser.add_argument('--off-diag-overlap-ratio', type=float, default=OFF_DIAG_OVERLAP_RATIO_DEFAULT)
     parser.add_argument('--diag-valid-ratio', type=float, default=DIAG_VALID_RATIO_DEFAULT)
 
-    parser.add_argument('--output-dir', default='data/mountain_rfi_train')
+    parser.add_argument('--output-dir', default='data/rfi_train')
     parser.add_argument('--save-cpi', action='store_true',
                         help='Also store the raw complex CPI tiles (RFI already overlaid).')
 
@@ -953,14 +980,15 @@ def main():
 
     print('=' * 70)
     if args.paired_test:
-        print('Mountain-tile PAIRED test set generation')
+        print('Preprocessed-tile PAIRED test set generation')
         print('(each clean tile -> one untouched record + one forced-RFI record, same pair_id)')
     else:
-        print('Mountain-tile RFI training set generation')
-        print('(RFI injected onto the exact tiles select_clean_mountain.py found clean)')
+        print('Preprocessed-tile RFI training set generation')
+        print('(RFI injected onto the exact tiles the preprocessing step found clean)')
     print('=' * 70)
     print(f'  clean tiles from : {args.clean_h5}')
     print(f'  source granule   : {args.l0b_file}')
+    print(f'  target tag       : {args.target_tag or "(none)"}')
     if args.paired_test:
         print(f'  bands per tile   : untouched (0) paired with '
               f'{max(args.min_bands, 1)}..{args.max_bands} (forced RFI)')
