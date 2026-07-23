@@ -83,21 +83,19 @@ DEFAULT_RFI_LABEL_MAX = 6
 # EXTRACTION
 # ---------------------------------------------------------------------------
 
-def extract_channel_metrics(path, diag_valid_frac_thresh, n_keep, ratio_def,
-                            rfi_label_min, rfi_label_max, rfi_only=False):
+def channel_filtered_arrays(path, diag_valid_frac_thresh, n_keep, select,
+                            rfi_label_min, rfi_label_max, clean_label):
     """
-    Load one channel file, apply the diag-valid-frac filter, and compute the
-    three global metric summaries.
+    Load one channel file, apply the diag-valid-frac filter, then keep the tile
+    subset named by `select`:
 
-    With rfi_only=True the MAIN summaries are restricted to tiles labeled in
-    [rfi_label_min, rfi_label_max] (clean tiles dropped entirely), and no
-    separate "(rfi only)" summaries are returned -- the main row already is the
-    RFI-only statistic. Requires the file to carry a `labels` dataset.
+      "all"   : every valid tile
+      "rfi"   : tiles labeled in [rfi_label_min, rfi_label_max]   (needs labels)
+      "clean" : tiles labeled == clean_label                       (needs labels)
 
-    Otherwise the main summaries cover all valid tiles, plus a secondary
-    RFI-only summary when labels are present.
-
-    Returns (summaries_all, summaries_rfi_only_or_None, counts).
+    Returns (eig_kept, diag_lin, diag_valid_idx_or_None, labels_or_None, counts).
+    diag_valid_idx is materialized to an all-True array when the file omits it,
+    so callers (e.g. pooling across files) get a uniform shape.
     """
     ch = load_channel(path)
     describe_coverage(ch)
@@ -109,47 +107,43 @@ def extract_channel_metrics(path, diag_valid_frac_thresh, n_keep, ratio_def,
            else np.ones(ch.n_tiles, dtype=np.float32))
     valid = dvf >= diag_valid_frac_thresh
 
-    eig_kept = ch.eigenvalues[valid][:, :n_keep]
-    diag_valid = ch.diagonal[valid]
-    didx_valid = ch.diag_valid_idx[valid] if ch.diag_valid_idx is not None else None
+    eig = ch.eigenvalues[valid][:, :n_keep]
+    diag = ch.diagonal[valid]
+    if ch.diag_valid_idx is not None:
+        didx = ch.diag_valid_idx[valid]
+    else:
+        didx = np.ones(diag.shape, dtype=bool)
+    labels = ch.labels[valid] if ch.labels is not None else None
+
     counts = {
         "n_total_in_file": int(ch.n_tiles),
         "n_passing_diag_valid_frac": int(valid.sum()),
     }
 
-    if rfi_only:
-        if ch.labels is None:
-            raise ValueError(f"--rfi-only needs a 'labels' dataset; {path} has none.")
-        labels_valid = ch.labels[valid]
-        rfi_mask = (labels_valid >= rfi_label_min) & (labels_valid <= rfi_label_max)
-        counts["n_rfi_labeled"] = int(rfi_mask.sum())
-        counts["n_clean_dropped"] = int((~rfi_mask).sum())
-        if not rfi_mask.any():
-            raise ValueError(
-                f"--rfi-only found no tiles labeled in [{rfi_label_min}, "
-                f"{rfi_label_max}] in {path}.")
-        eig_kept = eig_kept[rfi_mask]
-        diag_valid = diag_valid[rfi_mask]
-        didx_valid = didx_valid[rfi_mask] if didx_valid is not None else None
-        metrics = compute_all_metrics(eig_kept, diag_valid, didx_valid, ratio_def)
-        return [summarize(v, name) for name, v in metrics.items()], None, counts
+    if select == "all":
+        return eig, diag, didx, labels, counts
 
-    metrics = compute_all_metrics(eig_kept, diag_valid, didx_valid, ratio_def)
-    summaries_all = [summarize(v, name) for name, v in metrics.items()]
+    if labels is None:
+        raise ValueError(f"--{select}-only needs a 'labels' dataset; {path} has none.")
+    if select == "rfi":
+        mask = (labels >= rfi_label_min) & (labels <= rfi_label_max)
+        counts["n_rfi_labeled"] = int(mask.sum())
+    elif select == "clean":
+        mask = labels == clean_label
+        counts["n_clean_labeled"] = int(mask.sum())
+    else:
+        raise ValueError(f"Unknown select '{select}'")
+    counts["n_dropped"] = int((~mask).sum())
+    if not mask.any():
+        raise ValueError(f"--{select}-only found no matching tiles in {path}.")
 
-    summaries_rfi_only = None
-    if ch.labels is not None:
-        labels_valid = ch.labels[valid]
-        rfi_mask = (labels_valid >= rfi_label_min) & (labels_valid <= rfi_label_max)
-        counts["n_rfi_labeled"] = int(rfi_mask.sum())
-        counts["n_clean_labeled_0"] = int((labels_valid == 0).sum())
-        if rfi_mask.any():
-            metrics_rfi = compute_all_metrics(
-                eig_kept[rfi_mask], diag_valid[rfi_mask],
-                didx_valid[rfi_mask] if didx_valid is not None else None, ratio_def)
-            summaries_rfi_only = [summarize(v, name) for name, v in metrics_rfi.items()]
+    return eig[mask], diag[mask], didx[mask], labels[mask], counts
 
-    return summaries_all, summaries_rfi_only, counts
+
+def summaries_from_arrays(eig, diag, didx, ratio_def):
+    """Compute the three metric summaries from filtered per-tile arrays."""
+    metrics = compute_all_metrics(eig, diag, didx, ratio_def)
+    return [summarize(v, name) for name, v in metrics.items()]
 
 
 def print_report(path, run_name, counts, summaries, report_name):
@@ -473,6 +467,17 @@ def parse_args():
                              "--input to tiles labeled in [--rfi-label-min, --rfi-label-max]. "
                              "Requires a 'labels' dataset. Use for the amazon / contaminated "
                              "sets where only the RFI statistic is wanted.")
+    parser.add_argument("--clean-only", action="store_true",
+                        help="Inverse of --rfi-only: restrict every --input to clean tiles "
+                             "(label == --clean-label). Requires a 'labels' dataset. Use to pull "
+                             "the label-0 background out of contaminated files.")
+    parser.add_argument("--clean-label", type=int, default=0,
+                        help="Label value treated as clean for --clean-only (default: 0)")
+    parser.add_argument("--pool", action="store_true",
+                        help="Pool ALL --input files into a SINGLE tracking row (one --run-name), "
+                             "concatenating their selected tiles before summarizing. Use e.g. to "
+                             "build one 'amazon clean' row from the clean tiles of the train AND "
+                             "test files together.")
 
     parser.add_argument("--style", choices=["box", "numberline", "both"], default="box",
                         help="Overlap plot style (default: box)")
@@ -497,38 +502,80 @@ def main():
             print("No --input given. Use --plot-only to draw from existing CSVs, or "
                   "pass one or more --input files.", file=sys.stderr)
             sys.exit(1)
-
-        run_names = args.run_name or []
-        if run_names and len(run_names) != len(inputs):
-            print(f"Got {len(inputs)} --input but {len(run_names)} --run-name; they must "
-                  f"pair 1:1 (or omit --run-name to default to filenames).", file=sys.stderr)
+        if args.rfi_only and args.clean_only:
+            print("--rfi-only and --clean-only are mutually exclusive.", file=sys.stderr)
             sys.exit(1)
 
-        for i, path in enumerate(inputs):
-            run_name = (run_names[i] if run_names
-                        else os.path.splitext(os.path.basename(path))[0])
-            summaries_all, summaries_rfi_only, counts = extract_channel_metrics(
-                path, args.diag_valid_frac_thresh, args.n_keep,
-                args.median_max_ratio_def, args.rfi_label_min, args.rfi_label_max,
-                rfi_only=args.rfi_only)
+        select = "rfi" if args.rfi_only else ("clean" if args.clean_only else "all")
+        report_name = {
+            "rfi": f"RFI tiles only (labels {args.rfi_label_min}-{args.rfi_label_max})",
+            "clean": f"Clean tiles only (label {args.clean_label})",
+            "all": "All valid CPI tiles",
+        }[select]
 
-            report_name = (f"RFI tiles only (labels {args.rfi_label_min}-{args.rfi_label_max})"
-                           if args.rfi_only else "All valid CPI tiles")
-            print_report(path, run_name, counts, summaries_all, report_name)
-            written = update_all_metrics_tables(args.metrics_dir, run_name, summaries_all)
+        run_names = args.run_name or []
+
+        if args.pool:
+            # All inputs collapse into one row; require exactly one run name.
+            if len(run_names) != 1:
+                print("--pool requires exactly one --run-name for the pooled row.",
+                      file=sys.stderr)
+                sys.exit(1)
+            run_name = run_names[0]
+            eigs, diags, didxs = [], [], []
+            total = {"n_files": len(inputs), "n_tiles_pooled": 0}
+            for path in inputs:
+                eig, diag, didx, _labels, counts = channel_filtered_arrays(
+                    path, args.diag_valid_frac_thresh, args.n_keep, select,
+                    args.rfi_label_min, args.rfi_label_max, args.clean_label)
+                eigs.append(eig)
+                diags.append(diag)
+                didxs.append(didx)
+                total["n_tiles_pooled"] += eig.shape[0]
+            eig = np.concatenate(eigs)
+            diag = np.concatenate(diags)
+            didx = np.concatenate(didxs)
+            summaries = summaries_from_arrays(eig, diag, didx, args.median_max_ratio_def)
+            print_report(f"{len(inputs)} files pooled", run_name, total, summaries,
+                         f"{report_name} (pooled)")
+            written = update_all_metrics_tables(args.metrics_dir, run_name, summaries)
             print(f"Updated tracking row '{run_name}' in: {', '.join(written)}")
+            if args.no_plot:
+                return
+        else:
+            if run_names and len(run_names) != len(inputs):
+                print(f"Got {len(inputs)} --input but {len(run_names)} --run-name; they must "
+                      f"pair 1:1 (or omit --run-name to default to filenames).", file=sys.stderr)
+                sys.exit(1)
 
-            if summaries_rfi_only is not None:
-                rfi_run = f"{run_name} (rfi only)"
-                print_report(path, rfi_run, {"rfi_label_range":
-                             f"[{args.rfi_label_min}, {args.rfi_label_max}]"},
-                             summaries_rfi_only,
-                             f"RFI tiles only (labels {args.rfi_label_min}-{args.rfi_label_max})")
-                written = update_all_metrics_tables(args.metrics_dir, rfi_run, summaries_rfi_only)
-                print(f"Updated tracking row '{rfi_run}' in: {', '.join(written)}")
+            for i, path in enumerate(inputs):
+                run_name = (run_names[i] if run_names
+                            else os.path.splitext(os.path.basename(path))[0])
+                eig, diag, didx, labels, counts = channel_filtered_arrays(
+                    path, args.diag_valid_frac_thresh, args.n_keep, select,
+                    args.rfi_label_min, args.rfi_label_max, args.clean_label)
+                summaries = summaries_from_arrays(eig, diag, didx, args.median_max_ratio_def)
 
-        if args.no_plot:
-            return
+                print_report(path, run_name, counts, summaries, report_name)
+                written = update_all_metrics_tables(args.metrics_dir, run_name, summaries)
+                print(f"Updated tracking row '{run_name}' in: {', '.join(written)}")
+
+                # In the default "all" mode, also emit a secondary "(rfi only)" row
+                # when the file carries labels, as before.
+                if select == "all" and labels is not None:
+                    rfi_mask = (labels >= args.rfi_label_min) & (labels <= args.rfi_label_max)
+                    if rfi_mask.any():
+                        rfi_run = f"{run_name} (rfi only)"
+                        s = summaries_from_arrays(eig[rfi_mask], diag[rfi_mask],
+                                                  didx[rfi_mask], args.median_max_ratio_def)
+                        print_report(path, rfi_run,
+                                     {"n_rfi_labeled": int(rfi_mask.sum())}, s,
+                                     f"RFI tiles only (labels {args.rfi_label_min}-{args.rfi_label_max})")
+                        written = update_all_metrics_tables(args.metrics_dir, rfi_run, s)
+                        print(f"Updated tracking row '{rfi_run}' in: {', '.join(written)}")
+
+            if args.no_plot:
+                return
 
     written = plot_overlaps(args.metrics_dir, args.output_dir, args.style,
                             metrics_to_plot, args.filter)
