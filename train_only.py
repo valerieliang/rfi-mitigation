@@ -240,22 +240,23 @@ def load_rfi_data_dir(data_dirs, max_samples=None, tag=''):
     }
 
 
-def split_train_val(groups, val_frac, buffer_tiles):
+def _block_split_indices(groups, val_frac, buffer_tiles):
     """
-    Split the training region into train / val by CONTIGUOUS pulse-tile blocks.
+    Contiguous pulse-tile block split of one flat `groups` array. Holds out the
+    top val_frac of the DISTINCT group values as val, dropping `buffer_tiles`
+    distinct values on each side of the internal boundary to avoid spatial
+    leakage. Returns (idx_train, idx_val, train_g, val_g) as positional indices
+    into `groups`; val is empty when there are too few tiles to carve one out.
     """
-    uniq = np.unique(groups)          # sorted ascending
+    uniq = np.unique(groups)
     n = len(uniq)
-
     n_val = int(round(val_frac * n))
     n_train = n - n_val
     if n_train <= 0 or n_val <= 0:
-        raise ValueError(f'Not enough distinct pulse tiles ({n}) to split')
+        return np.arange(len(groups)), np.array([], dtype=int), uniq, uniq[:0]
 
     train_g = uniq[:n_train]
     val_g = uniq[n_train:]
-
-    # Drop a buffer on each side of the single internal boundary
     if buffer_tiles > 0:
         if len(train_g) > buffer_tiles:
             train_g = train_g[:-buffer_tiles]
@@ -264,11 +265,53 @@ def split_train_val(groups, val_frac, buffer_tiles):
 
     idx_train = np.where(np.isin(groups, train_g))[0]
     idx_val = np.where(np.isin(groups, val_g))[0]
+    return idx_train, idx_val, train_g, val_g
 
-    print(f"\n  Train/val block split on tile_pulse (buffer={buffer_tiles} pulse tiles):")
-    print(f"    train pulses [{train_g.min()}, {train_g.max()}] -> {len(idx_train)} tiles")
-    print(f"    val   pulses [{val_g.min()}, {val_g.max()}] -> {len(idx_val)} tiles")
 
+def split_train_val(groups, val_frac, buffer_tiles, split_mode='per-source'):
+    """
+    Split into train / val by CONTIGUOUS pulse-tile blocks.
+
+    split_mode:
+      'global'     -- one block split over all sources concatenated. Because
+                      `groups` encodes source as source_id*GROUP_OFFSET + tile,
+                      the sources occupy disjoint key bands, so a single top
+                      slice lands entirely in the last source(s). Fine for a
+                      single source, degenerate for several.
+      'per-source' -- run the block split WITHIN each source separately, then
+                      concatenate. Every source (and therefore every class it
+                      carries -- 0..6 for the contaminated sets, 0 for the
+                      clean-only set) is represented in BOTH train and val.
+    """
+    groups = np.asarray(groups)
+
+    if split_mode == 'global':
+        idx_train, idx_val, train_g, val_g = _block_split_indices(
+            groups, val_frac, buffer_tiles)
+        if len(idx_val) == 0:
+            raise ValueError(f'Not enough distinct pulse tiles to split '
+                             f'({len(np.unique(groups))})')
+        print(f"\n  Train/val GLOBAL block split (buffer={buffer_tiles} tiles): "
+              f"train {len(idx_train)} / val {len(idx_val)} tiles")
+        return idx_train, idx_val
+
+    # per-source
+    source_ids = groups // GROUP_OFFSET
+    idx_train_parts, idx_val_parts = [], []
+    print(f"\n  Train/val PER-SOURCE block split (buffer={buffer_tiles} tiles):")
+    for sid in np.unique(source_ids):
+        sel = np.where(source_ids == sid)[0]
+        it, iv, _, _ = _block_split_indices(groups[sel], val_frac, buffer_tiles)
+        idx_train_parts.append(sel[it])
+        idx_val_parts.append(sel[iv])
+        note = '' if len(iv) else '  [too few tiles for a val block -> all train]'
+        print(f"    source {int(sid)}: train {len(it)} / val {len(iv)} tiles{note}")
+
+    idx_train = np.concatenate(idx_train_parts) if idx_train_parts else np.array([], dtype=int)
+    idx_val = np.concatenate(idx_val_parts) if idx_val_parts else np.array([], dtype=int)
+    if len(idx_val) == 0:
+        raise ValueError('Per-source split produced an empty val set; check '
+                         'val_frac / split_buffer vs the tiles per source.')
     return idx_train, idx_val
 
 
@@ -446,12 +489,22 @@ def parse_args():
                              'single train+val pool.')
     parser.add_argument('--run-name', type=str, default=None,
                         help='Model output folder. Defaults to the first data dir name.')
+    parser.add_argument('--models-root', type=str, default=MODELS_ROOT,
+                        help='Parent directory for the run folder. Point this OUTSIDE '
+                             'the repo (e.g. /scratch/you/rfi-out/models) if a sync '
+                             'clobbers in-repo outputs.')
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Cap tiles loaded per file (evenly strided), for quick runs.')
     parser.add_argument('--val-frac', type=float, default=VAL_FRAC,
                         help='Fraction of training-region pulse tiles held out for val.')
     parser.add_argument('--split-buffer', type=int, default=SPLIT_BUFFER_DEFAULT,
-                        help='Pulse tiles dropped at the train/val boundary.')
+                        help='Pulse tiles dropped at each train/val boundary.')
+    parser.add_argument('--split-mode', choices=['per-source', 'global'],
+                        default='per-source',
+                        help='per-source (default): hold out val_frac of EACH '
+                             'source, so every source/class is in train and val. '
+                             'global: one split over all sources (degenerate when '
+                             'combining several sources).')
     parser.add_argument('--epochs', type=int, default=EPOCHS)
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
     parser.add_argument('--learning-rate', type=float, default=LR,
@@ -470,7 +523,7 @@ def main():
     """
     args = parse_args()
 
-    os.makedirs(MODELS_ROOT, exist_ok=True)
+    os.makedirs(args.models_root, exist_ok=True)
     run_name = args.run_name or os.path.basename(os.path.normpath(args.data_dir[0]))
 
     print(f"\n{'='*70}")
@@ -499,7 +552,7 @@ def main():
 
     # Split train/val
     idx_train, idx_val = split_train_val(
-        train_data['groups'], args.val_frac, args.split_buffer
+        train_data['groups'], args.val_frac, args.split_buffer, args.split_mode
     )
 
     # Per-source class separation, broken out by train / val split
@@ -518,7 +571,7 @@ def main():
         train_data['labels'][idx_val],
         epochs=args.epochs, batch_size=args.batch_size,
         learning_rate=args.learning_rate, dropout_rate=args.dropout_rate,
-        weight_decay=args.weight_decay,
+        weight_decay=args.weight_decay, models_root=args.models_root,
     )
 
     # Save training summary
@@ -546,7 +599,7 @@ def main():
     print(f"  Model saved to: {os.path.join(out_dir, 'best_model.keras')}")
     print(f"  Summary saved to: {summary_path}")
     print(f"\nTo test this model, run:")
-    print(f"  python test_only.py --model-dir models/{run_name} --test-dir <test_dir>")
+    print(f"  python test_only.py --model {os.path.join(out_dir, 'best_model.keras')} ...")
     print(f"{'='*60}")
 
 
