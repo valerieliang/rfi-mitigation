@@ -249,10 +249,18 @@ def combined_synthetic_test(model, data_dirs, args):
                                  for k in range(1, n_classes)]
     print(classification_report(labels_all, preds, target_names=class_names, digits=3))
 
-    # Save results
+    # Save results. Confusion matrices and per-class precision/recall/f1 are
+    # stored for the COMBINED set and for EACH dataset (source), so the
+    # mountain-only / amazon-only / combined metrics are all machine-readable.
+    combined_report = classification_report(
+        labels_all, preds, labels=range(n_classes),
+        target_names=class_names, digits=3, output_dict=True, zero_division=0)
+
     results = {
         'mode': 'combined_synthetic',
         'data_dirs': data_dirs,
+        'n_classes': n_classes,
+        'class_names': class_names,
         'total_samples': int(len(labels_all)),
         'per_dataset_samples': {d['source']: int(len(d['labels'])) for d in all_data},
         'overall_accuracy': float(acc),
@@ -261,7 +269,8 @@ def combined_synthetic_test(model, data_dirs, args):
             for i, d in enumerate(all_data)
         },
         'confusion_matrix': cm.tolist(),
-        'n_classes': n_classes,
+        'classification_report': combined_report,
+        'per_dataset': {},   # populated in the per-dataset loop below
     }
 
     # Plot confusion matrix
@@ -299,6 +308,17 @@ def combined_synthetic_test(model, data_dirs, args):
     for i, d in enumerate(all_data):
         mask = (dataset_ids == i)
         cm_i = confusion_matrix(labels_all[mask], preds[mask], labels=range(n_classes))
+
+        # Machine-readable per-dataset metrics into the JSON.
+        report_i = classification_report(
+            labels_all[mask], preds[mask], labels=range(n_classes),
+            target_names=class_names, digits=3, output_dict=True, zero_division=0)
+        results['per_dataset'][d['source']] = {
+            'n_samples': int(mask.sum()),
+            'accuracy': float(np.mean(preds[mask] == labels_all[mask])),
+            'confusion_matrix': cm_i.tolist(),
+            'classification_report': report_i,
+        }
 
         fig, ax = plt.subplots(figsize=(10, 8))
         im = ax.imshow(cm_i, cmap='Blues', aspect='auto')
