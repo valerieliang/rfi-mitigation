@@ -9,12 +9,16 @@ Two things this does, from one script:
   1. EXTRACT + PLOT (default): given one or more per-CPI feature files (the flat
      HDF5 layout written by generate_*_data.py / select_clean.py; see
      plotters/_common.py), compute the three global metrics
-        - condition number (dB)
-        - effective rank
-        - median / max eigenvalue ratio
+        - condition number (dB)          [from the eigenvalue profile]
+        - effective rank                 [from the eigenvalue profile]
+        - median / max SCM diagonal ratio [from the SCM diagonal]
      for each file, update the cross-run tracking CSVs under --metrics-dir (one
      CSV per metric, one row per run name), and THEN render the clean-vs-RFI
      overlap plots from those CSVs.
+
+     These are the model's three global features: condition number and effective
+     rank come from the eigenvalue profile, the median/max ratio from the SCM
+     diagonal (matching features_from_eigenvalues in score_scene.py).
 
   2. PLOT ONLY (--plot-only): skip extraction and just (re)draw the overlap
      plots from the existing tracking CSVs in --metrics-dir. Use this when the
@@ -62,6 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _common import (
     load_channel,
     describe_coverage,
+    ensure_diagonal,
     compute_all_metrics,
     summarize,
     update_all_metrics_tables,
@@ -89,18 +94,23 @@ def extract_channel_metrics(path, diag_valid_frac_thresh, n_keep, ratio_def,
     """
     ch = load_channel(path)
     describe_coverage(ch)
+    # The median/max ratio is computed from the SCM diagonal, so make sure it is
+    # available (recomputed from the L0B only if the file does not store it).
+    ensure_diagonal(ch)
 
     dvf = (ch.diag_valid_frac if ch.diag_valid_frac is not None
            else np.ones(ch.n_tiles, dtype=np.float32))
     valid = dvf >= diag_valid_frac_thresh
 
     eig_kept = ch.eigenvalues[valid][:, :n_keep]
+    diag_valid = ch.diagonal[valid]
+    didx_valid = ch.diag_valid_idx[valid] if ch.diag_valid_idx is not None else None
     counts = {
         "n_total_in_file": int(ch.n_tiles),
         "n_passing_diag_valid_frac": int(valid.sum()),
     }
 
-    metrics = compute_all_metrics(eig_kept, ratio_def)
+    metrics = compute_all_metrics(eig_kept, diag_valid, didx_valid, ratio_def)
     summaries_all = [summarize(v, name) for name, v in metrics.items()]
 
     summaries_rfi_only = None
@@ -110,7 +120,9 @@ def extract_channel_metrics(path, diag_valid_frac_thresh, n_keep, ratio_def,
         counts["n_rfi_labeled"] = int(rfi_mask.sum())
         counts["n_clean_labeled_0"] = int((labels_valid == 0).sum())
         if rfi_mask.any():
-            metrics_rfi = compute_all_metrics(eig_kept[rfi_mask], ratio_def)
+            metrics_rfi = compute_all_metrics(
+                eig_kept[rfi_mask], diag_valid[rfi_mask],
+                didx_valid[rfi_mask] if didx_valid is not None else None, ratio_def)
             summaries_rfi_only = [summarize(v, name) for name, v in metrics_rfi.items()]
 
     return summaries_all, summaries_rfi_only, counts
@@ -150,7 +162,7 @@ METRIC_FILES = {
 METRIC_LABELS = {
     "condition_number_db": "Condition number (dB)",
     "effective_rank": "Effective rank",
-    "median_max_ratio": "Median / max eigenvalue ratio",
+    "median_max_ratio": "Median / max SCM diagonal ratio",
 }
 
 COLOR_CLEAN = "#2b6cb0"        # blue

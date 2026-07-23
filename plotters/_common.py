@@ -102,32 +102,62 @@ def compute_effective_rank(eig_kept):
     return np.exp(entropy)
 
 
-def compute_median_max_ratio(eig_kept, definition="median_over_max"):
+def diag_median_max_ratio(diag_lin, diag_valid_idx=None, definition="median_over_max"):
     """
-    Median/max eigenvalue ratio among the kept eigenvalues.
+    Median/max ratio of the VALID SCM-diagonal entries per tile, on the LINEAR
+    scale. This is the third global feature the model trains/scores on -- it
+    mirrors diag_median_max_ratio_feature() in score_scene.py / train_only.py,
+    NOT a ratio of eigenvalues. A clean tile's diagonal is comparatively flat
+    (ratio near 1), whereas an RFI band lifts a few pulse rows and drops the
+    median-to-max ratio.
 
-    definition:
-      "median_over_max" (default): median/max, in (0, 1]
-      "max_over_median": max/median, in [1, inf)
+    diag_lin       : (n_cpi, cpi_len) linear SCM diagonal (unnormalized power).
+    diag_valid_idx : (n_cpi, cpi_len) bool per-entry validity; None = all valid.
+    definition     : "median_over_max" (default, in (0, 1]) or "max_over_median".
+    Returns        : (n_cpi,) ratio. Tiles with < 2 valid entries -> 1.0.
     """
-    eig_median = np.median(eig_kept, axis=1)
-    eig_max = eig_kept[:, 0]
+    diag = np.atleast_2d(np.asarray(diag_lin, dtype=np.float64))
+    if diag_valid_idx is None:
+        valid = np.ones(diag.shape, dtype=bool)
+    else:
+        valid = np.atleast_2d(np.asarray(diag_valid_idx, dtype=bool))
+
+    masked = np.where(valid, diag, np.nan)
+    n_valid = valid.sum(axis=1)
+    with np.errstate(invalid="ignore"):
+        vmax = np.nanmax(masked, axis=1)
+        vmed = np.nanmedian(masked, axis=1)
+
     with np.errstate(divide="ignore", invalid="ignore"):
         if definition == "median_over_max":
-            ratio = eig_median / eig_max
+            r = vmed / np.maximum(vmax, EPS)
         elif definition == "max_over_median":
-            ratio = eig_max / eig_median
+            r = np.maximum(vmax, EPS) / np.maximum(vmed, EPS)
         else:
             raise ValueError(f"Unknown median_max_ratio definition: {definition}")
-    return ratio
+
+    # A tile with fewer than 2 valid diagonal entries has no meaningful spread;
+    # score_scene.py pins it to 1.0 (the "flat / clean" value) rather than NaN.
+    return np.where(n_valid >= 2, r, 1.0)
 
 
-def compute_all_metrics(eig_kept, ratio_definition="median_over_max"):
-    """Compute all three metrics for a (n_cpi, n_keep) eigenvalue array."""
+def compute_all_metrics(eig_kept, diag_lin, diag_valid_idx=None,
+                        ratio_definition="median_over_max"):
+    """
+    The three global cleanliness features, matching the model's feature vector:
+
+      condition_number_db : eigenvalue profile  (lambda_max / lambda_min_kept)
+      effective_rank      : eigenvalue profile  (exp(entropy(lambda)))
+      median_max_ratio    : SCM diagonal        (median / max of valid entries)
+
+    eig_kept       : (n_cpi, n_keep) linear eigenvalues, descending.
+    diag_lin       : (n_cpi, cpi_len) linear SCM diagonal for the SAME tiles.
+    diag_valid_idx : (n_cpi, cpi_len) bool validity for the SAME tiles, or None.
+    """
     return {
         "condition_number_db": compute_condition_number_db(eig_kept),
         "effective_rank": compute_effective_rank(eig_kept),
-        "median_max_ratio": compute_median_max_ratio(eig_kept, ratio_definition),
+        "median_max_ratio": diag_median_max_ratio(diag_lin, diag_valid_idx, ratio_definition),
     }
 
 
