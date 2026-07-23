@@ -1,0 +1,188 @@
+{
+  "run": "mtnClean_amzContam_caltoneRmvd",
+  "n_train": 765036,
+  "n_val": 132410,
+  "n_classes": 7,
+  "n_keep": 12,
+  "epochs": 40,
+  "batch_size": 256,
+  "learning_rate": 0.0003,
+  "dropout_rate": 0.6,
+  "weight_decay": 0.0001,
+  "class_distribution": {
+    "mountain_clean_caltone": {
+      "0": {
+        "tag": "clean",
+        "total": 46244,
+        "train": 40260,
+        "val": 5818
+      },
+      "1": {
+        "tag": "1 RFI eig",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "2": {
+        "tag": "2 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "3": {
+        "tag": "3 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "4": {
+        "tag": "4 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "5": {
+        "tag": "5 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "6": {
+        "tag": "6 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "total": {
+        "total": 46244,
+        "train": 40260,
+        "val": 5818
+      }
+    },
+    "amazon_contam_caltone": {
+      "0": {
+        "tag": "clean",
+        "total": 121846,
+        "train": 103451,
+        "val": 17964
+      },
+      "1": {
+        "tag": "1 RFI eig",
+        "total": 122563,
+        "train": 103947,
+        "val": 18199
+      },
+      "2": {
+        "tag": "2 RFI eigs",
+        "total": 121632,
+        "train": 103251,
+        "val": 17948
+      },
+      "3": {
+        "tag": "3 RFI eigs",
+        "total": 122102,
+        "train": 103751,
+        "val": 17919
+      },
+      "4": {
+        "tag": "4 RFI eigs",
+        "total": 122221,
+        "train": 103605,
+        "val": 18218
+      },
+      "5": {
+        "tag": "5 RFI eigs",
+        "total": 121645,
+        "train": 103200,
+        "val": 18029
+      },
+      "6": {
+        "tag": "6 RFI eigs",
+        "total": 122303,
+        "train": 103571,
+        "val": 18315
+      },
+      "total": {
+        "total": 854312,
+        "train": 724776,
+        "val": 126592
+      }
+    },
+    "ALL": {
+      "0": {
+        "tag": "clean",
+        "total": 168090,
+        "train": 143711,
+        "val": 23782
+      },
+      "1": {
+        "tag": "1 RFI eig",
+        "total": 122563,
+        "train": 103947,
+        "val": 18199
+      },
+      "2": {
+        "tag": "2 RFI eigs",
+        "total": 121632,
+        "train": 103251,
+        "val": 17948
+      },
+      "3": {
+        "tag": "3 RFI eigs",
+        "total": 122102,
+        "train": 103751,
+        "val": 17919
+      },
+      "4": {
+        "tag": "4 RFI eigs",
+        "total": 122221,
+        "train": 103605,
+        "val": 18218
+      },
+      "5": {
+        "tag": "5 RFI eigs",
+        "total": 121645,
+        "train": 103200,
+        "val": 18029
+      },
+      "6": {
+        "tag": "6 RFI eigs",
+        "total": 122303,
+        "train": 103571,
+        "val": 18315
+      },
+      "total": {
+        "total": 900556,
+        "train": 765036,
+        "val": 132410
+      }
+    }
+  },
+  "train_provenance": {
+    "dirs": [
+      "data/mountain_clean_caltone",
+      "data/amazon_contam_caltone"
+    ],
+    "files": [
+      "mountain_clean_data_A_HH.h5",
+      "mountain_clean_data_A_HV.h5",
+      "rfi_data_A_HH.h5",
+      "rfi_data_A_HV.h5"
+    ],
+    "channels": [
+      "A-HH",
+      "A-HV"
+    ],
+    "pulse_window": [
+      813924,
+      888212
+    ],
+    "source_names": [
+      "mountain_clean_caltone",
+      "amazon_contam_caltone"
+    ],
+    "seed": 0,
+    "min_bands": 0,
+    "max_bands": 6
+  }
+}
