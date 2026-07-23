@@ -80,7 +80,6 @@ identifies its role, so no two streams can share state:
     per-band JSR draws            : a separate child of the same
     band rows for tile (pt, rt)   : [seed, SALT_INJECT, chan, pt, rt] itself
     per-band Doppler + coeffs     : spawned children of the same
-    plot tile selection           : [plot_seed, SALT_PLOT, chan]
 
 The JSR draws come from their own child stream (mirroring the JNR_SEED offset in
 generate_amazon_data.py) so that changing the JSR range does not perturb band
@@ -95,8 +94,10 @@ labels. With the channel id in the entropy tuple, every channel gets its own
 independent injection realization over the same real background.
 
 A tile's contamination depends only on (seed, chan, pt, rt), so it is
-reproducible regardless of what any other tile or channel drew. The plot stream
-is disjoint, so selecting blocks to plot cannot perturb the injection draws.
+reproducible regardless of what any other tile or channel drew.
+
+This script writes data only. To visualize the result (eigenvalue profiles, SCM
+diagonals, SCM heatmaps), run plotters/plot_profiles.py on the written file.
 
 Storage
 -------
@@ -128,9 +129,9 @@ With --save-cpi the raw complex tiles are stored as well:
 That array is roughly 32 kB/tile (about 13.7 GB for the full default window),
 so it is off by default.
 
-Root attributes carry the full generation config: seed, plot seed, pulse and
-range windows, CPI dimensions, JSR range, band range, gap-exclusion ratios,
-granule name, frequency, polarization, and the final label histogram.
+Root attributes carry the full generation config: seed, pulse and range
+windows, CPI dimensions, JSR range, band range, gap-exclusion ratios, granule
+name, frequency, polarization, and the final label histogram.
 
 Usage
 -----
@@ -141,7 +142,7 @@ Usage
         --compute-subswath-mask \
         --jsr-min-db 3 --jsr-max-db 30 \
         --output-dir data/rfi_train \
-        --seed 0 --plot-seed 99
+        --seed 0
 
     # Restrict to one channel, and also keep the complex CPI tiles
     python generate_amazon_data.py granule.h5 --freq A --pol HH --save-cpi
@@ -321,10 +322,9 @@ JSR_MAX_DB_DEFAULT = 30.0
 OFF_DIAG_OVERLAP_RATIO_DEFAULT = 0.25
 DIAG_VALID_RATIO_DEFAULT = 0.20
 
-# Seed-namespace salts. These keep independent roles in disjoint SeedSequence
-# entropy namespaces so no two random streams can ever alias.
+# Seed-namespace salt. Keeps the injection role in its own SeedSequence entropy
+# namespace so no two random streams can ever alias.
 SALT_INJECT = 0xA1
-SALT_PLOT = 0xB2
 
 # Channel ids also enter the seed entropy tuples, so the same (pt, rt) tile gets
 # an independent injection realization in each frequency/polarization channel
@@ -333,21 +333,9 @@ FREQ_IDS = {'A': 0, 'B': 1}
 POL_IDS = {'HH': 0, 'HV': 1, 'VH': 2, 'VV': 3}
 
 SEED_DEFAULT = 0
-PLOT_SEED_DEFAULT = 99
 
 # Pulses read per chunk; snapped down to a whole number of CPI tiles.
 PULSE_CHUNK_DEFAULT = 1600
-
-N_PLOT_BLOCKS_DEFAULT = 12
-
-# Y-axis for the eigenvalue plots, in dB. The bottom is pinned at 0 dB; the top
-# is the largest eigenvalue seen across ALL selected blocks, plus a small margin
-# so the peak is not drawn flush against the axis. Both eigenvalue figures share
-# this range, so every block is on the same scale and a high-power block is never
-# clipped. Set EV_YLIM_TOP_MARGIN_DB to 0.0 for the bare maximum.
-EV_YLIM_BOTTOM_DB = 0.0
-EV_YLIM_TOP_MARGIN_DB = 2.0
-EV_YLIM_MIN_TOP_DB = 10.0   # floor on the top, so a flat low-power set is not squashed
 
 EPS = 1e-12
 
@@ -803,10 +791,8 @@ def write_root_attrs(f, args, freq, pol, p_start, p_end, r_start, r_end,
     f.attrs['jsr_reference'] = 'tile baseline power, mean(|x|^2) over valid samples'
 
     f.attrs['seed'] = args.seed
-    f.attrs['plot_seed'] = args.plot_seed
     f.attrs['channel_id'] = channel_id(freq, pol)
     f.attrs['salt_inject'] = SALT_INJECT
-    f.attrs['salt_plot'] = SALT_PLOT
     f.attrs['seed_scheme'] = (
         'per-tile SeedSequence entropy = '
         '[seed, salt_inject, channel_id, pulse_tile, range_tile]; '
@@ -880,7 +866,6 @@ def generate_dataset(raw, freq, pol, args, out_dir):
 
     Returns
     -------
-    plot_records : list[dict]   selected tiles retained for plotting
     knee_counts : dict[int, int]
     out_path : str
     """
@@ -897,10 +882,6 @@ def generate_dataset(raw, freq, pol, args, out_dir):
     n_tiles = n_pulse_tiles * n_range_tiles
 
     chan = channel_id(freq, pol)
-    plot_tiles = select_plot_tiles(
-        args.plot_seed, chan, n_pulse_tiles, n_range_tiles, args.n_plot_blocks
-    )
-    plot_lookup = set(plot_tiles)
 
     out_path = os.path.join(out_dir, f"rfi_data_{freq}_{pol}.h5")
     print(f"\n[{freq}-{pol}]")
@@ -910,7 +891,6 @@ def generate_dataset(raw, freq, pol, args, out_dir):
     print(f"  -> {out_path}")
 
     use_mask = args.compute_subswath_mask
-    plot_records = []
     knee_counts = {}
 
     # Build the caltone remover once per channel, sized to the FULL range width
@@ -1008,7 +988,7 @@ def generate_dataset(raw, freq, pol, args, out_dir):
                         args.jsr_min_db, args.jsr_max_db, tile_ss
                     )
 
-                    scm, eigvals, diag_lin, diag_valid_idx = compute_scm_and_eigs(
+                    _scm, eigvals, diag_lin, diag_valid_idx = compute_scm_and_eigs(
                         tile, cpi_mask,
                         args.off_diag_overlap_ratio,
                         args.diag_valid_ratio,
@@ -1030,15 +1010,6 @@ def generate_dataset(raw, freq, pol, args, out_dir):
 
                     knee_counts[meta.knee] = knee_counts.get(meta.knee, 0) + 1
 
-                    if (pt, rt) in plot_lookup:
-                        plot_records.append({
-                            'pt': pt, 'rt': rt,
-                            'abs_p0': abs_p0, 'abs_r0': abs_r0,
-                            'scm': scm.copy(),
-                            'eigvals': eigvals.copy(),
-                            'meta': meta,
-                        })
-
                     k += 1
 
             writer.append(b_labels, b_jsr, b_rows, b_eigs, b_diag, b_diag_valid,
@@ -1052,209 +1023,10 @@ def generate_dataset(raw, freq, pol, args, out_dir):
         f.attrs['label_histogram'] = json.dumps(hist)
         f.attrs['n_records'] = writer.n
 
-    plot_records.sort(key=lambda rec: (rec['pt'], rec['rt']))
-
     report_text, _ = format_class_distribution(knee_counts, max_bands + 1)
     print(report_text)
 
-    return plot_records, knee_counts, out_path
-
-
-# ---------------------------------------------------------------------------
-# PLOT TILE SELECTION (fixed, independent seed)
-# ---------------------------------------------------------------------------
-
-def select_plot_tiles(plot_seed, chan, n_pulse_tiles, n_range_tiles, n_blocks):
-    """
-    Pick n_blocks distinct (pulse_tile, range_tile) positions from a stream that
-    is fully independent of the injection streams, so choosing plot blocks
-    cannot perturb any tile's contamination. The channel id keeps each
-    frequency/polarization looking at its own random selection of blocks.
-    """
-    ss = np.random.SeedSequence([int(plot_seed), SALT_PLOT, int(chan)])
-    rng = np.random.default_rng(ss)
-
-    n_available = n_pulse_tiles * n_range_tiles
-    n_pick = min(n_blocks, n_available)
-    flat = rng.choice(n_available, size=n_pick, replace=False)
-
-    return sorted((int(i // n_range_tiles), int(i % n_range_tiles)) for i in flat)
-
-
-# ---------------------------------------------------------------------------
-# PLOTS
-# ---------------------------------------------------------------------------
-
-def plot_eigenvalue_profiles(records, freq, pol, out_dir, max_bands):
-    """
-    Two eigenvalue figures for the randomly selected blocks (fixed plot seed):
-
-      Figure 1 -- all selected blocks overlaid, each line colored by its label
-                  (knee), with the knee index marked so the drop-off after the
-                  injected bands is visible.
-      Figure 2 -- grid of the individual profiles, one panel per block.
-
-    Eigenvalues are stored linear; they are plotted as 10 * log10(.).
-    """
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import matplotlib.cm as cm
-    import matplotlib.colors as mcolors
-
-    if not records:
-        return
-
-    cpi_len = len(records[0]['eigvals'])
-    ev_index = np.arange(1, cpi_len + 1)   # 1-based eigenvalue index
-
-    profiles_db = [10.0 * np.log10(np.maximum(r['eigvals'], EPS)) for r in records]
-    knees = [r['meta'].knee for r in records]
-
-    # Bottom pinned at 0 dB; top driven by the largest eigenvalue anywhere in
-    # this set of blocks, so a high-power block is never cut off and every panel
-    # stays on the same scale. Note eigenvalues below 0 dB fall off the bottom of
-    # the axis by design.
-    global_max_db = float(np.max(np.concatenate(profiles_db)))
-    top = max(global_max_db + EV_YLIM_TOP_MARGIN_DB, EV_YLIM_MIN_TOP_DB)
-    ylim = [EV_YLIM_BOTTOM_DB, top]
-
-    n_below = int(np.sum(np.concatenate(profiles_db) < EV_YLIM_BOTTOM_DB))
-    if n_below:
-        print(f"  note: {n_below} eigenvalue points fall below "
-              f"{EV_YLIM_BOTTOM_DB:.0f} dB and are clipped off the bottom of the axis")
-
-    norm = mcolors.Normalize(vmin=0, vmax=max(max_bands, 1))
-    cmap = cm.plasma
-
-    # --- Figure 1: overlay ---------------------------------------------------
-    fig1, ax1 = plt.subplots(figsize=(11, 6))
-    for prof, knee in zip(profiles_db, knees):
-        ax1.plot(ev_index, prof, color=cmap(norm(knee)), alpha=0.75, linewidth=1.2)
-        if knee > 0:
-            ax1.axvline(x=knee + 0.5, color=cmap(norm(knee)), linestyle=':',
-                       linewidth=1.5, alpha=0.5)
-
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = fig1.colorbar(sm, ax=ax1)
-    cbar.set_label('Number of RFI eigenvalues (injected RFI bands)', fontsize=10)
-
-    ax1.set_xlabel('Eigenvalue index (1-based, descending)', fontsize=11)
-    ax1.set_ylabel('Eigenvalue (dB)', fontsize=11)
-    ax1.set_ylim(ylim)
-    ax1.grid(True, linestyle='--', alpha=0.4)
-    ax1.set_title(
-        f'Eigenvalue profiles -- {freq}-{pol}\n'
-        f'{len(records)} randomly selected CPI blocks (fixed plot seed), '
-        f'gap-exclusion SCM',
-        fontsize=11,
-    )
-    fig1.tight_layout()
-    path1 = os.path.join(out_dir, f'{freq}_{pol}_ev_overlay.png')
-    fig1.savefig(path1, dpi=150)
-    plt.close(fig1)
-
-    # --- Figure 2: per-block grid -------------------------------------------
-    n = len(records)
-    n_cols = min(6, n)
-    n_rows = int(np.ceil(n / n_cols))
-    fig2, axes = plt.subplots(n_rows, n_cols, figsize=(3.1 * n_cols, 3.1 * n_rows),
-                              squeeze=False)
-
-    for ax, rec, prof in zip(axes.flat, records, profiles_db):
-        meta = rec['meta']
-        knee = meta.knee
-        ax.plot(ev_index, prof, color=cmap(norm(knee)), linewidth=1.5)
-        if knee > 0:
-            ax.axvline(x=knee + 0.5, color='red', linestyle=':', linewidth=1.5, alpha=0.7)
-        label = ('CLEAN' if knee == 0
-                else (f'{knee} RFI eigenvalue' if knee == 1 else f'{knee} RFI eigenvalues'))
-        # Bands now differ in strength, so show the range actually realized here
-        if meta.bands:
-            jsrs = [b.jsr_db for b in meta.bands]
-            jsr_str = f' | JSR {min(jsrs):.0f}-{max(jsrs):.0f} dB'
-        else:
-            jsr_str = ''
-        ax.set_title(
-            f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{jsr_str}\n'
-            f'baseline={meta.signal_power_db:.1f} dB | valid={meta.valid_fraction*100:.0f}%',
-            fontsize=7,
-        )
-        ax.set_xlabel('EV index', fontsize=8)
-        ax.set_ylabel('Eigenvalue (dB)', fontsize=8)
-        ax.set_ylim(ylim)
-        ax.tick_params(labelsize=7)
-        ax.grid(True, linestyle='--', alpha=0.4)
-
-    for ax in axes.flat[n:]:
-        ax.axis('off')
-
-    fig2.suptitle(f'Eigenvalue profiles per selected block -- {freq}-{pol}', fontsize=12)
-    fig2.tight_layout(rect=(0, 0, 1, 0.95))
-    path2 = os.path.join(out_dir, f'{freq}_{pol}_ev_blocks.png')
-    fig2.savefig(path2, dpi=150)
-    plt.close(fig2)
-
-    print(f"  plots -> {os.path.basename(path1)}, {os.path.basename(path2)}")
-
-
-def plot_scm_matrices(records, freq, pol, out_dir):
-    """
-    Grid of SCM magnitude heatmaps (20 * log10 |R_ij|, dB) for the same randomly
-    selected blocks. Injected bands show up as bright rows/columns and as raised
-    off-diagonal structure.
-    """
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    if not records:
-        return
-
-    mags_db = [20.0 * np.log10(np.abs(r['scm']) + EPS) for r in records]
-    finite = np.concatenate([m[np.isfinite(m)].ravel() for m in mags_db])
-    vmin = np.percentile(finite, 5)
-    vmax = np.percentile(finite, 100)
-
-    n = len(records)
-    n_cols = min(6, n)
-    n_rows = int(np.ceil(n / n_cols))
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.0 * n_cols, 3.2 * n_rows),
-                             squeeze=False)
-
-    im = None
-    for ax, rec, mag in zip(axes.flat, records, mags_db):
-        meta = rec['meta']
-        im = ax.imshow(mag, cmap='inferno', vmin=vmin, vmax=vmax,
-                       origin='upper', interpolation='nearest')
-        label = 'CLEAN' if meta.knee == 0 else f'RFI={meta.knee}'
-        rows = sorted({b.local_row for b in meta.bands})
-        rows_str = '' if not rows else f'\nrows={rows}'
-        if meta.bands:
-            jsrs = [b.jsr_db for b in meta.bands]
-            jsr_str = f'\nJSR {min(jsrs):.0f}-{max(jsrs):.0f} dB'
-        else:
-            jsr_str = ''
-        ax.set_title(f'p={rec["abs_p0"]} r={rec["abs_r0"]} [{label}]{rows_str}{jsr_str}',
-                     fontsize=7)
-        ax.set_xlabel('Pulse j', fontsize=8)
-        ax.set_ylabel('Pulse i', fontsize=8)
-        ax.tick_params(labelsize=6)
-
-    for ax in axes.flat[n:]:
-        ax.axis('off')
-
-    if im is not None:
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.85)
-        cbar.set_label('|SCM| (dB)', fontsize=10)
-
-    fig.suptitle(f'Gap-exclusion SCM magnitude -- {freq}-{pol}', fontsize=12)
-    path = os.path.join(out_dir, f'{freq}_{pol}_scm.png')
-    fig.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-
-    print(f"  plots -> {os.path.basename(path)}")
+    return knee_counts, out_path
 
 
 # ---------------------------------------------------------------------------
@@ -1312,9 +1084,6 @@ def parse_args():
 
     parser.add_argument('--seed', type=int, default=SEED_DEFAULT,
                         help='Master seed for all RFI injection streams.')
-    parser.add_argument('--plot-seed', type=int, default=PLOT_SEED_DEFAULT,
-                        help='Fixed, independent seed for selecting plotted blocks.')
-    parser.add_argument('--n-plot-blocks', type=int, default=N_PLOT_BLOCKS_DEFAULT)
 
     return parser.parse_args()
 
@@ -1360,7 +1129,7 @@ def main():
     print(f'  gap exclusion  : {args.compute_subswath_mask}')
     print(f'  caltone removal: {args.remove_caltone}')
     print(f'  save CPI       : {args.save_cpi}')
-    print(f'  seeds          : injection={args.seed}, plot={args.plot_seed}')
+    print(f'  seed           : injection={args.seed}')
 
     raw = Raw(hdf5file=args.l0b_file)
     raw.parsePolarizations()
@@ -1392,9 +1161,7 @@ def main():
     overall_counts = {}
     group_totals = {}
     for freq, pol in channels:
-        records, knee_counts, out_path = generate_dataset(raw, freq, pol, args, args.output_dir)
-        plot_eigenvalue_profiles(records, freq, pol, args.output_dir, args.max_bands)
-        plot_scm_matrices(records, freq, pol, args.output_dir)
+        knee_counts, out_path = generate_dataset(raw, freq, pol, args, args.output_dir)
         written.append(out_path)
 
         group_totals[f'{freq}-{pol}'] = int(sum(int(v) for v in knee_counts.values()))
