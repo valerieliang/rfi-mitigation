@@ -22,6 +22,7 @@ import os
 import sys
 import json
 import argparse
+import warnings
 
 import numpy as np
 import h5py
@@ -115,6 +116,40 @@ def features_from_eigenvalues(eigvals_linear, diag_lin, diag_valid_idx):
 # MODE 1: COMBINED SYNTHETIC TEST
 # ===========================================================================
 
+def reduce_jsr_bands(jsr_bands):
+    """
+    Collapse the per-band JSR array (N, max_bands) to one number per tile.
+
+    A tile with k bands carries k JSRs, each drawn independently, and the two
+    ends of that spread answer different questions:
+
+      strongest (nanmax)  the easiest band to see. Governs whether the tile is
+                          flagged as RFI-bearing at all.
+      weakest   (nanmin)  the hardest band to see. Governs whether the tile is
+                          assigned the RIGHT knee, since the count is only
+                          correct if even the faintest emitter clears the noise
+                          floor. This is the pessimistic curve and the one that
+                          explains knee under-counting.
+
+    Clean tiles are all-NaN and reduce to NaN, which drops them out of every
+    JSR bin downstream. That is intended: they have no JSR.
+
+    Returns (jsr_max, jsr_min), or (None, None) if the input is None.
+    """
+    if jsr_bands is None:
+        return None, None
+    jsr_bands = np.asarray(jsr_bands)
+    if jsr_bands.ndim == 1:
+        # Already reduced upstream; nothing to spread over.
+        return jsr_bands, jsr_bands
+    with warnings.catch_warnings():
+        # All-NaN rows (clean tiles) warn on nanmax/nanmin; NaN is the answer.
+        warnings.simplefilter('ignore', category=RuntimeWarning)
+        jsr_max = np.nanmax(jsr_bands, axis=1)
+        jsr_min = np.nanmin(jsr_bands, axis=1)
+    return jsr_max, jsr_min
+
+
 def load_synthetic_data(data_dir):
     """Load synthetic test data from a data directory."""
     # Try standard test.h5 first (preprocessed features)
@@ -128,11 +163,14 @@ def load_synthetic_data(data_dir):
                 jsr_db = f['jsr_db'][:]
             else:
                 jsr_db = None
+        jsr_max, jsr_min = reduce_jsr_bands(jsr_db)
         return {
             'eigen': eigen,
             'global': global_feat,
             'labels': labels,
-            'jsr_db': jsr_db,
+            'jsr_db': jsr_max,
+            'jsr_max': jsr_max,
+            'jsr_min': jsr_min,
             'source': os.path.basename(data_dir),
         }
 
@@ -167,18 +205,21 @@ def load_synthetic_data(data_dir):
     global_feat = np.concatenate(all_global, axis=0)
     labels = np.concatenate(all_labels, axis=0)
 
-    # JSR: take max across bands (6 bands per sample, some may be NaN)
+    # JSR: reduce the per-band array (6 bands per sample, some may be NaN) to
+    # the strongest and the weakest band in each tile.
     if all_jsr:
         jsr_all_bands = np.concatenate(all_jsr, axis=0)
-        jsr_db = np.nanmax(jsr_all_bands, axis=1)  # (N,) - max JSR per sample
+        jsr_max, jsr_min = reduce_jsr_bands(jsr_all_bands)
     else:
-        jsr_db = None
+        jsr_max, jsr_min = None, None
 
     return {
         'eigen': eigen,
         'global': global_feat,
         'labels': labels,
-        'jsr_db': jsr_db,
+        'jsr_db': jsr_max,
+        'jsr_max': jsr_max,
+        'jsr_min': jsr_min,
         'source': os.path.basename(data_dir),
     }
 
@@ -210,12 +251,14 @@ def combined_synthetic_test(model, data_dirs, args):
         np.full(len(d['labels']), i) for i, d in enumerate(all_data)
     ])
 
-    # JSR (if available)
-    has_jsr = all(d['jsr_db'] is not None for d in all_data)
+    # JSR (if available), kept as two reductions of the per-band spread:
+    # strongest band (detectability) and weakest band (correct knee count).
+    has_jsr = all(d['jsr_max'] is not None for d in all_data)
     if has_jsr:
-        jsr_all = np.concatenate([d['jsr_db'] for d in all_data])
+        jsr_max_all = np.concatenate([d['jsr_max'] for d in all_data])
+        jsr_min_all = np.concatenate([d['jsr_min'] for d in all_data])
     else:
-        jsr_all = None
+        jsr_max_all, jsr_min_all = None, None
 
     print(f"\nTotal samples: {len(labels_all)}")
     for i, d in enumerate(all_data):
@@ -299,10 +342,13 @@ def combined_synthetic_test(model, data_dirs, args):
     print(f"\nSaved {out_path}")
 
     # Accuracy vs JSR (if available)
-    if has_jsr and jsr_all is not None:
-        plot_accuracy_vs_jsr(labels_all, preds, jsr_all, n_classes, args.output_dir,
-                            title='Combined Datasets')
-        results['jsr_analysis'] = analyze_jsr_performance(labels_all, preds, jsr_all, n_classes)
+    if has_jsr and jsr_max_all is not None:
+        plot_accuracy_vs_jsr(labels_all, preds, jsr_max_all, n_classes, args.output_dir,
+                             title='Combined Datasets', jsr_min=jsr_min_all)
+        results['jsr_analysis'] = analyze_jsr_performance(
+            labels_all, preds, jsr_max_all, n_classes)
+        results['jsr_analysis_weakest_band'] = analyze_jsr_performance(
+            labels_all, preds, jsr_min_all, n_classes)
 
     # Per-dataset confusion matrices
     for i, d in enumerate(all_data):
@@ -355,13 +401,30 @@ def combined_synthetic_test(model, data_dirs, args):
     return results
 
 
-def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title=''):
-    """Plot accuracy vs JSR for each class."""
+def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
+                         jsr_min=None):
+    """
+    Plot accuracy vs JSR for each class.
+
+    jsr_db is the STRONGEST band in each tile. Pass jsr_min (the weakest band)
+    to get a second panel beside it: same curves, but binned by the faintest
+    emitter the tile contains. The two panels bracket the multi-band tiles --
+    the left says how hard the tile was to notice, the right how hard it was to
+    count -- and they are identical for single-band and clean tiles, which have
+    no spread. A right panel that lags the left is the model missing the faint
+    members of a multi-band tile and under-calling the knee.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    panels = [(jsr_db, 'strongest band in tile')]
+    if jsr_min is not None:
+        panels.append((jsr_min, 'weakest band in tile'))
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(10 * len(panels), 6),
+                             squeeze=False, sharey=True)
+    axes = axes[0]
 
     # JSR bins
     jsr_bins = np.arange(-10, 35, 2)
@@ -370,27 +433,30 @@ def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title=''):
     class_names = ['clean'] + [(f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues')
                                  for k in range(1, n_classes)]
 
-    for k in range(n_classes):
-        mask = (labels == k)
-        if mask.sum() < 10:
-            continue
+    for ax, (jsr_vals, panel_label) in zip(axes, panels):
+        for k in range(n_classes):
+            mask = (labels == k)
+            if mask.sum() < 10:
+                continue
 
-        accs = []
-        for i in range(len(jsr_bins) - 1):
-            bin_mask = mask & (jsr_db >= jsr_bins[i]) & (jsr_db < jsr_bins[i+1])
-            if bin_mask.sum() > 0:
-                accs.append(np.mean(preds[bin_mask] == labels[bin_mask]))
-            else:
-                accs.append(np.nan)
+            accs = []
+            for i in range(len(jsr_bins) - 1):
+                bin_mask = mask & (jsr_vals >= jsr_bins[i]) & (jsr_vals < jsr_bins[i+1])
+                if bin_mask.sum() > 0:
+                    accs.append(np.mean(preds[bin_mask] == labels[bin_mask]))
+                else:
+                    accs.append(np.nan)
 
-        ax.plot(bin_centers, accs, marker='o', label=class_names[k], linewidth=2)
+            ax.plot(bin_centers, accs, marker='o', label=class_names[k], linewidth=2)
 
-    ax.set_xlabel('JSR (dB)')
-    ax.set_ylabel('Accuracy')
-    ax.set_ylim(0, 1.05)
-    ax.grid(True, linestyle='--', alpha=0.5)
-    ax.legend()
-    ax.set_title(f'Accuracy vs JSR - {title}')
+        ax.set_xlabel(f'JSR (dB) - {panel_label}')
+        ax.set_ylim(0, 1.05)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.set_title(panel_label)
+
+    axes[0].set_ylabel('Accuracy')
+    axes[0].legend()
+    fig.suptitle(f'Accuracy vs JSR - {title}')
 
     fig.tight_layout()
     out_path = os.path.join(out_dir, 'accuracy_vs_jsr.png')
