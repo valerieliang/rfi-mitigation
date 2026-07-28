@@ -63,7 +63,7 @@ extra suspicion.
 Usage
 -----
     # Process full granule extent
-    py-isce3 score_scene.py \\
+    python score_scene.py \\
         /scratch/bohuang/rfi/la/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5 \\
         --model models/rfi_train/best_model.keras \\
         --compute-subswath-mask \\
@@ -71,7 +71,7 @@ Usage
         --output-dir results/la_scene
 
     # Process specific pulse/range window
-    py-isce3 score_scene.py \\
+    python score_scene.py \\
         /scratch/bohuang/rfi/la/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5 \\
         --model models/rfi_train/best_model.keras \\
         --pulse-start 46528 --pulse-end 124580 \\
