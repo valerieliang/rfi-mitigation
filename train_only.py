@@ -57,8 +57,8 @@ DB_FLOOR = -100.0      # floor for dB values
 # File-name patterns. '*clean_data_*.h5' catches both the generic select_clean
 # output (clean_data_A_HH.h5) and any scene-tagged variant (mountain_clean_data_*,
 # amazon_clean_data_*, ...).
-TILE_FILE_PATTERNS = ('rfi_data_*.h5', 'mountain_rfi_data_*.h5', '*clean_data_*.h5')
-PAIRED_FILE_PATTERN = 'mountain_rfi_data_paired_*.h5'
+TILE_FILE_PATTERNS = ('*rfi_data_*.h5', '*clean_data_*.h5')
+PAIRED_FILE_PATTERN = '*rfi_data_paired_*.h5'
 
 # Multiplier for train/val split key
 GROUP_OFFSET = 10_000_000
