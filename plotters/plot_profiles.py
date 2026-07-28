@@ -47,6 +47,13 @@ Usage
     # Add SCM magnitude heatmaps for the sampled blocks
     python plotters/plot_profiles.py rfi_data_A_HH.h5 --scm-heatmap
 
+    # Low-power scene (desert): drop the dB y-axis floor below 0 so the
+    # genuinely negative eigenvalues / SCM diagonal are not clipped
+    python plotters/plot_profiles.py \\
+        data/australia_clean/australia_clean_data_A_HH.h5 \\
+        data/australia_clean/australia_clean_data_A_HV.h5 \\
+        --y-min -30 --output-dir results/profiles/australia_clean
+
     # Profile a raw L0B granule directly (caltone removed on the fly)
     python plotters/plot_profiles.py --l0b scene.h5 --freq A --pol HH \\
         --pulse-start 435777 --pulse-end 441000 --output-dir results/scene
@@ -77,8 +84,10 @@ from _common import (
 
 N_SHOW = 16   # show all 16 values in the plots
 
-# Label-aware eigenvalue overlay y-limits (unnormalized dB, bottom pinned at 0).
-EV_YLIM_BOTTOM_DB = 0.0
+# Label-aware eigenvalue overlay y-limits (unnormalized dB). The bottom is the
+# --y-min floor: 0 dB suits normal scenes, but low-power scenes (e.g. desert)
+# have genuinely negative dB values that a 0 floor would clip away.
+DEFAULT_Y_MIN_DB = 0.0
 EV_YLIM_TOP_MARGIN_DB = 2.0
 EV_YLIM_MIN_TOP_DB = 10.0
 
@@ -99,7 +108,7 @@ def select_plot_blocks(plot_seed, tag, n_tiles, n_blocks):
 # BASIC PROFILE PLOTS (eigenvalues + SCM diagonal)
 # ---------------------------------------------------------------------------
 
-def plot_average_shape(eig_db, out_path, freq, pol, n_show):
+def plot_average_shape(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
     """Mean eigenvalue profile with +/-1 std band, min/max envelope, and median."""
     eig = eig_db[:, :n_show]
     x = np.arange(n_show)
@@ -109,7 +118,6 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show):
     lo, hi = eig.min(axis=0), eig.max(axis=0)
 
     y_max = np.ceil(np.max(eig_db[:, :12]))
-    y_min = 0
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.fill_between(x, lo, hi, color="C0", alpha=0.12, label="min / max envelope")
@@ -129,7 +137,7 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show):
     plt.close(fig)
 
 
-def plot_overlaid(eig_db, out_path, freq, pol, n_show):
+def plot_overlaid(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
     """All CPI eigenvalue profiles overlaid on a single axes."""
     eig = eig_db[:, :n_show]
     x = np.arange(n_show)
@@ -137,7 +145,6 @@ def plot_overlaid(eig_db, out_path, freq, pol, n_show):
     alpha = float(np.clip(30.0 / max(n, 1), 0.03, 0.5))
 
     y_max = np.ceil(np.max(eig_db[:, :12]))
-    y_min = 0
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for i in range(n):
@@ -156,7 +163,7 @@ def plot_overlaid(eig_db, out_path, freq, pol, n_show):
     plt.close(fig)
 
 
-def plot_scm_diag(diag_db, out_path, freq, pol, n_show):
+def plot_scm_diag(diag_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
     """SCM diagonal values per CPI, all n_show positions overlaid."""
     d = diag_db[:, :n_show]
     x = np.arange(n_show)
@@ -165,7 +172,6 @@ def plot_scm_diag(diag_db, out_path, freq, pol, n_show):
 
     d_sorted_12 = np.sort(d, axis=1)[:, ::-1][:, :12]
     y_max = np.ceil(np.max(d_sorted_12))
-    y_min = 0
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for i in range(n):
@@ -184,7 +190,8 @@ def plot_scm_diag(diag_db, out_path, freq, pol, n_show):
     plt.close(fig)
 
 
-def plot_grid(eig_db, diag_db, pulse_idx, range_idx, out_path, freq, pol, n_show, max_grid):
+def plot_grid(eig_db, diag_db, pulse_idx, range_idx, out_path, freq, pol, n_show, max_grid,
+              y_min=DEFAULT_Y_MIN_DB):
     """Per-CPI grid: eigenvalue profile + SCM-diagonal scatter, evenly sampled."""
     eig = eig_db[:, :n_show]
     diag = diag_db[:, :n_show]
@@ -205,9 +212,9 @@ def plot_grid(eig_db, diag_db, pulse_idx, range_idx, out_path, freq, pol, n_show
         n_in_chunk = len(sel_chunk)
 
         eig_y_max = np.ceil(np.max(eig_db[sel_chunk, :12]))
-        eig_y_min = 0
+        eig_y_min = y_min
         diag_chunk = diag_db[sel_chunk, :]
-        diag_y_min = max(0, np.floor(np.min(diag_chunk)))
+        diag_y_min = max(y_min, np.floor(np.min(diag_chunk)))
         diag_y_max = np.ceil(np.max(diag_chunk))
 
         fig, axes = plt.subplots(n_in_chunk, 2, figsize=(9.6, 1.9 * n_in_chunk),
@@ -324,7 +331,7 @@ def _jsr_range_str(jsr_row):
     return f" | JSR {vals.min():.0f}-{vals.max():.0f} dB"
 
 
-def plot_label_overlay(ch, sel, out_dir, max_bands):
+def plot_label_overlay(ch, sel, out_dir, max_bands, y_min=DEFAULT_Y_MIN_DB):
     """Eigenvalue overlay + per-block grid, colored by knee (labels)."""
     eig = ch.eigenvalues
     profiles_db = [10.0 * np.log10(np.maximum(eig[i], EPS)) for i in sel]
@@ -334,7 +341,7 @@ def plot_label_overlay(ch, sel, out_dir, max_bands):
 
     global_max_db = float(np.max(np.concatenate(profiles_db)))
     top = max(global_max_db + EV_YLIM_TOP_MARGIN_DB, EV_YLIM_MIN_TOP_DB)
-    ylim = [EV_YLIM_BOTTOM_DB, top]
+    ylim = [y_min, top]
 
     norm = mcolors.Normalize(vmin=0, vmax=max(max_bands, 1))
     cmap = cm.plasma
@@ -456,17 +463,21 @@ def profile_channel(ch, args):
     pulse_idx = ch.tile_pulse if ch.tile_pulse is not None else np.arange(ch.n_tiles)
     range_idx = ch.tile_range if ch.tile_range is not None else np.zeros(ch.n_tiles, dtype=int)
 
-    plot_average_shape(eig_db, os.path.join(out_dir, f"{tag}_avg_shape.png"), freq, pol, N_SHOW)
-    plot_overlaid(eig_db, os.path.join(out_dir, f"{tag}_overlaid.png"), freq, pol, N_SHOW)
-    plot_scm_diag(diag_db, os.path.join(out_dir, f"{tag}_scm_diag.png"), freq, pol, N_SHOW)
+    plot_average_shape(eig_db, os.path.join(out_dir, f"{tag}_avg_shape.png"), freq, pol, N_SHOW,
+                       args.y_min)
+    plot_overlaid(eig_db, os.path.join(out_dir, f"{tag}_overlaid.png"), freq, pol, N_SHOW,
+                  args.y_min)
+    plot_scm_diag(diag_db, os.path.join(out_dir, f"{tag}_scm_diag.png"), freq, pol, N_SHOW,
+                  args.y_min)
     grid_files = plot_grid(eig_db, diag_db, pulse_idx, range_idx,
-                           os.path.join(out_dir, f"{tag}_grid.png"), freq, pol, N_SHOW, args.max_grid)
+                           os.path.join(out_dir, f"{tag}_grid.png"), freq, pol, N_SHOW,
+                           args.max_grid, args.y_min)
     print(f"  [{tag}] wrote avg_shape, overlaid, scm_diag, grid ({len(grid_files)} part(s))")
 
     if ch.labels is not None:
         max_bands = int(ch.attrs.get("max_bands", max(1, int(ch.labels.max()))))
         sel = select_plot_blocks(args.plot_seed, tag, ch.n_tiles, args.n_plot_blocks)
-        label_files = plot_label_overlay(ch, sel, out_dir, max_bands)
+        label_files = plot_label_overlay(ch, sel, out_dir, max_bands, args.y_min)
         print(f"  [{tag}] wrote label-aware overlay + per-block grid "
               f"({len(label_files)} files, {len(sel)} blocks)")
 
@@ -498,7 +509,7 @@ def maybe_combined_grid(results, args):
         files = plot_grid_combined(
             hh["eig_db"][:n], hv["eig_db"][:n], hh["diag_db"][:n], hv["diag_db"][:n],
             hh["pulse_idx"][:n], hh["range_idx"][:n], out, freq, N_SHOW, args.max_grid,
-            0, eig_y_max, 0, diag_y_max)
+            args.y_min, eig_y_max, args.y_min, diag_y_max)
         print(f"  combined HH+HV grid for freq {freq}: {len(files)} part(s)")
 
 
@@ -513,6 +524,10 @@ def parse_args():
                         help="One or more flat per-CPI HDF5 channel files.")
     parser.add_argument("--output-dir", default="results/profiles",
                         help="Directory for the output PNGs (default: results/profiles)")
+    parser.add_argument("--y-min", type=float, default=DEFAULT_Y_MIN_DB,
+                        help="Bottom of the dB y-axis on every plot (default: "
+                             f"{DEFAULT_Y_MIN_DB}). Lower it (e.g. -18) for low-power scenes "
+                             "whose eigenvalues/SCM diagonal go negative in dB.")
     parser.add_argument("--max-grid", type=int, default=48,
                         help="Max CPIs drawn in the per-CPI grid (evenly sampled beyond this)")
     parser.add_argument("--plot-seed", type=int, default=99,
