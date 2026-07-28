@@ -1,0 +1,65 @@
+{
+  "granule": "NISAR_L0_PR_RRSD_016_012_A_148S_20260127T034309_20260127T034853_P05006_F_J_001.h5",
+  "model": "models/mountains_full_latest/best_model.keras",
+  "labeled": false,
+  "pulse_window": [
+    363793,
+    440001
+  ],
+  "range_window": [
+    0,
+    26750
+  ],
+  "n_keep": 12,
+  "gap_exclusion_used": true,
+  "off_diag_overlap_ratio": 0.03,
+  "diag_valid_ratio": 0.02,
+  "channels": {
+    "A-HH": {
+      "n_tiles": 509641,
+      "flagged": 55063,
+      "flagged_fraction": 0.10804272026779635,
+      "prediction_distribution": {
+        "0": 454578,
+        "1": 38927,
+        "2": 8183,
+        "3": 2032,
+        "4": 657,
+        "5": 284,
+        "6": 4980
+      },
+      "mean_confidence": 0.9444295167922974,
+      "mean_confidence_flagged": 0.8331220746040344,
+      "mean_confidence_clean": 0.9579119682312012,
+      "knee_vs_power_correlation": -0.505197650047402,
+      "range_columns_flagged_over_half": [
+        106
+      ],
+      "n_range_tiles": 107,
+      "max_slowtime_block_flag_rate": 0.7570093457943925
+    },
+    "A-HV": {
+      "n_tiles": 509641,
+      "flagged": 85258,
+      "flagged_fraction": 0.16729030827582553,
+      "prediction_distribution": {
+        "0": 424383,
+        "1": 63662,
+        "2": 11296,
+        "3": 3001,
+        "4": 1039,
+        "5": 638,
+        "6": 5622
+      },
+      "mean_confidence": 0.943817675113678,
+      "mean_confidence_flagged": 0.865348219871521,
+      "mean_confidence_clean": 0.9595821499824524,
+      "knee_vs_power_correlation": -0.41787521172519987,
+      "range_columns_flagged_over_half": [
+        106
+      ],
+      "n_range_tiles": 107,
+      "max_slowtime_block_flag_rate": 0.8317757009345794
+    }
+  }
+}
