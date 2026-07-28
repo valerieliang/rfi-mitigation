@@ -21,6 +21,15 @@ Pipeline per tile:
    filter_clean_mountains.py): reject a tile whose max eigenvalue power is below
    min_power_db, or that has fewer than min_valid_eigvals eigenvalues above 0 dB.
 
+   With --low-signal, this absolute-power test is replaced by a RELATIVE one:
+   a tile is kept when its min_valid_eigvals'th eigenvalue sits no more than
+   low_signal_drop_db below the tile's own signal power. Scenes whose backscatter
+   floor sits near or below 0 dB (e.g. the Australia granule) have well-behaved
+   eigenvalue profiles that the absolute test throws away wholesale; the relative
+   test keeps the same "the spectrum is flat, not spiked" requirement while
+   letting low-power tiles through. The IQR cleanliness test (step 3) still
+   applies unchanged on top of it.
+
 Tiles that pass BOTH are written, one file per channel, in the exact layout
 train_only.py consumes (<name-prefix>_<freq>_<pol>.h5, default clean_data_*):
 
@@ -33,7 +42,7 @@ train_only.py consumes (<name-prefix>_<freq>_<pol>.h5, default clean_data_*):
     tile_pulse      int32   (N,)         absolute pulse index of tile row 0
     tile_range      int32   (N,)         absolute range index of tile col 0
     (plus iqr_mean / iqr_std / n_std_above / diag_valid_frac / max_power_db /
-     n_valid_eigvals as clean-selection provenance)
+     n_valid_eigvals / eig_drop_db as clean-selection provenance)
 
 By default, the script processes both polarizations (if available) and
 allows frequency selection via --freq.
@@ -48,6 +57,12 @@ Examples
     python select_clean.py amazon.h5 --pulse-start 813924 --pulse-end 888222 \
         --compute-subswath-mask --name-prefix amazon_clean_data \
         --output-dir data/amazon_clean
+
+    # Low-backscatter scene (Australia): relative dynamic-range test instead of
+    # the absolute 0 dB / min-power test
+    python select_clean.py australia.h5 --pulse-start 0 --pulse-end 50000 \
+        --compute-subswath-mask --low-signal --name-prefix australia_clean_data \
+        --output-dir data/australia_clean
 """
 
 import argparse
@@ -77,6 +92,10 @@ N_SHOW = 16
 # Power / valid-eigenvalue filter defaults (folded in from filter_clean_mountains.py)
 MIN_POWER_DB_DEFAULT = 4.0
 MIN_VALID_EIGVALS_DEFAULT = 12
+
+# Low-signal mode: max dB the min_valid_eigvals'th eigenvalue may sit below the
+# tile's own signal power before the tile is considered rank-deficient / spiked.
+LOW_SIGNAL_DROP_DB_DEFAULT = 10.0
 
 EPS = 1e-12
 
@@ -382,16 +401,21 @@ def tile_signal_power(cpi, cpi_mask):
 
 def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
                      off_diag_ratio, diag_ratio, n_check, std_threshold,
-                     min_power_db, min_valid_eigvals):
+                     min_power_db, min_valid_eigvals,
+                     low_signal=False,
+                     low_signal_drop_db=LOW_SIGNAL_DROP_DB_DEFAULT):
     """
     Tile data_block into non-overlapping cpi_len x cpi_width CPIs and keep the
     tiles that pass BOTH the IQR cleanliness test and the power / valid-eigenvalue
     filter, returning per-tile arrays in the layout train_only.py consumes.
 
     A tile is kept when:
-      1. is_clean_tile(...) finds no diagonal outlier above the IQR threshold,
-      2. its max eigenvalue power is >= min_power_db, and
-      3. at least min_valid_eigvals eigenvalues sit above 0 dB.
+      1. is_clean_tile(...) finds no diagonal outlier above the IQR threshold, AND
+      2. (default) its max eigenvalue power is >= min_power_db and at least
+         min_valid_eigvals eigenvalues sit above 0 dB, OR
+         (low_signal=True) its min_valid_eigvals'th eigenvalue sits no more than
+         low_signal_drop_db below the tile's own signal power -- a relative
+         dynamic-range test that does not assume an absolute 0 dB noise floor.
 
     Returns a dict of arrays for the kept (clean, label-0) tiles, or None.
     """
@@ -488,10 +512,27 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
     eig_db = eigvals_to_db(eig_lin)                     # (N, 16)
     max_power_db = np.max(eig_db, axis=1)
     n_valid_eigvals = np.sum(eig_db > 0, axis=1)
-    keep = (max_power_db >= min_power_db) & (n_valid_eigvals >= min_valid_eigvals)
 
-    print(f"    power/eigval filter (max >= {min_power_db} dB, >= {min_valid_eigvals} valid): "
-          f"{n_iqr_clean} -> {int(np.sum(keep))} kept ({int(np.sum(~keep))} removed)")
+    # Drop of the min_valid_eigvals'th eigenvalue below the tile's signal power.
+    # compute_gap_exclusion_scm already divides by the valid-sample count, and
+    # process_freq_pol divides by cpi_width again, so the eigenvalues sit a fixed
+    # 10*log10(cpi_width) below sig_db by construction. Undo that offset before
+    # differencing, otherwise the threshold would depend on the CPI width.
+    eig_index = min(max(min_valid_eigvals, 1), eig_db.shape[1]) - 1
+    sig_db_eig_scale = sig_db - 10.0 * np.log10(cpi_width)
+    eig_drop_db = sig_db_eig_scale - eig_db[:, eig_index]   # (N,) dB below signal power
+
+    if low_signal:
+        # Relative test: no absolute noise floor assumed, so tiles from a
+        # low-backscatter scene survive as long as their spectrum stays flat.
+        keep = eig_drop_db <= low_signal_drop_db
+        print(f"    low-signal eigval filter (eig[{eig_index}] within "
+              f"{low_signal_drop_db} dB of signal power): "
+              f"{n_iqr_clean} -> {int(np.sum(keep))} kept ({int(np.sum(~keep))} removed)")
+    else:
+        keep = (max_power_db >= min_power_db) & (n_valid_eigvals >= min_valid_eigvals)
+        print(f"    power/eigval filter (max >= {min_power_db} dB, >= {min_valid_eigvals} valid): "
+              f"{n_iqr_clean} -> {int(np.sum(keep))} kept ({int(np.sum(~keep))} removed)")
 
     if not np.any(keep):
         return None
@@ -510,6 +551,7 @@ def process_freq_pol(data_block, mask_block, p0, r0, cpi_len, cpi_width,
         "n_std_above": n_std_above[keep],
         "max_power_db": max_power_db[keep].astype(np.float32),
         "n_valid_eigvals": n_valid_eigvals[keep].astype(np.int32),
+        "eig_drop_db": eig_drop_db[keep].astype(np.float32),
     }
 
 
@@ -655,6 +697,19 @@ def main():
     parser.add_argument('--min-valid-eigvals', type=int, default=MIN_VALID_EIGVALS_DEFAULT,
                         help='Drop tiles with fewer than this many eigenvalues above 0 dB.')
 
+    parser.add_argument('--low-signal', action='store_true',
+                        help='Low-signal scenes (e.g. Australia): replace the absolute '
+                             'power test (--min-power-db and the ">0 dB" eigenvalue count) '
+                             'with a relative one -- keep a tile when its '
+                             '--min-valid-eigvals\'th eigenvalue is within '
+                             '--low-signal-drop-db of the tile signal power. The IQR '
+                             'std-deviation cleanliness test still applies on top.')
+    parser.add_argument('--low-signal-drop-db', type=float,
+                        default=LOW_SIGNAL_DROP_DB_DEFAULT,
+                        help='With --low-signal: max dB the min-valid-eigvals\'th '
+                             'eigenvalue may sit below the tile signal power '
+                             f'(default: {LOW_SIGNAL_DROP_DB_DEFAULT}).')
+
     parser.add_argument('--name-prefix', default='clean_data',
                         help='Filename prefix for the per-channel output files: '
                              '<name-prefix>_<freq>_<pol>.h5. Use a scene-specific '
@@ -721,6 +776,8 @@ def main():
             args.off_diag_overlap_ratio, args.diag_valid_ratio,
             args.n_check, args.std_threshold,
             args.min_power_db, args.min_valid_eigvals,
+            low_signal=args.low_signal,
+            low_signal_drop_db=args.low_signal_drop_db,
         )
 
         if result is None:
@@ -761,6 +818,8 @@ def main():
             f.attrs['std_threshold'] = args.std_threshold
             f.attrs['min_power_db'] = args.min_power_db
             f.attrs['min_valid_eigvals'] = args.min_valid_eigvals
+            f.attrs['low_signal'] = bool(args.low_signal)
+            f.attrs['low_signal_drop_db'] = args.low_signal_drop_db
             f.attrs['eigenvalue_scale'] = 'linear, descending'
             f.attrs['diagonal_scale'] = 'linear, unnormalized'
             f.attrs['caltone_removed'] = bool(args.remove_caltone)
@@ -785,6 +844,7 @@ def main():
             f.create_dataset('n_std_above', data=result['n_std_above'], compression='gzip')
             f.create_dataset('max_power_db', data=result['max_power_db'], compression='gzip')
             f.create_dataset('n_valid_eigvals', data=result['n_valid_eigvals'], compression='gzip')
+            f.create_dataset('eig_drop_db', data=result['eig_drop_db'], compression='gzip')
 
             # Force HDF5 metadata+data to disk before the handle closes.
             f.flush()
