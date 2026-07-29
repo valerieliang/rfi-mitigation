@@ -7,6 +7,13 @@ separate dataset/source), runs the model, and reports a combined confusion
 matrix + accuracy plus a per-dataset breakdown -- so you can see mountain-only
 vs amazon-only vs combined for the same model.
 
+Accuracy vs RFI strength is plotted for the pooled set AND for each individual
+test .h5 file, so every polarization and every JSR band of a directory gets its
+own curves. Each such figure has two panels: binned by the STRONGEST band in a
+tile (how hard the tile was to notice) and by the WEAKEST band (how hard it was
+to count). Files that record no `jsr_db` fall back to `rfi_power_db`; files
+with neither are still scored, just not plotted against strength.
+
 This script is ONLY for labeled synthetic data. Scoring real NISAR scenes
 (no ground truth) is done in score_scene.py.
 
@@ -150,68 +157,108 @@ def reduce_jsr_bands(jsr_bands):
     return jsr_max, jsr_min
 
 
-def load_synthetic_data(data_dir):
-    """Load synthetic test data from a data directory."""
-    # Try standard test.h5 first (preprocessed features)
-    test_file = os.path.join(data_dir, 'test.h5')
-    if os.path.exists(test_file):
-        with h5py.File(test_file, 'r') as f:
+#: Per-band strength datasets we know how to bin against, in preference order.
+#: JSR is the right x-axis when it is there. Absolute RFI power is the fallback
+#: for tile files written without a JSR record -- it answers a slightly
+#: different question (how loud was the emitter, not how loud relative to the
+#: scene) so the two are never mixed on one axis.
+STRENGTH_DATASETS = [
+    ('jsr_db', 'JSR (dB)'),
+    ('rfi_power_db', 'RFI power (dB)'),
+]
+
+
+def _read_strength(f):
+    """
+    Pull the per-band strength array out of an open tile file.
+
+    Returns (bands_array, metric_label), or (None, None) if the file records
+    neither JSR nor RFI power.
+    """
+    for key, label in STRENGTH_DATASETS:
+        if key in f:
+            return f[key][:], label
+    return None, None
+
+
+def load_synthetic_file(fpath, dir_name):
+    """
+    Load ONE labeled tile file into the dict shape the rest of this script uses.
+
+    'source' is '<dir>__<file stem>' so that files sharing a basename across
+    directories (rfi_data_A_HH.h5 lives in half a dozen of them) stay distinct
+    once they become plot filenames.
+    """
+    stem = os.path.splitext(os.path.basename(fpath))[0]
+    with h5py.File(fpath, 'r') as f:
+        if 'eigen_features' in f:
+            # Preprocessed features, already model-ready.
             eigen = f['eigen_features'][:]
             global_feat = f['global_features'][:]
-            labels = f['labels'][:]
-            if 'jsr_db' in f:
-                jsr_db = f['jsr_db'][:]
-            else:
-                jsr_db = None
-        jsr_max, jsr_min = reduce_jsr_bands(jsr_db)
-        return {
-            'eigen': eigen,
-            'global': global_feat,
-            'labels': labels,
-            'jsr_db': jsr_max,
-            'jsr_max': jsr_max,
-            'jsr_min': jsr_min,
-            'source': os.path.basename(data_dir),
-        }
+        else:
+            # Raw eigenvalues; featurize exactly as training did.
+            eigen, global_feat = features_from_eigenvalues(
+                f['eigenvalues'][:], f['diagonal'][:], f['diag_valid_idx'][:]
+            )
+        labels = f['labels'][:]
+        strength_bands, metric_name = _read_strength(f)
 
-    # Otherwise, look for separate polarization files with raw eigenvalues
+    strength_max, strength_min = reduce_jsr_bands(strength_bands)
+
+    return {
+        'eigen': eigen,
+        'global': global_feat,
+        'labels': labels,
+        'jsr_db': strength_max,      # kept under the old key for compatibility
+        'jsr_max': strength_max,
+        'jsr_min': strength_min,
+        'metric_name': metric_name,
+        'source': f'{dir_name}__{stem}',
+        'path': fpath,
+    }
+
+
+def load_synthetic_files(data_dir):
+    """Load a data directory as a LIST of per-file datasets, in sorted order."""
+    dir_name = os.path.basename(os.path.normpath(data_dir))
+
+    # Standard test.h5 (preprocessed features) is a single-file directory.
+    test_file = os.path.join(data_dir, 'test.h5')
+    if os.path.exists(test_file):
+        return [load_synthetic_file(test_file, dir_name)]
+
+    # Otherwise, separate per-polarization files with raw eigenvalues.
     h5_files = sorted([f for f in os.listdir(data_dir) if f.endswith('.h5')])
     if not h5_files:
         raise FileNotFoundError(f"No .h5 files found in {data_dir}")
 
-    all_eigen, all_global, all_labels, all_jsr = [], [], [], []
-    for h5_file in h5_files:
-        fpath = os.path.join(data_dir, h5_file)
-        with h5py.File(fpath, 'r') as f:
-            # Load raw eigenvalues and preprocess them
-            eigvals = f['eigenvalues'][:]
-            diag = f['diagonal'][:]
-            diag_valid_idx = f['diag_valid_idx'][:]
-            labels_pol = f['labels'][:]
+    return [load_synthetic_file(os.path.join(data_dir, h), dir_name)
+            for h in h5_files]
 
-            # Preprocess raw eigenvalues into model features
-            eigen_feat, global_feat = features_from_eigenvalues(
-                eigvals, diag, diag_valid_idx
-            )
 
-            all_eigen.append(eigen_feat)
-            all_global.append(global_feat)
-            all_labels.append(labels_pol)
+def load_synthetic_data(data_dir):
+    """
+    Load synthetic test data from a data directory, pooled across its files.
 
-            if 'jsr_db' in f:
-                all_jsr.append(f['jsr_db'][:])
+    The individual files stay reachable under 'files' so per-file plots can be
+    made without re-reading or re-predicting anything.
+    """
+    files = load_synthetic_files(data_dir)
 
-    eigen = np.concatenate(all_eigen, axis=0)
-    global_feat = np.concatenate(all_global, axis=0)
-    labels = np.concatenate(all_labels, axis=0)
+    eigen = np.concatenate([fd['eigen'] for fd in files], axis=0)
+    global_feat = np.concatenate([fd['global'] for fd in files], axis=0)
+    labels = np.concatenate([fd['labels'] for fd in files], axis=0)
 
-    # JSR: reduce the per-band array (6 bands per sample, some may be NaN) to
-    # the strongest and the weakest band in each tile.
-    if all_jsr:
-        jsr_all_bands = np.concatenate(all_jsr, axis=0)
-        jsr_max, jsr_min = reduce_jsr_bands(jsr_all_bands)
+    # Pool the strength axis only if every file in the directory has it AND
+    # they all recorded the same quantity. Mixed units get dropped rather than
+    # silently plotted on a shared axis.
+    metric_names = {fd['metric_name'] for fd in files}
+    if len(metric_names) == 1 and None not in metric_names:
+        metric_name = metric_names.pop()
+        jsr_max = np.concatenate([fd['jsr_max'] for fd in files])
+        jsr_min = np.concatenate([fd['jsr_min'] for fd in files])
     else:
-        jsr_max, jsr_min = None, None
+        metric_name, jsr_max, jsr_min = None, None, None
 
     return {
         'eigen': eigen,
@@ -220,7 +267,9 @@ def load_synthetic_data(data_dir):
         'jsr_db': jsr_max,
         'jsr_max': jsr_max,
         'jsr_min': jsr_min,
-        'source': os.path.basename(data_dir),
+        'metric_name': metric_name,
+        'source': os.path.basename(os.path.normpath(data_dir)),
+        'files': files,
     }
 
 
@@ -251,18 +300,34 @@ def combined_synthetic_test(model, data_dirs, args):
         np.full(len(d['labels']), i) for i, d in enumerate(all_data)
     ])
 
+    # Where each individual test FILE lives in the pooled arrays, so per-file
+    # plots reuse the single batched prediction below instead of re-running it.
+    file_slices, offset = [], 0
+    for d in all_data:
+        for fd in d['files']:
+            n = len(fd['labels'])
+            file_slices.append((fd, offset, offset + n))
+            offset += n
+    assert offset == len(labels_all), 'per-file offsets do not cover the pooled set'
+
     # JSR (if available), kept as two reductions of the per-band spread:
     # strongest band (detectability) and weakest band (correct knee count).
-    has_jsr = all(d['jsr_max'] is not None for d in all_data)
+    # The pooled plot needs every dataset to report the same quantity.
+    metric_names = {d['metric_name'] for d in all_data}
+    has_jsr = (all(d['jsr_max'] is not None for d in all_data)
+               and len(metric_names) == 1 and None not in metric_names)
     if has_jsr:
+        metric_name_all = metric_names.pop()
         jsr_max_all = np.concatenate([d['jsr_max'] for d in all_data])
         jsr_min_all = np.concatenate([d['jsr_min'] for d in all_data])
     else:
+        metric_name_all = None
         jsr_max_all, jsr_min_all = None, None
 
     print(f"\nTotal samples: {len(labels_all)}")
     for i, d in enumerate(all_data):
-        print(f"  {d['source']}: {len(d['labels'])} samples")
+        print(f"  {d['source']}: {len(d['labels'])} samples "
+              f"({len(d['files'])} file(s))")
 
     # Predict
     print("\nPredicting...")
@@ -314,6 +379,7 @@ def combined_synthetic_test(model, data_dirs, args):
         'confusion_matrix': cm.tolist(),
         'classification_report': combined_report,
         'per_dataset': {},   # populated in the per-dataset loop below
+        'per_file': {},      # populated in the per-file loop below
     }
 
     # Plot confusion matrix
@@ -344,11 +410,13 @@ def combined_synthetic_test(model, data_dirs, args):
     # Accuracy vs JSR (if available)
     if has_jsr and jsr_max_all is not None:
         plot_accuracy_vs_jsr(labels_all, preds, jsr_max_all, n_classes, args.output_dir,
-                             title='Combined Datasets', jsr_min=jsr_min_all)
+                             title='Combined Datasets', jsr_min=jsr_min_all,
+                             metric_name=metric_name_all)
+        results['strength_metric'] = metric_name_all
         results['jsr_analysis'] = analyze_jsr_performance(
-            labels_all, preds, jsr_max_all, n_classes)
+            labels_all, preds, jsr_max_all, n_classes, metric_name_all)
         results['jsr_analysis_weakest_band'] = analyze_jsr_performance(
-            labels_all, preds, jsr_min_all, n_classes)
+            labels_all, preds, jsr_min_all, n_classes, metric_name_all)
 
     # Per-dataset confusion matrices
     for i, d in enumerate(all_data):
@@ -390,6 +458,42 @@ def combined_synthetic_test(model, data_dirs, args):
         plt.close(fig)
         print(f"Saved {out_path}")
 
+    # Per-FILE accuracy vs strength. One figure per test .h5 (so each
+    # polarization and each JSR band of a directory gets its own curves),
+    # each with the strongest-band and weakest-band panels side by side.
+    print(f"\n{'-'*70}")
+    print('PER-FILE ACCURACY VS STRENGTH')
+    print(f"{'-'*70}")
+    for fd, lo, hi in file_slices:
+        labels_f = labels_all[lo:hi]
+        preds_f = preds[lo:hi]
+        acc_f = float(np.mean(preds_f == labels_f))
+        name = fd['source']
+
+        entry = {
+            'path': fd['path'],
+            'n_samples': int(hi - lo),
+            'accuracy': acc_f,
+            'strength_metric': fd['metric_name'],
+        }
+        print(f"  {name}: {100*acc_f:.2f}%  ({hi - lo} samples)")
+
+        if fd['jsr_max'] is None:
+            print(f"    no JSR or RFI power recorded in this file; no plot")
+        else:
+            plot_accuracy_vs_jsr(
+                labels_f, preds_f, fd['jsr_max'], n_classes, args.output_dir,
+                title=name, jsr_min=fd['jsr_min'],
+                out_name=f'accuracy_vs_jsr_{name}.png',
+                metric_name=fd['metric_name'],
+            )
+            entry['strength_analysis'] = analyze_jsr_performance(
+                labels_f, preds_f, fd['jsr_max'], n_classes, fd['metric_name'])
+            entry['strength_analysis_weakest_band'] = analyze_jsr_performance(
+                labels_f, preds_f, fd['jsr_min'], n_classes, fd['metric_name'])
+
+        results['per_file'][name] = entry
+
     # Confidence distribution
     plot_confidence_distribution(confidence, labels_all, preds, n_classes, args.output_dir,
                                  title='Combined Datasets')
@@ -401,10 +505,43 @@ def combined_synthetic_test(model, data_dirs, args):
     return results
 
 
-def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
-                         jsr_min=None):
+def strength_bins(metric_name, *value_arrays):
     """
-    Plot accuracy vs JSR for each class.
+    Bin edges for the x-axis of the accuracy-vs-strength plots.
+
+    JSR keeps the historical fixed -10..34 dB / 2 dB grid so new plots line up
+    with the ones already in results/. Any other quantity (absolute RFI power,
+    whose useful range depends on the scene) gets 22 equal bins spanning the
+    1st-99th percentile of the data, which keeps a couple of wild tiles from
+    squashing every curve into the leftmost bin.
+
+    Returns None if there is nothing finite to bin.
+    """
+    if metric_name is not None and metric_name.startswith('JSR'):
+        return np.arange(-10, 35, 2)
+
+    finite = np.concatenate([
+        np.asarray(v, dtype=np.float64)[np.isfinite(v)]
+        for v in value_arrays if v is not None
+    ]) if value_arrays else np.array([])
+
+    if finite.size == 0:
+        return None
+
+    lo, hi = np.percentile(finite, [1, 99])
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo, hi = float(finite.min()), float(finite.max())
+        if hi <= lo:
+            hi = lo + 1.0
+    return np.linspace(lo, hi, 23)
+
+
+def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
+                         jsr_min=None, out_name='accuracy_vs_jsr.png',
+                         metric_name='JSR (dB)'):
+    """
+    Plot accuracy vs JSR (or whatever per-band strength the file recorded) for
+    each class.
 
     jsr_db is the STRONGEST band in each tile. Pass jsr_min (the weakest band)
     to get a second panel beside it: same curves, but binned by the faintest
@@ -413,6 +550,8 @@ def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
     count -- and they are identical for single-band and clean tiles, which have
     no spread. A right panel that lags the left is the model missing the faint
     members of a multi-band tile and under-calling the knee.
+
+    Returns the path written, or None if there was nothing to bin.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -422,13 +561,15 @@ def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
     if jsr_min is not None:
         panels.append((jsr_min, 'weakest band in tile'))
 
+    bins = strength_bins(metric_name, *[v for v, _ in panels])
+    if bins is None:
+        print(f"  (no finite {metric_name} values for {title}; skipping plot)")
+        return None
+    bin_centers = (bins[:-1] + bins[1:]) / 2
+
     fig, axes = plt.subplots(1, len(panels), figsize=(10 * len(panels), 6),
                              squeeze=False, sharey=True)
     axes = axes[0]
-
-    # JSR bins
-    jsr_bins = np.arange(-10, 35, 2)
-    bin_centers = (jsr_bins[:-1] + jsr_bins[1:]) / 2
 
     class_names = ['clean'] + [(f'{k} RFI eigenvalue' if k == 1 else f'{k} RFI eigenvalues')
                                  for k in range(1, n_classes)]
@@ -440,8 +581,8 @@ def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
                 continue
 
             accs = []
-            for i in range(len(jsr_bins) - 1):
-                bin_mask = mask & (jsr_vals >= jsr_bins[i]) & (jsr_vals < jsr_bins[i+1])
+            for i in range(len(bins) - 1):
+                bin_mask = mask & (jsr_vals >= bins[i]) & (jsr_vals < bins[i+1])
                 if bin_mask.sum() > 0:
                     accs.append(np.mean(preds[bin_mask] == labels[bin_mask]))
                 else:
@@ -449,32 +590,49 @@ def plot_accuracy_vs_jsr(labels, preds, jsr_db, n_classes, out_dir, title='',
 
             ax.plot(bin_centers, accs, marker='o', label=class_names[k], linewidth=2)
 
-        ax.set_xlabel(f'JSR (dB) - {panel_label}')
+        ax.set_xlabel(f'{metric_name} - {panel_label}')
         ax.set_ylim(0, 1.05)
         ax.grid(True, linestyle='--', alpha=0.5)
         ax.set_title(panel_label)
 
     axes[0].set_ylabel('Accuracy')
     axes[0].legend()
-    fig.suptitle(f'Accuracy vs JSR - {title}')
+    fig.suptitle(f'Accuracy vs {metric_name} - {title}')
 
     fig.tight_layout()
-    out_path = os.path.join(out_dir, 'accuracy_vs_jsr.png')
+    out_path = os.path.join(out_dir, out_name)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"Saved {out_path}")
+    return out_path
 
 
-def analyze_jsr_performance(labels, preds, jsr_db, n_classes):
-    """Analyze performance across JSR ranges."""
-    jsr_ranges = [(-10, 0), (0, 10), (10, 20), (20, 35)]
+def analyze_jsr_performance(labels, preds, jsr_db, n_classes,
+                            metric_name='JSR (dB)'):
+    """
+    Analyze performance across strength ranges.
+
+    JSR uses the fixed decade-ish bands it always has. A non-JSR quantity
+    (absolute RFI power) has no canonical bands, so it gets quartiles of its
+    own finite values instead.
+    """
+    if metric_name is not None and metric_name.startswith('JSR'):
+        jsr_ranges = [(-10, 0), (0, 10), (10, 20), (20, 35)]
+    else:
+        finite = np.asarray(jsr_db, dtype=np.float64)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return {}
+        edges = np.percentile(finite, [0, 25, 50, 75, 100])
+        edges[-1] = np.nextafter(edges[-1], np.inf)   # keep the max in the top bin
+        jsr_ranges = [(float(edges[i]), float(edges[i+1])) for i in range(4)]
 
     results = {}
     for low, high in jsr_ranges:
         mask = (jsr_db >= low) & (jsr_db < high)
         if mask.sum() > 0:
             acc = float(np.mean(preds[mask] == labels[mask]))
-            results[f'{low}to{high}dB'] = {
+            results[f'{low:g}to{high:g}dB'] = {
                 'accuracy': acc,
                 'n_samples': int(mask.sum()),
             }
