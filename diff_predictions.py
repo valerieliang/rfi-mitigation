@@ -143,6 +143,39 @@ def pair_inputs(path_a, path_b):
 
 
 # ---------------------------------------------------------------------------
+# STYLE
+# ---------------------------------------------------------------------------
+
+# Dark canvas. A diff map is ~98% agreement, and on a white figure that
+# agreement region is the same color as the page, so the disagreements -- the
+# entire point of the plot -- wash out against it. Rendering on a dark ground
+# makes every non-zero tile read as a bright mark.
+DARK_BG = '#1b1b1f'
+DARK_FG = '#e8e8ea'
+DARK_EDGE = '#55555a'
+
+
+def style_dark(fig, *axes):
+    """Recolor a figure and its axes onto the dark canvas, in place."""
+    fig.patch.set_facecolor(DARK_BG)
+    for ax in axes:
+        ax.set_facecolor(DARK_BG)
+        ax.title.set_color(DARK_FG)
+        ax.xaxis.label.set_color(DARK_FG)
+        ax.yaxis.label.set_color(DARK_FG)
+        ax.tick_params(colors=DARK_FG, which='both')
+        for spine in ax.spines.values():
+            spine.set_color(DARK_EDGE)
+
+
+def style_dark_colorbar(cbar):
+    """Same treatment for a colorbar's frame, ticks, and label."""
+    cbar.ax.yaxis.label.set_color(DARK_FG)
+    cbar.ax.tick_params(colors=DARK_FG, which='both')
+    cbar.outline.set_edgecolor(DARK_EDGE)
+
+
+# ---------------------------------------------------------------------------
 # PLOTS
 # ---------------------------------------------------------------------------
 
@@ -151,23 +184,45 @@ def plot_diff_map(diff, rec_a, rec_b, label_a, label_b, out_dir):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
 
-    grid = diff.reshape(rec_a['n_pt'], rec_a['n_rt'])
+    # Mask the agreeing tiles rather than coloring them: masked cells take the
+    # colormap's "bad" color, which is set to the figure background, so agreement
+    # drops out of the image entirely and only disagreements carry ink.
+    grid = np.ma.masked_equal(diff.reshape(rec_a['n_pt'], rec_a['n_rt']), 0)
 
-    # Symmetric limits so that zero is always the neutral middle color; without
-    # this, an asymmetric diff makes "agree" render as a nonzero-looking shade.
+    # Symmetric limits so +n and -n are equally saturated and the two directions
+    # stay visually comparable.
     lim = max(int(np.abs(diff).max()), 1)
 
     cpi_width = rec_a['cpi_width']
     range_block_start = rec_a['range_window'][0] / cpi_width
     range_block_end = rec_a['range_window'][1] / cpi_width
 
+    # The diff is a small integer, and almost all of it is +-1. A continuous
+    # diverging ramp puts those near the neutral middle, where red and blue are
+    # both nearly white -- the sign, which is the whole question, becomes
+    # unreadable. So use a DISCRETE scale with one color per integer offset,
+    # sampled away from the pale end of each ramp: +-1 is already fully legible
+    # and larger magnitudes only darken from there.
+    mags = np.arange(1, lim + 1)
+    shade = 0.45 + 0.5 * (mags - 1) / max(lim - 1, 1)
+    neg_colors = [plt.get_cmap('Blues')(s) for s in shade][::-1]   # -lim .. -1
+    pos_colors = [plt.get_cmap('Reds')(s) for s in shade]          # +1 .. +lim
+    # The zero slot gets the background color: those tiles are masked anyway, so
+    # it only exists to keep one bin per integer from -lim to +lim.
+    cmap = mcolors.ListedColormap(neg_colors + [DARK_BG] + pos_colors)
+    cmap.set_bad(DARK_BG)
+
+    # One bin per integer offset, edges at the half-integers.
+    norm = mcolors.BoundaryNorm(np.arange(-lim - 0.5, lim + 1.5), cmap.N)
+
     fig, ax = plt.subplots(figsize=(13, 6))
-    im = ax.imshow(grid, aspect='auto', cmap='RdBu_r', origin='upper',
-                   vmin=-lim, vmax=lim, interpolation='nearest',
+    im = ax.imshow(grid, aspect='auto', cmap=cmap, origin='upper',
+                   norm=norm, interpolation='nearest',
                    extent=[range_block_start, range_block_end,
                            rec_a['n_pt'], 0])
-    cbar = fig.colorbar(im, ax=ax)
+    cbar = fig.colorbar(im, ax=ax, ticks=[v for v in range(-lim, lim + 1) if v != 0])
     cbar.set_label('knee(A) - knee(B)   [RFI eigenvalues]')
 
     ax.set_xlabel('Range blocks')
@@ -175,12 +230,15 @@ def plot_diff_map(diff, rec_a, rec_b, label_a, label_b, out_dir):
     ax.set_title(f"Knee difference across scene -- {rec_a['chan']}\n"
                  f"red / positive = {label_a} predicted higher\n"
                  f"blue / negative = {label_b} predicted higher\n"
-                 f"white = the two runs agree",
+                 f"unmarked / background = the two runs agree",
                  fontsize=10)
+
+    style_dark(fig, ax)
+    style_dark_colorbar(cbar)
 
     fig.tight_layout()
     path = os.path.join(out_dir, f"knee_diff_map_{rec_a['freq']}_{rec_a['pol']}.png")
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=150, facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"  Saved {path}")
 
@@ -196,7 +254,7 @@ def plot_diff_hist(diff, rec_a, label_a, label_b, out_dir):
     counts = np.array([(diff == v).sum() for v in values])
     frac = counts / max(counts.sum(), 1)
 
-    colors = ['indianred' if v > 0 else ('steelblue' if v < 0 else '0.6')
+    colors = ['#e06c6c' if v > 0 else ('#5f9ed1' if v < 0 else '#6a6a70')
               for v in values]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -205,11 +263,11 @@ def plot_diff_hist(diff, rec_a, label_a, label_b, out_dir):
     for v, f_, c in zip(values, frac, counts):
         if f_ > 0:
             ax1.annotate(f'n={c}', (v, f_), textcoords='offset points',
-                         xytext=(0, 3), ha='center', fontsize=7)
+                         xytext=(0, 3), ha='center', fontsize=7, color=DARK_FG)
     ax1.set_xticks(values)
     ax1.set_xlabel('knee(A) - knee(B)')
     ax1.set_ylabel('Fraction of all tiles')
-    ax1.grid(True, axis='y', linestyle='--', alpha=0.5)
+    ax1.grid(True, axis='y', linestyle='--', alpha=0.35, color=DARK_FG)
     ax1.set_title('All tiles\nagreement dominates, so the tails are invisible here')
 
     # Same data with the agreement bar dropped and renormalized: the shape of
@@ -222,20 +280,23 @@ def plot_diff_hist(diff, rec_a, label_a, label_b, out_dir):
     for v, f_, c in zip(values[nz], nz_frac, counts[nz]):
         if f_ > 0:
             ax2.annotate(f'n={c}', (v, f_), textcoords='offset points',
-                         xytext=(0, 3), ha='center', fontsize=7)
+                         xytext=(0, 3), ha='center', fontsize=7, color=DARK_FG)
     ax2.set_xticks(values[nz])
     ax2.set_xlabel('knee(A) - knee(B)')
     ax2.set_ylabel('Fraction of DISAGREEING tiles')
-    ax2.grid(True, axis='y', linestyle='--', alpha=0.5)
+    ax2.grid(True, axis='y', linestyle='--', alpha=0.35, color=DARK_FG)
     ax2.set_title(f'Disagreements only (n={int(counts[nz].sum())})\n'
                   f'renormalized, agreement bar removed')
 
     fig.suptitle(f"Knee difference distribution -- {rec_a['chan']}   "
                  f"positive = {label_a} higher,  negative = {label_b} higher",
-                 fontsize=11)
+                 fontsize=11, color=DARK_FG)
+
+    style_dark(fig, ax1, ax2)
+
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     path = os.path.join(out_dir, f"knee_diff_hist_{rec_a['freq']}_{rec_a['pol']}.png")
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=150, facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"  Saved {path}")
 
@@ -258,9 +319,11 @@ def plot_diff_confusion(rec_a, rec_b, label_a, label_b, out_dir):
     np.add.at(joint, (rec_a['knee'], rec_b['knee']), 1)
 
     fig, ax = plt.subplots(figsize=(8, 6.5))
-    im = ax.imshow(joint, cmap='viridis', origin='upper',
+    cmap = plt.get_cmap('viridis').copy()
+    cmap.set_bad(DARK_BG)
+    im = ax.imshow(np.ma.masked_equal(joint, 0), cmap=cmap, origin='upper',
                    norm=mcolors.LogNorm(vmin=max(joint.min(), 1), vmax=max(joint.max(), 1)))
-    fig.colorbar(im, ax=ax, label='Tile count (log scale)')
+    cbar = fig.colorbar(im, ax=ax, label='Tile count (log scale)')
 
     for i in range(n_classes):
         for j in range(n_classes):
@@ -277,9 +340,12 @@ def plot_diff_confusion(rec_a, rec_b, label_a, label_b, out_dir):
                  f"diagonal = agreement; below diagonal = A higher, "
                  f"above = B higher")
 
+    style_dark(fig, ax)
+    style_dark_colorbar(cbar)
+
     fig.tight_layout()
     path = os.path.join(out_dir, f"knee_diff_confusion_{rec_a['freq']}_{rec_a['pol']}.png")
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=150, facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"  Saved {path}")
 
