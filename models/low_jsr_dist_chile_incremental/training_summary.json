@@ -1,64 +1,15 @@
 {
-  "run": "augment_low_jsr",
-  "n_train": 1196568,
-  "n_val": 206212,
+  "run": "low_jsr_dist_chile_incremental",
+  "n_train": 1224700,
+  "n_val": 214872,
   "n_classes": 7,
   "n_keep": 12,
-  "epochs": 50,
+  "epochs": 100,
   "batch_size": 256,
   "learning_rate": 0.0003,
   "dropout_rate": 0.6,
   "weight_decay": 0.0001,
   "class_distribution": {
-    "berlin_contam": {
-      "0": {
-        "tag": "clean",
-        "total": 7002,
-        "train": 6079,
-        "val": 905
-      },
-      "1": {
-        "tag": "1 RFI eig",
-        "total": 6818,
-        "train": 5911,
-        "val": 886
-      },
-      "2": {
-        "tag": "2 RFI eigs",
-        "total": 6995,
-        "train": 6046,
-        "val": 932
-      },
-      "3": {
-        "tag": "3 RFI eigs",
-        "total": 6876,
-        "train": 5971,
-        "val": 886
-      },
-      "4": {
-        "tag": "4 RFI eigs",
-        "total": 7028,
-        "train": 6113,
-        "val": 899
-      },
-      "5": {
-        "tag": "5 RFI eigs",
-        "total": 6754,
-        "train": 5860,
-        "val": 877
-      },
-      "6": {
-        "tag": "6 RFI eigs",
-        "total": 6929,
-        "train": 6024,
-        "val": 889
-      },
-      "total": {
-        "total": 48402,
-        "train": 42004,
-        "val": 6274
-      }
-    },
     "czech_contam": {
       "0": {
         "tag": "clean",
@@ -157,6 +108,104 @@
         "val": 126592
       }
     },
+    "berlin_clean": {
+      "0": {
+        "tag": "clean",
+        "total": 48402,
+        "train": 42004,
+        "val": 6274
+      },
+      "1": {
+        "tag": "1 RFI eig",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "2": {
+        "tag": "2 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "3": {
+        "tag": "3 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "4": {
+        "tag": "4 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "5": {
+        "tag": "5 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "6": {
+        "tag": "6 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "total": {
+        "total": 48402,
+        "train": 42004,
+        "val": 6274
+      }
+    },
+    "chile_mountain_clean": {
+      "0": {
+        "tag": "clean",
+        "total": 36976,
+        "train": 28132,
+        "val": 8660
+      },
+      "1": {
+        "tag": "1 RFI eig",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "2": {
+        "tag": "2 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "3": {
+        "tag": "3 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "4": {
+        "tag": "4 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "5": {
+        "tag": "5 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "6": {
+        "tag": "6 RFI eigs",
+        "total": 0,
+        "train": 0,
+        "val": 0
+      },
+      "total": {
+        "total": 36976,
+        "train": 28132,
+        "val": 8660
+      }
+    },
     "amz_low_jsr": {
       "0": {
         "tag": "clean",
@@ -209,67 +258,70 @@
     "ALL": {
       "0": {
         "tag": "clean",
-        "total": 135447,
-        "train": 115281,
-        "val": 19693
+        "total": 213823,
+        "train": 179338,
+        "val": 33722
       },
       "1": {
         "tag": "1 RFI eig",
-        "total": 212289,
-        "train": 180077,
-        "val": 31275
+        "total": 205471,
+        "train": 174166,
+        "val": 30389
       },
       "2": {
         "tag": "2 RFI eigs",
-        "total": 212139,
-        "train": 180295,
-        "val": 30853
+        "total": 205144,
+        "train": 174249,
+        "val": 29921
       },
       "3": {
         "tag": "3 RFI eigs",
-        "total": 212493,
-        "train": 180577,
-        "val": 30950
+        "total": 205617,
+        "train": 174606,
+        "val": 30064
       },
       "4": {
         "tag": "4 RFI eigs",
-        "total": 213321,
-        "train": 181173,
-        "val": 31228
+        "total": 206293,
+        "train": 175060,
+        "val": 30329
       },
       "5": {
         "tag": "5 RFI eigs",
-        "total": 211273,
-        "train": 179373,
-        "val": 30963
+        "total": 204519,
+        "train": 173513,
+        "val": 30086
       },
       "6": {
         "tag": "6 RFI eigs",
-        "total": 211996,
-        "train": 179792,
-        "val": 31250
+        "total": 205067,
+        "train": 173768,
+        "val": 30361
       },
       "total": {
-        "total": 1408958,
-        "train": 1196568,
-        "val": 206212
+        "total": 1445934,
+        "train": 1224700,
+        "val": 214872
       }
     }
   },
   "train_provenance": {
     "dirs": [
-      "data/berlin_contam",
-      "data/czech_contam",
-      "data/amazon_contam",
-      "data/amz_low_jsr"
+      "data/czech_contam/",
+      "data/amazon_contam/",
+      "data/berlin_clean/",
+      "data/chile_mountain_clean/",
+      "data/amz_low_jsr/"
     ],
     "files": [
-      "rfi_data_A_HH.h5",
-      "rfi_data_A_HV.h5",
       "mountain_rfi_data_A_HH.h5",
       "mountain_rfi_data_A_HV.h5",
       "rfi_data_A_HH.h5",
       "rfi_data_A_HV.h5",
+      "mountain_clean_data_A_HH.h5",
+      "mountain_clean_data_A_HV.h5",
+      "chile_mountain_clean_data_A_HH.h5",
+      "chile_mountain_clean_data_A_HV.h5",
       "rfi_data_A_HH.h5",
       "rfi_data_A_HV.h5"
     ],
@@ -282,9 +334,10 @@
       936222
     ],
     "source_names": [
-      "berlin_contam",
       "czech_contam",
       "amazon_contam",
+      "berlin_clean",
+      "chile_mountain_clean",
       "amz_low_jsr"
     ],
     "seed": 3,

@@ -1,0 +1,111 @@
+{
+  "granule": "NISAR_L0_PR_RRSD_010_017_A_148S_20260110T101338_20260110T102252_X05009_N_J_001.h5",
+  "model": "models/low_jsr_dist_chile_incremental/best_model.keras",
+  "labeled": false,
+  "pulse_window": [
+    888222,
+    896222
+  ],
+  "range_window": [
+    0,
+    27250
+  ],
+  "n_keep": 12,
+  "gap_exclusion_used": true,
+  "off_diag_overlap_ratio": 0.03,
+  "diag_valid_ratio": 0.02,
+  "channels": {
+    "A-HH": {
+      "n_tiles": 54500,
+      "flagged": 1607,
+      "flagged_fraction": 0.02948623853211009,
+      "prediction_distribution": {
+        "0": 52893,
+        "1": 258,
+        "2": 5,
+        "3": 0,
+        "4": 1,
+        "5": 1343,
+        "6": 0
+      },
+      "mean_confidence": 0.949883759021759,
+      "mean_confidence_flagged": 0.9680911302566528,
+      "mean_confidence_clean": 0.9493305087089539,
+      "knee_vs_power_correlation": -0.80083835648383,
+      "range_columns_flagged_over_half": [
+        105,
+        106,
+        107
+      ],
+      "n_range_tiles": 109,
+      "max_slowtime_block_flag_rate": 0.05504587155963303
+    },
+    "A-HV": {
+      "n_tiles": 54500,
+      "flagged": 1492,
+      "flagged_fraction": 0.027376146788990825,
+      "prediction_distribution": {
+        "0": 53008,
+        "1": 148,
+        "2": 1,
+        "3": 0,
+        "4": 0,
+        "5": 1343,
+        "6": 0
+      },
+      "mean_confidence": 0.9519743323326111,
+      "mean_confidence_flagged": 0.9809456467628479,
+      "mean_confidence_clean": 0.951158881187439,
+      "knee_vs_power_correlation": -0.79898365076389,
+      "range_columns_flagged_over_half": [
+        105,
+        106,
+        107
+      ],
+      "n_range_tiles": 109,
+      "max_slowtime_block_flag_rate": 0.06422018348623854
+    },
+    "B-HH": {
+      "n_tiles": 13500,
+      "flagged": 14,
+      "flagged_fraction": 0.001037037037037037,
+      "prediction_distribution": {
+        "0": 13486,
+        "1": 13,
+        "2": 1,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "mean_confidence": 0.9523378014564514,
+      "mean_confidence_flagged": 0.66307133436203,
+      "mean_confidence_clean": 0.9526380896568298,
+      "knee_vs_power_correlation": -0.042120033814771286,
+      "range_columns_flagged_over_half": [],
+      "n_range_tiles": 27,
+      "max_slowtime_block_flag_rate": 0.037037037037037035
+    },
+    "B-HV": {
+      "n_tiles": 13500,
+      "flagged": 5,
+      "flagged_fraction": 0.00037037037037037035,
+      "prediction_distribution": {
+        "0": 13495,
+        "1": 5,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+      },
+      "mean_confidence": 0.9536710977554321,
+      "mean_confidence_flagged": 0.5768126249313354,
+      "mean_confidence_clean": 0.9538107514381409,
+      "knee_vs_power_correlation": -0.03973171362092452,
+      "range_columns_flagged_over_half": [],
+      "n_range_tiles": 27,
+      "max_slowtime_block_flag_rate": 0.037037037037037035
+    }
+  }
+}
