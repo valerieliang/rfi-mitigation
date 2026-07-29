@@ -420,10 +420,16 @@ def train_model(run_name, n_classes,
                 eigen_train, global_train, y_train,
                 eigen_val, global_val, y_val,
                 epochs, batch_size, learning_rate, dropout_rate, weight_decay,
-                models_root=MODELS_ROOT):
+                model_path_in=None, models_root=MODELS_ROOT):
     """
-    Build and train the model on the training region, validating on the held-out
-    pulse-tile block of that same region.
+    Build (or load) and train the model on the training region, validating on
+    the held-out pulse-tile block of that same region.
+
+    model_path_in : str or None
+        If given, continue training from this existing .keras model instead
+        of building a fresh one. The optimizer is rebuilt from the current
+        --learning-rate/--weight-decay so the LR schedule and decay restart
+        cleanly rather than resuming whatever state was saved with the model.
 
     Returns:
         model, out_dir
@@ -438,14 +444,29 @@ def train_model(run_name, n_classes,
     print(f"  eigen input : ({N_KEEP}, 2)   global: ({N_GLOBAL},)   classes: {n_classes}")
     print(f"{'='*60}")
 
-    model = build_model(
-        cpi_size=N_KEEP,
-        n_global_features=N_GLOBAL,
-        n_knee_classes=n_classes,
-        dropout_rate=dropout_rate,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
-    )
+    if model_path_in is not None:
+        print(f"Loading existing model: {model_path_in}")
+        model = tf.keras.models.load_model(model_path_in)
+        model.compile(
+            optimizer=tf.keras.optimizers.AdamW(
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+            ),
+            loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+            metrics=[
+                tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
+                tf.keras.metrics.SparseTopKCategoricalAccuracy(k=2, name='top2_acc'),
+            ],
+        )
+    else:
+        model = build_model(
+            cpi_size=N_KEEP,
+            n_global_features=N_GLOBAL,
+            n_knee_classes=n_classes,
+            dropout_rate=dropout_rate,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+        )
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -511,6 +532,9 @@ def parse_args():
                         help='Initial learning rate.')
     parser.add_argument('--dropout-rate', type=float, default=0.6,
                         help='Dropout rate in the fusion head.')
+    parser.add_argument('--model', type=str, default=None,
+                        help='Existing .keras model to continue training from, '
+                             'instead of building a fresh one.')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='L2 regularization strength (AdamW weight decay).')
     return parser.parse_args()
@@ -571,7 +595,8 @@ def main():
         train_data['labels'][idx_val],
         epochs=args.epochs, batch_size=args.batch_size,
         learning_rate=args.learning_rate, dropout_rate=args.dropout_rate,
-        weight_decay=args.weight_decay, models_root=args.models_root,
+        weight_decay=args.weight_decay,
+        model_path_in=args.model, models_root=args.models_root,
     )
 
     # Save training summary
