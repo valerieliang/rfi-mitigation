@@ -54,8 +54,19 @@ BATCH_SIZE = 256
 LR = 3e-4
 VAL_FRAC = 0.15        # of the training region
 
-# Pulse tiles dropped at the train/val boundary
-SPLIT_BUFFER_DEFAULT = 8
+# CPI ROWS dropped on each side of the train/val boundary.
+#
+# The unit is one distinct `tile_pulse` value, which generate_amazon_data.py
+# steps by cpi_len (= M = 16 pulses) -- so one unit is one full CPI row across
+# range, and this default is 128 * 16 = 2048 pulses of separation on each side.
+#
+# 8 was too narrow. Adjacent CPI rows see the same terrain, emitters and
+# geometry, so a val block starting ~128 pulses after the train block behaves
+# like a near-duplicate of it: incremental training measured +1.94 pts on the
+# amz_low_jsr val split but only +0.33 pts on independent test scenes. Widening
+# this costs ~5% of the tiles in the smallest source and buys a val metric that
+# tracks generalization instead of memorization.
+SPLIT_BUFFER_DEFAULT = 128
 
 EPS = 1e-12
 DB_FLOOR = -100.0      # floor for dB values
@@ -248,35 +259,57 @@ def load_rfi_data_dir(data_dirs, max_samples=None, tag=''):
 
 def _block_split_indices(groups, val_frac, buffer_tiles):
     """
-    Contiguous pulse-tile block split of one flat `groups` array. Holds out the
-    top val_frac of the DISTINCT group values as val, dropping `buffer_tiles`
-    distinct values on each side of the internal boundary to avoid spatial
-    leakage. Returns (idx_train, idx_val, train_g, val_g) as positional indices
-    into `groups`; val is empty when there are too few tiles to carve one out.
+    Contiguous CPI-row block split of one flat `groups` array. Holds out the top
+    val_frac of the DISTINCT group values as val, dropping `buffer_tiles` distinct
+    values on each side of the internal boundary to avoid spatial leakage.
+
+    One distinct group value is one CPI ROW (see SPLIT_BUFFER_DEFAULT), so train
+    and val never share a CPI row even at buffer_tiles=0; the buffer adds further
+    separation on top of that.
+
+    Returns (idx_train, idx_val, train_g, val_g, info) -- positional indices into
+    `groups`, plus row bookkeeping. val is empty when there are too few rows to
+    carve one out. `info['buffer_applied']` is False when a side was too small to
+    trim, which would otherwise leave that side silently unbuffered.
     """
     uniq = np.unique(groups)
     n = len(uniq)
+    info = {'n_rows': int(n), 'n_train_rows': 0, 'n_val_rows': 0,
+            'buffer_applied': True}
+
     n_val = int(round(val_frac * n))
     n_train = n - n_val
     if n_train <= 0 or n_val <= 0:
-        return np.arange(len(groups)), np.array([], dtype=int), uniq, uniq[:0]
+        info['n_train_rows'] = int(n)
+        return (np.arange(len(groups)), np.array([], dtype=int),
+                uniq, uniq[:0], info)
 
     train_g = uniq[:n_train]
     val_g = uniq[n_train:]
     if buffer_tiles > 0:
         if len(train_g) > buffer_tiles:
             train_g = train_g[:-buffer_tiles]
+        else:
+            info['buffer_applied'] = False
         if len(val_g) > buffer_tiles:
             val_g = val_g[buffer_tiles:]
+        else:
+            info['buffer_applied'] = False
+
+    info['n_train_rows'] = int(len(train_g))
+    info['n_val_rows'] = int(len(val_g))
 
     idx_train = np.where(np.isin(groups, train_g))[0]
     idx_val = np.where(np.isin(groups, val_g))[0]
-    return idx_train, idx_val, train_g, val_g
+    return idx_train, idx_val, train_g, val_g, info
 
 
 def split_train_val(groups, val_frac, buffer_tiles, split_mode='per-source'):
     """
     Split into train / val by CONTIGUOUS pulse-tile blocks.
+
+    `buffer_tiles` is counted in CPI ROWS (distinct tile_pulse values), not in
+    individual tiles -- see SPLIT_BUFFER_DEFAULT.
 
     split_mode:
       'global'     -- one block split over all sources concatenated. Because
@@ -292,26 +325,39 @@ def split_train_val(groups, val_frac, buffer_tiles, split_mode='per-source'):
     groups = np.asarray(groups)
 
     if split_mode == 'global':
-        idx_train, idx_val, train_g, val_g = _block_split_indices(
+        idx_train, idx_val, train_g, val_g, info = _block_split_indices(
             groups, val_frac, buffer_tiles)
         if len(idx_val) == 0:
-            raise ValueError(f'Not enough distinct pulse tiles to split '
+            raise ValueError(f'Not enough distinct CPI rows to split '
                              f'({len(np.unique(groups))})')
-        print(f"\n  Train/val GLOBAL block split (buffer={buffer_tiles} tiles): "
-              f"train {len(idx_train)} / val {len(idx_val)} tiles")
+        print(f"\n  Train/val GLOBAL block split (buffer={buffer_tiles} CPI rows "
+              f"each side): train {len(idx_train)} / val {len(idx_val)} tiles")
+        if not info['buffer_applied']:
+            print(f"    WARNING: only {info['n_rows']} CPI rows available; the "
+                  f"{buffer_tiles}-row buffer could not be applied on at least "
+                  f"one side, so train and val are adjacent.")
         return idx_train, idx_val
 
     # per-source
     source_ids = groups // GROUP_OFFSET
     idx_train_parts, idx_val_parts = [], []
-    print(f"\n  Train/val PER-SOURCE block split (buffer={buffer_tiles} tiles):")
+    print(f"\n  Train/val PER-SOURCE block split "
+          f"(buffer={buffer_tiles} CPI rows each side, "
+          f"1 row = {M} pulses):")
     for sid in np.unique(source_ids):
         sel = np.where(source_ids == sid)[0]
-        it, iv, _, _ = _block_split_indices(groups[sel], val_frac, buffer_tiles)
+        it, iv, _, _, info = _block_split_indices(
+            groups[sel], val_frac, buffer_tiles)
         idx_train_parts.append(sel[it])
         idx_val_parts.append(sel[iv])
-        note = '' if len(iv) else '  [too few tiles for a val block -> all train]'
-        print(f"    source {int(sid)}: train {len(it)} / val {len(iv)} tiles{note}")
+        note = '' if len(iv) else '  [too few rows for a val block -> all train]'
+        print(f"    source {int(sid)}: train {len(it)} / val {len(iv)} tiles"
+              f"  [{info['n_rows']} CPI rows]{note}")
+        if len(iv) and not info['buffer_applied']:
+            print(f"      WARNING: only {info['n_rows']} CPI rows in this source; "
+                  f"the {buffer_tiles}-row buffer did not fit on at least one "
+                  f"side, so its train and val blocks are adjacent. Lower "
+                  f"--split-buffer or drop this source.")
 
     idx_train = np.concatenate(idx_train_parts) if idx_train_parts else np.array([], dtype=int)
     idx_val = np.concatenate(idx_val_parts) if idx_val_parts else np.array([], dtype=int)
@@ -508,7 +554,11 @@ def parse_args():
     parser.add_argument('--val-frac', type=float, default=VAL_FRAC,
                         help='Fraction of training-region pulse tiles held out for val.')
     parser.add_argument('--split-buffer', type=int, default=SPLIT_BUFFER_DEFAULT,
-                        help='Pulse tiles dropped at each train/val boundary.')
+                        help=f'CPI ROWS dropped on each side of the train/val '
+                             f'boundary. One row = one tile_pulse value = {M} '
+                             f'pulses across all range tiles. Widens the gap '
+                             f'between the two blocks so val measures '
+                             f'generalization rather than memorization.')
     parser.add_argument('--split-mode', choices=['per-source', 'global'],
                         default='per-source',
                         help='per-source (default): hold out val_frac of EACH '

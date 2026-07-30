@@ -549,7 +549,11 @@ def parse_args():
     parser.add_argument('--val-frac', type=float, default=VAL_FRAC,
                         help='Fraction of pulse tiles held out for val, per source.')
     parser.add_argument('--split-buffer', type=int, default=SPLIT_BUFFER_DEFAULT,
-                        help='Pulse tiles dropped at each train/val boundary.')
+                        help='CPI ROWS dropped on each side of the train/val '
+                             'boundary (1 row = one tile_pulse value = 16 '
+                             'pulses). Too small a buffer makes val_new_loss '
+                             'track memorization of the training scenes rather '
+                             'than generalization.')
     parser.add_argument('--epochs', type=int, default=EPOCHS)
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
     parser.add_argument('--learning-rate', type=float, default=LR,
