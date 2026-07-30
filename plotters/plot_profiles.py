@@ -108,7 +108,8 @@ def select_plot_blocks(plot_seed, tag, n_tiles, n_blocks):
 # BASIC PROFILE PLOTS (eigenvalues + SCM diagonal)
 # ---------------------------------------------------------------------------
 
-def plot_average_shape(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
+def plot_average_shape(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB,
+                       y_max=None):
     """Mean eigenvalue profile with +/-1 std band, min/max envelope, and median."""
     eig = eig_db[:, :n_show]
     x = np.arange(n_show)
@@ -117,7 +118,8 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_
     med = np.median(eig, axis=0)
     lo, hi = eig.min(axis=0), eig.max(axis=0)
 
-    y_max = np.ceil(np.max(eig_db[:, :12]))
+    if y_max is None:
+        y_max = np.ceil(np.max(eig_db[:, :12]))
 
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.fill_between(x, lo, hi, color="C0", alpha=0.12, label="min / max envelope")
@@ -137,14 +139,15 @@ def plot_average_shape(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_
     plt.close(fig)
 
 
-def plot_overlaid(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
+def plot_overlaid(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB, y_max=None):
     """All CPI eigenvalue profiles overlaid on a single axes."""
     eig = eig_db[:, :n_show]
     x = np.arange(n_show)
     n = eig.shape[0]
     alpha = float(np.clip(30.0 / max(n, 1), 0.03, 0.5))
 
-    y_max = np.ceil(np.max(eig_db[:, :12]))
+    if y_max is None:
+        y_max = np.ceil(np.max(eig_db[:, :12]))
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for i in range(n):
@@ -163,15 +166,16 @@ def plot_overlaid(eig_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
     plt.close(fig)
 
 
-def plot_scm_diag(diag_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
+def plot_scm_diag(diag_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB, y_max=None):
     """SCM diagonal values per CPI, all n_show positions overlaid."""
     d = diag_db[:, :n_show]
     x = np.arange(n_show)
     n = d.shape[0]
     alpha = float(np.clip(30.0 / max(n, 1), 0.03, 0.5))
 
-    d_sorted_12 = np.sort(d, axis=1)[:, ::-1][:, :12]
-    y_max = np.ceil(np.max(d_sorted_12))
+    if y_max is None:
+        d_sorted_12 = np.sort(d, axis=1)[:, ::-1][:, :12]
+        y_max = np.ceil(np.max(d_sorted_12))
 
     fig, ax = plt.subplots(figsize=(8, 6))
     for i in range(n):
@@ -191,7 +195,7 @@ def plot_scm_diag(diag_db, out_path, freq, pol, n_show, y_min=DEFAULT_Y_MIN_DB):
 
 
 def plot_grid(eig_db, diag_db, pulse_idx, range_idx, out_path, freq, pol, n_show, max_grid,
-              y_min=DEFAULT_Y_MIN_DB):
+              y_min=DEFAULT_Y_MIN_DB, y_max=None):
     """Per-CPI grid: eigenvalue profile + SCM-diagonal scatter, evenly sampled."""
     eig = eig_db[:, :n_show]
     diag = diag_db[:, :n_show]
@@ -211,11 +215,17 @@ def plot_grid(eig_db, diag_db, pulse_idx, range_idx, out_path, freq, pol, n_show
         sel_chunk = sel[img_idx * max_per_image:(img_idx + 1) * max_per_image]
         n_in_chunk = len(sel_chunk)
 
-        eig_y_max = np.ceil(np.max(eig_db[sel_chunk, :12]))
         eig_y_min = y_min
         diag_chunk = diag_db[sel_chunk, :]
-        diag_y_min = max(y_min, np.floor(np.min(diag_chunk)))
-        diag_y_max = np.ceil(np.max(diag_chunk))
+        if y_max is None:
+            eig_y_max = np.ceil(np.max(eig_db[sel_chunk, :12]))
+            diag_y_min = max(y_min, np.floor(np.min(diag_chunk)))
+            diag_y_max = np.ceil(np.max(diag_chunk))
+        else:
+            # An explicit window is taken literally on both panels, so every
+            # part of the grid is directly comparable.
+            eig_y_max = diag_y_max = y_max
+            diag_y_min = y_min
 
         fig, axes = plt.subplots(n_in_chunk, 2, figsize=(9.6, 1.9 * n_in_chunk),
                                  squeeze=False, sharex=True, sharey=False)
@@ -331,7 +341,7 @@ def _jsr_range_str(jsr_row):
     return f" | JSR {vals.min():.0f}-{vals.max():.0f} dB"
 
 
-def plot_label_overlay(ch, sel, out_dir, max_bands, y_min=DEFAULT_Y_MIN_DB):
+def plot_label_overlay(ch, sel, out_dir, max_bands, y_min=DEFAULT_Y_MIN_DB, y_max=None):
     """Eigenvalue overlay + per-block grid, colored by knee (labels)."""
     eig = ch.eigenvalues
     profiles_db = [10.0 * np.log10(np.maximum(eig[i], EPS)) for i in sel]
@@ -339,9 +349,10 @@ def plot_label_overlay(ch, sel, out_dir, max_bands, y_min=DEFAULT_Y_MIN_DB):
     cpi_len = eig.shape[1]
     ev_index = np.arange(1, cpi_len + 1)
 
-    global_max_db = float(np.max(np.concatenate(profiles_db)))
-    top = max(global_max_db + EV_YLIM_TOP_MARGIN_DB, EV_YLIM_MIN_TOP_DB)
-    ylim = [y_min, top]
+    if y_max is None:
+        global_max_db = float(np.max(np.concatenate(profiles_db)))
+        y_max = max(global_max_db + EV_YLIM_TOP_MARGIN_DB, EV_YLIM_MIN_TOP_DB)
+    ylim = [y_min, y_max]
 
     norm = mcolors.Normalize(vmin=0, vmax=max(max_bands, 1))
     cmap = cm.plasma
@@ -464,20 +475,20 @@ def profile_channel(ch, args):
     range_idx = ch.tile_range if ch.tile_range is not None else np.zeros(ch.n_tiles, dtype=int)
 
     plot_average_shape(eig_db, os.path.join(out_dir, f"{tag}_avg_shape.png"), freq, pol, N_SHOW,
-                       args.y_min)
+                       args.y_min, args.y_max)
     plot_overlaid(eig_db, os.path.join(out_dir, f"{tag}_overlaid.png"), freq, pol, N_SHOW,
-                  args.y_min)
+                  args.y_min, args.y_max)
     plot_scm_diag(diag_db, os.path.join(out_dir, f"{tag}_scm_diag.png"), freq, pol, N_SHOW,
-                  args.y_min)
+                  args.y_min, args.y_max)
     grid_files = plot_grid(eig_db, diag_db, pulse_idx, range_idx,
                            os.path.join(out_dir, f"{tag}_grid.png"), freq, pol, N_SHOW,
-                           args.max_grid, args.y_min)
+                           args.max_grid, args.y_min, args.y_max)
     print(f"  [{tag}] wrote avg_shape, overlaid, scm_diag, grid ({len(grid_files)} part(s))")
 
     if ch.labels is not None:
         max_bands = int(ch.attrs.get("max_bands", max(1, int(ch.labels.max()))))
         sel = select_plot_blocks(args.plot_seed, tag, ch.n_tiles, args.n_plot_blocks)
-        label_files = plot_label_overlay(ch, sel, out_dir, max_bands, args.y_min)
+        label_files = plot_label_overlay(ch, sel, out_dir, max_bands, args.y_min, args.y_max)
         print(f"  [{tag}] wrote label-aware overlay + per-block grid "
               f"({len(label_files)} files, {len(sel)} blocks)")
 
@@ -501,10 +512,13 @@ def maybe_combined_grid(results, args):
             continue
         hh, hv = pol_map["HH"], pol_map["HV"]
         n = min(hh["eig_db"].shape[0], hv["eig_db"].shape[0])
-        eig_y_max = np.ceil(max(np.max(hh["eig_db"][:n, :12]), np.max(hv["eig_db"][:n, :12])))
-        diag_hh_12 = np.sort(hh["diag_db"][:n], axis=1)[:, ::-1][:, :12]
-        diag_hv_12 = np.sort(hv["diag_db"][:n], axis=1)[:, ::-1][:, :12]
-        diag_y_max = np.ceil(max(np.max(diag_hh_12), np.max(diag_hv_12)))
+        if args.y_max is None:
+            eig_y_max = np.ceil(max(np.max(hh["eig_db"][:n, :12]), np.max(hv["eig_db"][:n, :12])))
+            diag_hh_12 = np.sort(hh["diag_db"][:n], axis=1)[:, ::-1][:, :12]
+            diag_hv_12 = np.sort(hv["diag_db"][:n], axis=1)[:, ::-1][:, :12]
+            diag_y_max = np.ceil(max(np.max(diag_hh_12), np.max(diag_hv_12)))
+        else:
+            eig_y_max = diag_y_max = args.y_max
         out = os.path.join(args.output_dir, f"profile_grid_{freq}.png")
         files = plot_grid_combined(
             hh["eig_db"][:n], hv["eig_db"][:n], hh["diag_db"][:n], hv["diag_db"][:n],
@@ -528,6 +542,10 @@ def parse_args():
                         help="Bottom of the dB y-axis on every plot (default: "
                              f"{DEFAULT_Y_MIN_DB}). Lower it (e.g. -18) for low-power scenes "
                              "whose eigenvalues/SCM diagonal go negative in dB.")
+    parser.add_argument("--y-max", type=float, default=None,
+                        help="Top of the dB y-axis on every plot. Default is per-plot "
+                             "auto-scaling to the data; set it (with --y-min) to zoom into a "
+                             "band, e.g. --y-min 20 --y-max 45.")
     parser.add_argument("--max-grid", type=int, default=48,
                         help="Max CPIs drawn in the per-CPI grid (evenly sampled beyond this)")
     parser.add_argument("--plot-seed", type=int, default=99,
