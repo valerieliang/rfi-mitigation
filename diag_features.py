@@ -25,6 +25,12 @@ single scalar summary destroys that:
   min/median  min and median are BOTH in the clean group, so it measures clean-row
               speckle spread and carries no RFI information at all.
 
+`median/max` is nonetheless kept as the third GLOBAL scalar (N_GLOBAL_DIAG = 3),
+alongside the profile rather than instead of it. The profile is max-normalized,
+so max/median is not recoverable from it; the scalar restores that absolute
+strength offset -- roughly the strongest band's JSR -- as context for the counting
+decision the conv branch makes. It is a presence/strength cue, not the counter.
+
 Normalization
 -------------
 Divide by the MAX of the valid entries in LINEAR, then convert to dB -- the same
@@ -76,7 +82,7 @@ DB_FLOOR = -100.0
 # Channels in the diagonal profile tensor, and length of the global vector
 # that accompanies it. Shared so train / test / score cannot disagree.
 DIAG_CHANNELS = 1          # sorted dB only
-N_GLOBAL_DIAG = 2          # [cond_db, eff_rank]
+N_GLOBAL_DIAG = 3          # [cond_db, eff_rank, diag_median_max_ratio]
 N_KEEP_DIAG = 12           # largest valid diagonal entries kept, of M=16
 
 

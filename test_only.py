@@ -210,9 +210,10 @@ def load_synthetic_file(fpath, dir_name):
             # keeps one code path for both model variants.
             diag_profile, valid_frac = diag_profile_features(
                 f['diagonal'][:], f['diag_valid_idx'][:])
-            # That variant DROPS diag_median_max_ratio with no replacement:
-            # its global vector is [cond_db, eff_rank]. valid_frac is not a
-            # model input and is deliberately unused here.
+            # That variant uses the same global vector as the benchmark,
+            # [cond_db, eff_rank, diag_median_max_ratio]; the slice below is
+            # kept so N_GLOBAL_DIAG stays the single source of truth for its
+            # width. valid_frac is not a model input and is unused here.
             diag_global = global_feat[:, :N_GLOBAL_DIAG].astype(np.float32)
         labels = f['labels'][:]
         strength_bands, metric_name = _read_strength(f)

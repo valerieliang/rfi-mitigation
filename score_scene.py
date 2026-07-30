@@ -430,10 +430,11 @@ def score_channel(raw, freq, pol, model, args):
 
     print(f"  predicting on {n_tiles} tiles ...")
     if want_diag:
-        # train_diag_profile.py drops global[:, 2] (diag_median_max_ratio) with
-        # no replacement; columns 0 and 1 (cond_db, eff_rank) are unchanged.
-        # Slice rather than mutate global_all, which is still the baseline
-        # vector saved for provenance.
+        # train_diag_profile.py uses the same global vector as the baseline,
+        # [cond_db, eff_rank, diag_median_max_ratio]. The slice is kept so
+        # N_GLOBAL_DIAG stays the single source of truth for its width, and it
+        # copies rather than mutates global_all, which is still saved for
+        # provenance.
         global_diag = global_all[:, :N_GLOBAL_DIAG].astype(np.float32)
         model_inputs = [eigen_all, diag_all, global_diag]
     else:

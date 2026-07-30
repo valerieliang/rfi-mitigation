@@ -66,7 +66,7 @@ def build_model_diag(
     cpi_size=12,
     diag_size=12,
     diag_channels=1,
-    n_global_features=2,
+    n_global_features=3,
     n_knee_classes=7,
     dropout_rate=0.6,
     learning_rate=3e-4,
@@ -83,7 +83,13 @@ def build_model_diag(
                                     descending, in dB rel. to their own max.
                                     Single channel -- no first-difference
                                     channel; the width-5 stem can learn one.
-      global_input : (n_global_features,)  [cond_db, eff_rank]
+      global_input : (n_global_features,)  [cond_db, eff_rank,
+                                    diag_median_max_ratio]
+                                    The third scalar is model.py's global feature,
+                                    kept alongside the diagonal profile: the
+                                    profile is max-normalized, so max/median is
+                                    not recoverable from it and the scalar is the
+                                    only carrier of absolute band strength.
 
     The eigenvalue branch is byte-for-byte the same topology as
     model.build_model's, so a difference in results against the benchmark is

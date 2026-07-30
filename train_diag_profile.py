@@ -1,9 +1,10 @@
 """
 train_diag_profile.py
 
-Same job as train_only.py, one feature change: the scalar
-`diag_median_max_ratio` global feature is replaced by the ENTIRE SORTED SCM
-DIAGONAL PROFILE, fed through its own conv branch (see model_diag.py).
+Same job as train_only.py, one feature change: the ENTIRE SORTED SCM DIAGONAL
+PROFILE is added on its own conv branch (see model_diag.py). The scalar
+`diag_median_max_ratio` global feature is KEPT alongside it, so the global vector
+is the benchmark's full [cond_db, eff_rank, diag_median_max_ratio].
 
 Why
 ---
@@ -22,7 +23,9 @@ Both scalars that could be built from it are structurally incapable of counting:
               measures clean-row speckle spread and nothing about RFI at all.
 
 The sorted profile has a step at index k and the network can count it, the same
-way it already finds the eigenvalue knee.
+way it already finds the eigenvalue knee. The scalar is retained because the
+profile is max-normalized: max/median cannot be recovered from it, so dropping
+the scalar would throw away the absolute-strength information the benchmark had.
 
 Why it should help at LOW JSR specifically
 ------------------------------------------
@@ -91,13 +94,12 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
     """
     Build the three input tensors.
 
-    The eigen tensor and both global features come straight from
-    train_only.features_from_eigenvalues, so they are identical to the
-    benchmark model's. Its third global column (diag_median_max_ratio) is
-    DROPPED with no replacement: the global vector is [cond_db, eff_rank].
-
-    That drops information -- the profile is max-normalized, so max/median is
-    not recoverable from it either. Deliberate; see diag_features.py.
+    The eigen tensor and all three global features come straight from
+    train_only.features_from_eigenvalues, so the global vector is identical to
+    the benchmark model's: [cond_db, eff_rank, diag_median_max_ratio]. The
+    sorted diagonal profile is ADDED on its own branch, not swapped in for the
+    third scalar -- the profile is max-normalized, so max/median is not
+    recoverable from it. See diag_features.py.
     """
     eigen, global_old = features_from_eigenvalues(
         eigvals_linear, diag_lin, diag_valid_idx)
@@ -306,8 +308,8 @@ def main():
           f"lambda_max-normalized then dB  [same as benchmark]")
     print(f"  diag features     : top {N_KEEP_DIAG} of {M} SCM diagonal entries, "
           f"valid-only, sorted descending, dB rel. max, {DIAG_CHANNELS} ch  [NEW]")
-    print(f"  global features   : [cond_db, eff_rank]   "
-          f"(diag_median_max_ratio dropped, no replacement)")
+    print(f"  global features   : [cond_db, eff_rank, diag_median_max_ratio]   "
+          f"[same as benchmark]")
     print(f"  scope             : strictly per-CPI, no cross-tile features")
     print(f"  run name          : {run_name}")
     print(f"  epochs            : {args.epochs}")
@@ -347,12 +349,11 @@ def main():
     summary = {
         'run': run_name,
         'variant': 'sorted_diag_profile',
-        'feature_change': ('replaced the scalar diag_median_max_ratio with the '
-                           f'top-{N_KEEP_DIAG} sorted valid SCM diagonal '
-                           f'profile ({N_KEEP_DIAG}, {DIAG_CHANNELS}) on its '
-                           f'own conv branch, '
-                           'max-normalized like the eigenvalues; global is '
-                           'now [cond_db, eff_rank]'),
+        'feature_change': (f'added the top-{N_KEEP_DIAG} sorted valid SCM '
+                           f'diagonal profile ({N_KEEP_DIAG}, {DIAG_CHANNELS}) '
+                           'on its own conv branch, max-normalized like the '
+                           'eigenvalues; global keeps the benchmark vector '
+                           '[cond_db, eff_rank, diag_median_max_ratio]'),
         'diag_normalization': 'divide by max valid entry (linear), then dB',
         'scope': 'per-CPI only',
         'inputs': {'eigen': [N_KEEP, 2], 'diag': [N_KEEP_DIAG, DIAG_CHANNELS],
