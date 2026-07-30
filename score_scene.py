@@ -118,7 +118,8 @@ from isce3.focus import ToneRemover
 
 # Shared with train_diag_profile.py / test_only.py: one implementation of the
 # sorted-diagonal-profile feature, so scene scoring cannot drift from training.
-from diag_features import diag_profile_features
+from diag_features import (
+    diag_profile_features, DIAG_CHANNELS, N_GLOBAL_DIAG, N_KEEP_DIAG)
 
 try:  # Prefer isce3's official caltone-frequency helper; fall back to the local copy.
     from nisar.products.readers.Raw import caltone_frequency_from_raw
@@ -356,12 +357,11 @@ def score_channel(raw, freq, pol, model, args):
 
     if want_diag:
         print(f"  model takes 3 inputs -> also building the sorted diagonal profile")
-        diag_all = np.zeros((n_tiles, M, 2), dtype=np.float32)
-        # CAREFUL: this is the fraction of valid DIAGONAL ENTRIES (n_valid / M),
-        # which is what train_diag_profile.py puts in global[:, 2]. It is NOT
-        # `valid_frac` below, which is the fraction of unmasked SAMPLES in the
-        # tile. Conflating the two would silently feed the model a feature it was
-        # never trained on.
+        diag_all = np.zeros((n_tiles, N_KEEP_DIAG, DIAG_CHANNELS), dtype=np.float32)
+        # Fraction of valid DIAGONAL ENTRIES (n_valid / M). NOT a model input --
+        # written to the predictions file as diagnostic metadata only. Distinct
+        # from `valid_frac` below, which is the fraction of unmasked SAMPLES in
+        # the tile; the two are easy to confuse and mean different things.
         diag_valid_frac = np.zeros(n_tiles, dtype=np.float32)
     else:
         diag_all = None
@@ -432,13 +432,11 @@ def score_channel(raw, freq, pol, model, args):
 
     print(f"  predicting on {n_tiles} tiles ...")
     if want_diag:
-        # train_diag_profile.py replaces global[:, 2] (diag_median_max_ratio) with
-        # the valid-diagonal fraction; columns 0 and 1 (cond_db, eff_rank) are
-        # unchanged. Rebuild rather than mutate global_all, which is still the
-        # baseline vector saved for provenance.
-        global_diag = np.stack(
-            [global_all[:, 0], global_all[:, 1], diag_valid_frac], axis=-1
-        ).astype(np.float32)
+        # train_diag_profile.py drops global[:, 2] (diag_median_max_ratio) with
+        # no replacement; columns 0 and 1 (cond_db, eff_rank) are unchanged.
+        # Slice rather than mutate global_all, which is still the baseline
+        # vector saved for provenance.
+        global_diag = global_all[:, :N_GLOBAL_DIAG].astype(np.float32)
         model_inputs = [eigen_all, diag_all, global_diag]
     else:
         model_inputs = [eigen_all, global_all]

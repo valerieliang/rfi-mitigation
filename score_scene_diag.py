@@ -11,7 +11,7 @@ The diagonal profile earned +0.76 points on low-JSR SYNTHETIC test data, and the
 reason it works is that generate_amazon_data.py places each injected band in its
 own pulse row -- which makes the label the count of elevated diagonal entries.
 That is a property of the INJECTION MODEL, not of physics. Real RFI spanning many
-pulses would elevate many rows, or all of them (vanishing under the median
+pulses would elevate many rows, or all of them (flattening the profile after max
 normalization). Whether the synthetic gain transfers to real data is exactly what
 scoring a real scene is for.
 

@@ -34,7 +34,7 @@ import warnings
 import numpy as np
 import h5py
 
-from diag_features import diag_profile_features
+from diag_features import diag_profile_features, N_GLOBAL_DIAG
 
 
 # ===========================================================================
@@ -210,11 +210,10 @@ def load_synthetic_file(fpath, dir_name):
             # keeps one code path for both model variants.
             diag_profile, valid_frac = diag_profile_features(
                 f['diagonal'][:], f['diag_valid_idx'][:])
-            # That variant swaps diag_median_max_ratio for valid_frac in the
-            # global vector; the first two columns are identical.
-            diag_global = np.stack(
-                [global_feat[:, 0], global_feat[:, 1], valid_frac], axis=-1
-            ).astype(np.float32)
+            # That variant DROPS diag_median_max_ratio with no replacement:
+            # its global vector is [cond_db, eff_rank]. valid_frac is not a
+            # model input and is deliberately unused here.
+            diag_global = global_feat[:, :N_GLOBAL_DIAG].astype(np.float32)
         labels = f['labels'][:]
         strength_bands, metric_name = _read_strength(f)
 

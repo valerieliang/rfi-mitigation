@@ -10,8 +10,8 @@ Why
 generate_amazon_data.py guarantees `label == number of distinct contaminated
 pulse rows == number of RFI eigenvalues` (bands are placed in distinct rows
 without replacement). The SCM diagonal is per-pulse-row power and keeps all 16
-entries with a validity mask, so the label is literally the count of elevated
-entries in that vector. train_only.py compresses it to one scalar.
+entries with a validity mask, so the label is the position of the step in that
+vector once it is sorted. train_only.py compresses it to one scalar.
 
 Both scalars that could be built from it are structurally incapable of counting:
 
@@ -34,7 +34,7 @@ diagonal row is still cleanly measurable.
 
 CAVEAT: one row per band is a property of the INJECTION MODEL, not of physics.
 Real RFI spanning many pulses would elevate many rows (or all of them, vanishing
-under median normalization). Validate on real scenes before trusting a gain here.
+after max normalization). Validate on real scenes before trusting a gain here.
 
 Comparability with the urClean benchmark
 ----------------------------------------
@@ -57,17 +57,17 @@ Outputs:
 import os
 import json
 import argparse
-import warnings
 
 import numpy as np
 import h5py
 import tensorflow as tf
 
 from model_diag import build_model_diag
-from diag_features import diag_profile_features
+from diag_features import (
+    diag_profile_features, DIAG_CHANNELS, N_GLOBAL_DIAG, N_KEEP_DIAG)
 from train_only import (
-    MODELS_ROOT, M, N_KEEP, N_GLOBAL, EPOCHS, BATCH_SIZE, LR, VAL_FRAC,
-    SPLIT_BUFFER_DEFAULT, EPS, DB_FLOOR, GROUP_OFFSET,
+    MODELS_ROOT, M, N_KEEP, EPOCHS, BATCH_SIZE, LR, VAL_FRAC,
+    SPLIT_BUFFER_DEFAULT, GROUP_OFFSET,
     _glob_tile_files,
     features_from_eigenvalues,
     split_train_val,
@@ -91,11 +91,13 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
     """
     Build the three input tensors.
 
-    The eigen tensor and the first two global features come straight from
-    train_only.features_from_eigenvalues, so they are identical to the benchmark
-    model's. Only its third global column (diag_median_max_ratio) is dropped --
-    no information is lost, since max/median is just profile[:, 0] of the new
-    diagonal tensor -- and replaced by valid_frac.
+    The eigen tensor and both global features come straight from
+    train_only.features_from_eigenvalues, so they are identical to the
+    benchmark model's. Its third global column (diag_median_max_ratio) is
+    DROPPED with no replacement: the global vector is [cond_db, eff_rank].
+
+    That drops information -- the profile is max-normalized, so max/median is
+    not recoverable from it either. Deliberate; see diag_features.py.
     """
     eigen, global_old = features_from_eigenvalues(
         eigvals_linear, diag_lin, diag_valid_idx)
@@ -103,9 +105,7 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
 
     eigen = np.atleast_3d(eigen) if eigen.ndim == 2 else eigen
     global_old = np.atleast_2d(global_old)
-    global_ = np.stack(
-        [global_old[:, 0], global_old[:, 1], np.atleast_1d(valid_frac)], axis=-1
-    ).astype(np.float32)
+    global_ = global_old[:, :N_GLOBAL_DIAG].astype(np.float32)
 
     return eigen, profile, global_
 
@@ -223,14 +223,15 @@ def train_model(run_name, n_classes, train_inputs, y_train, val_inputs, y_val,
     print(f"\n{'='*60}")
     print(f"Run : {run_name}")
     print(f"  train={len(y_train)}  val={len(y_val)}")
-    print(f"  eigen input : ({N_KEEP}, 2)   diag input : ({M}, 2)   "
-          f"global: ({N_GLOBAL},)   classes: {n_classes}")
+    print(f"  eigen input : ({N_KEEP}, 2)   diag input : ({N_KEEP_DIAG}, {DIAG_CHANNELS})   "
+          f"global: ({N_GLOBAL_DIAG},)   classes: {n_classes}")
     print(f"{'='*60}")
 
     model = build_model_diag(
         cpi_size=N_KEEP,
-        diag_size=M,
-        n_global_features=N_GLOBAL,
+        diag_size=N_KEEP_DIAG,
+        diag_channels=DIAG_CHANNELS,
+        n_global_features=N_GLOBAL_DIAG,
         n_knee_classes=n_classes,
         dropout_rate=dropout_rate,
         learning_rate=learning_rate,
@@ -303,10 +304,11 @@ def main():
     print(f"  train region(s)   : {', '.join(args.data_dir)}")
     print(f"  eigen features    : top {N_KEEP} of {M} eigenvalues, "
           f"lambda_max-normalized then dB  [same as benchmark]")
-    print(f"  diag features     : all {M} SCM diagonal entries, valid-only, sorted "
-          f"descending, dB rel. median  [NEW]")
-    print(f"  global features   : [cond_db, eff_rank, valid_frac]   "
-          f"(diag_median_max_ratio removed -- now profile[0])")
+    print(f"  diag features     : top {N_KEEP_DIAG} of {M} SCM diagonal entries, "
+          f"valid-only, sorted descending, dB rel. max, {DIAG_CHANNELS} ch  [NEW]")
+    print(f"  global features   : [cond_db, eff_rank]   "
+          f"(diag_median_max_ratio dropped, no replacement)")
+    print(f"  scope             : strictly per-CPI, no cross-tile features")
     print(f"  run name          : {run_name}")
     print(f"  epochs            : {args.epochs}")
     print(f"  batch size        : {args.batch_size}")
@@ -346,10 +348,15 @@ def main():
         'run': run_name,
         'variant': 'sorted_diag_profile',
         'feature_change': ('replaced the scalar diag_median_max_ratio with the '
-                           f'full sorted valid SCM diagonal profile ({M}, 2) on '
-                           'its own conv branch; global is now '
-                           '[cond_db, eff_rank, valid_frac]'),
-        'inputs': {'eigen': [N_KEEP, 2], 'diag': [M, 2], 'global': [N_GLOBAL]},
+                           f'top-{N_KEEP_DIAG} sorted valid SCM diagonal '
+                           f'profile ({N_KEEP_DIAG}, {DIAG_CHANNELS}) on its '
+                           f'own conv branch, '
+                           'max-normalized like the eigenvalues; global is '
+                           'now [cond_db, eff_rank]'),
+        'diag_normalization': 'divide by max valid entry (linear), then dB',
+        'scope': 'per-CPI only',
+        'inputs': {'eigen': [N_KEEP, 2], 'diag': [N_KEEP_DIAG, DIAG_CHANNELS],
+                   'global': [N_GLOBAL_DIAG]},
         'n_train': int(len(idx_train)),
         'n_val': int(len(idx_val)),
         'n_classes': n_classes,

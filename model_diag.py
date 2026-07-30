@@ -9,14 +9,14 @@ Why a third branch and not extra channels on the eigenvalue branch
 The two profiles live in different spaces and have different lengths:
 
   eigenvalues  12 values, MODE space,  normalized by lambda_max
-  diagonal     16 values, PULSE space, normalized by its own median
+  diagonal     12 values, PULSE space, normalized by its own max
 
 Stacking them as channels of one tensor would force index j of the eigenvalue
-profile to align with index j of the diagonal profile. Those indices are not the
-same physical quantity, and it would also mean padding the 12-long eigenvalue
-profile out to 16 -- injecting a fake cliff at index 12 that the conv would
-happily learn as structure. A separate stack per profile avoids both problems and
-costs only a concatenate in the fusion head.
+profile to align with index j of the diagonal profile. Both are length 12, so
+they would stack -- but index j of a sorted MODE spectrum and index j of a sorted
+PULSE-power spectrum are not the same physical quantity, and they carry different
+noise statistics. A separate stack per profile keeps them independent and costs
+only a concatenate in the fusion head.
 
 Why global average pooling is the right head for this
 -----------------------------------------------------
@@ -64,8 +64,9 @@ def _profile_branch(inputs, filters, name):
 
 def build_model_diag(
     cpi_size=12,
-    diag_size=16,
-    n_global_features=3,
+    diag_size=12,
+    diag_channels=1,
+    n_global_features=2,
     n_knee_classes=7,
     dropout_rate=0.6,
     learning_rate=3e-4,
@@ -78,9 +79,11 @@ def build_model_diag(
 
     Inputs (ORDER MATTERS for fit/predict -- [eigen, diag, global]):
       eigen_input  : (cpi_size, 2)  [ev_db normalized by lambda_max, first diff]
-      diag_input   : (diag_size, 2) [sorted diag in dB rel. to its own median,
-                                     first diff]
-      global_input : (n_global_features,)
+      diag_input   : (diag_size, 1) 12 largest valid diagonal entries, sorted
+                                    descending, in dB rel. to their own max.
+                                    Single channel -- no first-difference
+                                    channel; the width-5 stem can learn one.
+      global_input : (n_global_features,)  [cond_db, eff_rank]
 
     The eigenvalue branch is byte-for-byte the same topology as
     model.build_model's, so a difference in results against the benchmark is
@@ -91,7 +94,7 @@ def build_model_diag(
     eigen_inputs = Input(shape=(cpi_size, 2), name='eigen_input')
     x = _profile_branch(eigen_inputs, eigen_filters, 'eigen')
 
-    diag_inputs = Input(shape=(diag_size, 2), name='diag_input')
+    diag_inputs = Input(shape=(diag_size, diag_channels), name='diag_input')
     d = _profile_branch(diag_inputs, diag_filters, 'diag')
 
     global_inputs = Input(shape=(n_global_features,), name='global_input')
