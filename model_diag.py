@@ -83,8 +83,7 @@ def build_model_diag(
                                     descending, in dB rel. to their own max.
                                     Single channel -- no first-difference
                                     channel; the width-5 stem can learn one.
-      global_input : (n_global_features,)  [cond_db, eff_rank,
-                                    diag_median_max_ratio]
+      global_input : (n_global_features,)  [cond_db, eff_rank, diag_median_max_ratio]
                                     The third scalar is model.py's global feature,
                                     kept alongside the diagonal profile: the
                                     profile is max-normalized, so max/median is
