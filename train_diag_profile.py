@@ -64,6 +64,7 @@ import h5py
 import tensorflow as tf
 
 from model_diag import build_model_diag
+from diag_features import diag_profile_features
 from train_only import (
     MODELS_ROOT, M, N_KEEP, N_GLOBAL, EPOCHS, BATCH_SIZE, LR, VAL_FRAC,
     SPLIT_BUFFER_DEFAULT, EPS, DB_FLOOR, GROUP_OFFSET,
@@ -80,74 +81,11 @@ BENCHMARK_DIRS = ['data/czech_contam', 'data/amazon_contam', 'data/berlin_clean'
 
 
 # ---------------------------------------------------------------------------
-# DIAGONAL PROFILE FEATURE
+# FEATURE ASSEMBLY
+#
+# diag_profile_features lives in diag_features.py so test_only.py can import the
+# exact same implementation without pulling in TensorFlow.
 # ---------------------------------------------------------------------------
-
-def diag_profile_features(diag_lin, diag_valid_idx):
-    """
-    Sorted valid SCM diagonal profile, in dB relative to its own median.
-
-    Returns (profile, valid_frac):
-      profile    (N, M, 2) float32 -- [sorted_db, first_diff], descending
-      valid_frac (N,)      float32 -- fraction of the M entries that were valid
-
-    Normalization is by the MEDIAN of the valid entries, not the max. With
-    max_bands=6 out of M=16 rows, the median is always inside the clean group, so
-    it is a robust estimate of the uncontaminated pulse power. Entries above it
-    come out POSITIVE in dB and entries at the floor come out near 0, which puts
-    the step the network has to count right at the 0 dB crossing.
-
-    Invalid entries are excluded from the sort and the median, then the tail is
-    padded by repeating the last valid value. Padding with DB_FLOOR instead would
-    manufacture a cliff at index n_valid that tracks validity rather than RFI --
-    exactly the kind of spurious structure a conv will latch onto. `valid_frac`
-    is handed to the global branch so the network can discount short profiles.
-    """
-    single = (np.asarray(diag_lin).ndim == 1)
-    diag = np.atleast_2d(np.asarray(diag_lin, dtype=np.float64))
-    valid = np.atleast_2d(np.asarray(diag_valid_idx, dtype=bool))
-
-    n, m = diag.shape
-    n_valid = valid.sum(axis=1)
-    rows = np.arange(n)
-
-    # Sort descending with invalid entries forced to the back.
-    keyed = np.where(valid, diag, -np.inf)
-    order = np.argsort(-keyed, axis=1, kind='stable')
-    srt = np.take_along_axis(keyed, order, axis=1)
-
-    # Repeat the last valid value across the invalid tail.
-    last_valid = srt[rows, np.maximum(n_valid - 1, 0)]
-    pad = np.arange(m)[None, :] >= n_valid[:, None]
-    srt = np.where(pad, last_valid[:, None], srt)
-
-    # Median over valid entries only. All-invalid rows warn and return NaN;
-    # NaN is the correct answer there and the `dead` mask below handles it.
-    masked = np.where(valid, diag, np.nan)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', category=RuntimeWarning)
-        med = np.nanmedian(masked, axis=1)
-    med = np.where(np.isfinite(med), med, 0.0)
-
-    # Rows with nothing valid (or a non-positive median) carry no information:
-    # emit a flat zero profile rather than propagating inf/nan into the graph.
-    dead = (n_valid == 0) | ~(med > 0)
-
-    ratio = np.maximum(srt, EPS) / np.maximum(med, EPS)[:, None]
-    prof_db = 10.0 * np.log10(np.maximum(ratio, EPS))
-    prof_db = np.maximum(prof_db, DB_FLOOR)
-    prof_db = np.where(dead[:, None], 0.0, prof_db)
-
-    slopes = np.diff(prof_db, axis=1)
-    slopes = np.concatenate([slopes, np.zeros((n, 1))], axis=1)
-
-    profile = np.stack([prof_db, slopes], axis=-1).astype(np.float32)
-    valid_frac = (n_valid / float(m)).astype(np.float32)
-
-    if single:
-        return profile[0], valid_frac[0]
-    return profile, valid_frac
-
 
 def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
     """

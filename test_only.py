@@ -34,6 +34,8 @@ import warnings
 import numpy as np
 import h5py
 
+from diag_features import diag_profile_features
+
 
 # ===========================================================================
 # CONSTANTS
@@ -190,9 +192,12 @@ def load_synthetic_file(fpath, dir_name):
     once they become plot filenames.
     """
     stem = os.path.splitext(os.path.basename(fpath))[0]
+    diag_profile, diag_global = None, None
     with h5py.File(fpath, 'r') as f:
         if 'eigen_features' in f:
-            # Preprocessed features, already model-ready.
+            # Preprocessed features, already model-ready. No raw diagonal here,
+            # so a three-input model cannot be scored on this file; the check in
+            # combined_synthetic_test reports that rather than failing obscurely.
             eigen = f['eigen_features'][:]
             global_feat = f['global_features'][:]
         else:
@@ -200,6 +205,16 @@ def load_synthetic_file(fpath, dir_name):
             eigen, global_feat = features_from_eigenvalues(
                 f['eigenvalues'][:], f['diagonal'][:], f['diag_valid_idx'][:]
             )
+            # Also build the sorted-diagonal-profile inputs, for models trained
+            # by train_diag_profile.py. Cheap relative to the h5 read, and it
+            # keeps one code path for both model variants.
+            diag_profile, valid_frac = diag_profile_features(
+                f['diagonal'][:], f['diag_valid_idx'][:])
+            # That variant swaps diag_median_max_ratio for valid_frac in the
+            # global vector; the first two columns are identical.
+            diag_global = np.stack(
+                [global_feat[:, 0], global_feat[:, 1], valid_frac], axis=-1
+            ).astype(np.float32)
         labels = f['labels'][:]
         strength_bands, metric_name = _read_strength(f)
 
@@ -208,6 +223,8 @@ def load_synthetic_file(fpath, dir_name):
     return {
         'eigen': eigen,
         'global': global_feat,
+        'diag': diag_profile,
+        'global_diag': diag_global,
         'labels': labels,
         'jsr_db': strength_max,      # kept under the old key for compatibility
         'jsr_max': strength_max,
@@ -249,6 +266,13 @@ def load_synthetic_data(data_dir):
     global_feat = np.concatenate([fd['global'] for fd in files], axis=0)
     labels = np.concatenate([fd['labels'] for fd in files], axis=0)
 
+    # Diagonal-profile inputs, only if EVERY file in the directory has them.
+    if all(fd['diag'] is not None for fd in files):
+        diag = np.concatenate([fd['diag'] for fd in files], axis=0)
+        global_diag = np.concatenate([fd['global_diag'] for fd in files], axis=0)
+    else:
+        diag, global_diag = None, None
+
     # Pool the strength axis only if every file in the directory has it AND
     # they all recorded the same quantity. Mixed units get dropped rather than
     # silently plotted on a shared axis.
@@ -263,6 +287,8 @@ def load_synthetic_data(data_dir):
     return {
         'eigen': eigen,
         'global': global_feat,
+        'diag': diag,
+        'global_diag': global_diag,
         'labels': labels,
         'jsr_db': jsr_max,
         'jsr_max': jsr_max,
@@ -329,9 +355,36 @@ def combined_synthetic_test(model, data_dirs, args):
         print(f"  {d['source']}: {len(d['labels'])} samples "
               f"({len(d['files'])} file(s))")
 
+    # Pick the input set from the model's arity. Two inputs = the [eigen, global]
+    # models from model.py; three = the [eigen, diag, global] models from
+    # model_diag.py. The order here must match build_model_diag's Input order.
+    n_model_inputs = len(model.inputs)
+    if n_model_inputs == 3:
+        missing = [d['source'] for d in all_data if d['diag'] is None]
+        if missing:
+            raise ValueError(
+                f"Model takes 3 inputs (sorted diagonal profile), but these test "
+                f"directories carry no raw 'diagonal' dataset to build it from: "
+                f"{', '.join(missing)}. Preprocessed 'eigen_features' files cannot "
+                f"be used with this model variant; regenerate them with raw "
+                f"eigenvalues + diagonal."
+            )
+        diag_all = np.concatenate([d['diag'] for d in all_data])
+        global_all = np.concatenate([d['global_diag'] for d in all_data])
+        model_inputs = [eigen_all, diag_all, global_all]
+        print(f"\n  model inputs: eigen {eigen_all.shape}, diag {diag_all.shape}, "
+              f"global {global_all.shape}  [sorted diagonal profile variant]")
+    elif n_model_inputs == 2:
+        model_inputs = [eigen_all, global_all]
+        print(f"\n  model inputs: eigen {eigen_all.shape}, "
+              f"global {global_all.shape}  [baseline variant]")
+    else:
+        raise ValueError(f"Unsupported model with {n_model_inputs} inputs; "
+                         f"expected 2 (baseline) or 3 (diagonal profile).")
+
     # Predict
     print("\nPredicting...")
-    probs = model.predict([eigen_all, global_all], batch_size=args.batch_size, verbose=1)
+    probs = model.predict(model_inputs, batch_size=args.batch_size, verbose=1)
     preds = np.argmax(probs, axis=-1)
     confidence = np.max(probs, axis=-1)
 
