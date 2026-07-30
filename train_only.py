@@ -60,13 +60,20 @@ VAL_FRAC = 0.15        # of the training region
 # steps by cpi_len (= M = 16 pulses) -- so one unit is one full CPI row across
 # range, and this default is 128 * 16 = 2048 pulses of separation on each side.
 #
-# 8 was too narrow. Adjacent CPI rows see the same terrain, emitters and
-# geometry, so a val block starting ~128 pulses after the train block behaves
-# like a near-duplicate of it: incremental training measured +1.94 pts on the
-# amz_low_jsr val split but only +0.33 pts on independent test scenes. Widening
-# this costs ~5% of the tiles in the smallest source and buys a val metric that
-# tracks generalization instead of memorization.
-SPLIT_BUFFER_DEFAULT = 128
+# Kept at 8 after testing 128. The motivation for widening was that incremental
+# training measured +1.94 pts on the amz_low_jsr val split but only +0.33 pts on
+# independent test scenes, which looked like adjacency leakage. It is not:
+# holding the model fixed and moving the val block 128 rows (2048 pulses) gave
+# the same accuracy to within 0.0002 (0.8445 -> 0.8443), i.e. the acquisition is
+# homogeneous and any within-acquisition split reports the same number. The
+# val/test gap is a population difference between data/amz_low_jsr/ (bands 1..6,
+# no clean tiles) and data/amazon_test_low_jsr/, not leakage.
+#
+# So a wider buffer only deletes training data. At 128 it cost 22,080 low-JSR
+# tiles and moved test low-JSR accuracy 88.55% -> 88.38%. Generalization for a
+# given region can only be measured on a DIFFERENT acquisition -- use
+# test_only.py against a held-out scene, not this split.
+SPLIT_BUFFER_DEFAULT = 8
 
 EPS = 1e-12
 DB_FLOOR = -100.0      # floor for dB values
