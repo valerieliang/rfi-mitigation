@@ -7,6 +7,12 @@ Loads training data from --data-dir (can combine Amazon and mountain datasets),
 splits into train/val, trains the model, and saves it. Does NOT run any test
 evaluations - use test_only.py for that.
 
+Trains a FRESH model only. To continue training an existing checkpoint on data
+it has not seen, use train_incremental.py, which imports the data path from this
+module but declares old vs new sources explicitly, rebalances the loss so the new
+data is not drowned out by the already-fit old data, and reports per-source
+validation metrics.
+
 Usage:
     python train_only.py \
         --data-dir data/amazon_train data/mountain_train \
@@ -420,16 +426,14 @@ def train_model(run_name, n_classes,
                 eigen_train, global_train, y_train,
                 eigen_val, global_val, y_val,
                 epochs, batch_size, learning_rate, dropout_rate, weight_decay,
-                model_path_in=None, models_root=MODELS_ROOT):
+                models_root=MODELS_ROOT):
     """
-    Build (or load) and train the model on the training region, validating on
-    the held-out pulse-tile block of that same region.
+    Build and train the model on the training region, validating on the held-out
+    pulse-tile block of that same region.
 
-    model_path_in : str or None
-        If given, continue training from this existing .keras model instead
-        of building a fresh one. The optimizer is rebuilt from the current
-        --learning-rate/--weight-decay so the LR schedule and decay restart
-        cleanly rather than resuming whatever state was saved with the model.
+    Fresh training only. To continue training an existing checkpoint on new
+    regions, use train_incremental.py -- it declares old vs new data explicitly
+    and rebalances the loss so the new data is not drowned out.
 
     Returns:
         model, out_dir
@@ -444,29 +448,14 @@ def train_model(run_name, n_classes,
     print(f"  eigen input : ({N_KEEP}, 2)   global: ({N_GLOBAL},)   classes: {n_classes}")
     print(f"{'='*60}")
 
-    if model_path_in is not None:
-        print(f"Loading existing model: {model_path_in}")
-        model = tf.keras.models.load_model(model_path_in)
-        model.compile(
-            optimizer=tf.keras.optimizers.AdamW(
-                learning_rate=learning_rate,
-                weight_decay=weight_decay,
-            ),
-            loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-            metrics=[
-                tf.keras.metrics.SparseCategoricalAccuracy(name='acc'),
-                tf.keras.metrics.SparseTopKCategoricalAccuracy(k=2, name='top2_acc'),
-            ],
-        )
-    else:
-        model = build_model(
-            cpi_size=N_KEEP,
-            n_global_features=N_GLOBAL,
-            n_knee_classes=n_classes,
-            dropout_rate=dropout_rate,
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-        )
+    model = build_model(
+        cpi_size=N_KEEP,
+        n_global_features=N_GLOBAL,
+        n_knee_classes=n_classes,
+        dropout_rate=dropout_rate,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+    )
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -532,12 +521,26 @@ def parse_args():
                         help='Initial learning rate.')
     parser.add_argument('--dropout-rate', type=float, default=0.6,
                         help='Dropout rate in the fusion head.')
-    parser.add_argument('--model', type=str, default=None,
-                        help='Existing .keras model to continue training from, '
-                             'instead of building a fresh one.')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
                         help='L2 regularization strength (AdamW weight decay).')
-    return parser.parse_args()
+    # Retired flag. Kept declared (not silently dropped) for two reasons: it
+    # gives a pointer instead of a confusing failure, and without it argparse
+    # prefix-matches '--model' onto '--models-root', which is what produced the
+    # 'FileExistsError: models/<run>/best_model.keras' from os.makedirs.
+    parser.add_argument('--model', type=str, default=None,
+                        help=argparse.SUPPRESS)
+
+    args = parser.parse_args()
+    if args.model is not None:
+        parser.error(
+            'train_only.py no longer continues training from a checkpoint. '
+            'Use train_incremental.py, which declares old vs new data '
+            'explicitly and rebalances the loss:\n'
+            f'  python train_incremental.py --model {args.model} \\\n'
+            '      --old-data-dir <dirs the model already saw> \\\n'
+            '      --new-data-dir <dirs it has not seen> --run-name <name>'
+        )
+    return args
 
 
 def main():
@@ -595,8 +598,7 @@ def main():
         train_data['labels'][idx_val],
         epochs=args.epochs, batch_size=args.batch_size,
         learning_rate=args.learning_rate, dropout_rate=args.dropout_rate,
-        weight_decay=args.weight_decay,
-        model_path_in=args.model, models_root=args.models_root,
+        weight_decay=args.weight_decay, models_root=args.models_root,
     )
 
     # Save training summary
