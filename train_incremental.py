@@ -655,13 +655,16 @@ def main():
     callbacks = [
         per_source,
         checkpoint,
+        # mode='min' is required, not optional: Keras 3 infers the direction from
+        # a table of known metric names, and 'val_new_loss' is a custom key
+        # injected by PerSourceVal, so inference fails with a ValueError.
         tf.keras.callbacks.EarlyStopping(
-            monitor='val_new_loss', patience=args.patience,
+            monitor='val_new_loss', mode='min', patience=args.patience,
             restore_best_weights=False, verbose=1,
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
-            monitor='val_new_loss', factor=0.5, patience=args.lr_patience,
-            min_lr=1e-6, verbose=1,
+            monitor='val_new_loss', mode='min', factor=0.5,
+            patience=args.lr_patience, min_lr=1e-6, verbose=1,
         ),
     ]
 
