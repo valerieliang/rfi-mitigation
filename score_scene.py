@@ -116,6 +116,10 @@ from read_nisar_isce3 import (
 from nisar.products.readers.Raw import Raw
 from isce3.focus import ToneRemover
 
+# Shared with train_diag_profile.py / test_only.py: one implementation of the
+# sorted-diagonal-profile feature, so scene scoring cannot drift from training.
+from diag_features import diag_profile_features
+
 try:  # Prefer isce3's official caltone-frequency helper; fall back to the local copy.
     from nisar.products.readers.Raw import caltone_frequency_from_raw
 except ImportError:
@@ -333,6 +337,15 @@ def score_channel(raw, freq, pol, model, args):
         remover = None
         print("  caltone removal OFF")
 
+    # Two inputs = the [eigen, global] models from model.py; three = the
+    # [eigen, diag, global] models from model_diag.py, which additionally consume
+    # the sorted SCM diagonal profile. Decided once per channel so the per-tile
+    # loop stays cheap and baseline runs allocate nothing extra.
+    want_diag = (len(model.inputs) == 3)
+    if len(model.inputs) not in (2, 3):
+        raise ValueError(f"Unsupported model with {len(model.inputs)} inputs; "
+                         f"expected 2 (baseline) or 3 (diagonal profile).")
+
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
     global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)   # linear, descending
@@ -340,6 +353,19 @@ def score_channel(raw, freq, pol, model, args):
     valid_frac = np.zeros(n_tiles, dtype=np.float32)
     tile_pulse = np.zeros(n_tiles, dtype=np.int32)
     tile_range = np.zeros(n_tiles, dtype=np.int32)
+
+    if want_diag:
+        print(f"  model takes 3 inputs -> also building the sorted diagonal profile")
+        diag_all = np.zeros((n_tiles, M, 2), dtype=np.float32)
+        # CAREFUL: this is the fraction of valid DIAGONAL ENTRIES (n_valid / M),
+        # which is what train_diag_profile.py puts in global[:, 2]. It is NOT
+        # `valid_frac` below, which is the fraction of unmasked SAMPLES in the
+        # tile. Conflating the two would silently feed the model a feature it was
+        # never trained on.
+        diag_valid_frac = np.zeros(n_tiles, dtype=np.float32)
+    else:
+        diag_all = None
+        diag_valid_frac = None
 
     chunk_tiles = max(1, args.pulse_chunk // cpi_len)
     k = 0
@@ -390,6 +416,10 @@ def score_channel(raw, freq, pol, model, args):
                 eigen_all[k], global_all[k] = features_from_eigenvalues(
                     eigvals, diag_lin, diag_valid
                 )
+                if want_diag:
+                    diag_all[k], diag_valid_frac[k] = diag_profile_features(
+                        diag_lin, diag_valid
+                    )
                 eigvals_all[k] = eigvals
                 power_db[k] = 10.0 * np.log10(tile_signal_power(cpi, cpi_mask))
                 valid_frac[k] = (float(cpi_mask.sum()) / cpi_mask.size
@@ -401,8 +431,19 @@ def score_channel(raw, freq, pol, model, args):
         print(f"    pulse tiles {chunk_start + n_here}/{n_pt}")
 
     print(f"  predicting on {n_tiles} tiles ...")
-    probs = model.predict([eigen_all, global_all],
-                          batch_size=args.batch_size, verbose=0)
+    if want_diag:
+        # train_diag_profile.py replaces global[:, 2] (diag_median_max_ratio) with
+        # the valid-diagonal fraction; columns 0 and 1 (cond_db, eff_rank) are
+        # unchanged. Rebuild rather than mutate global_all, which is still the
+        # baseline vector saved for provenance.
+        global_diag = np.stack(
+            [global_all[:, 0], global_all[:, 1], diag_valid_frac], axis=-1
+        ).astype(np.float32)
+        model_inputs = [eigen_all, diag_all, global_diag]
+    else:
+        model_inputs = [eigen_all, global_all]
+
+    probs = model.predict(model_inputs, batch_size=args.batch_size, verbose=0)
 
     knee = np.argmax(probs, axis=-1).astype(np.int8)
     confidence = np.max(probs, axis=-1).astype(np.float32)
@@ -412,6 +453,7 @@ def score_channel(raw, freq, pol, model, args):
         'freq': freq, 'pol': pol, 'chan': f'{freq}-{pol}',
         'knee': knee, 'confidence': confidence, 'entropy': entropy,
         'eigvals': eigvals_all, 'power_db': power_db, 'valid_frac': valid_frac,
+        'diag_profile': diag_all, 'diag_valid_frac': diag_valid_frac,
         'tile_pulse': tile_pulse, 'tile_range': tile_range,
         'n_pt': n_pt, 'n_rt': n_rt,
         'pulse_window': [p_start, p_end], 'range_window': [r_start, r_end],
@@ -452,6 +494,15 @@ def save_predictions_h5(rec, args, out_dir):
         f.create_dataset('valid_fraction', data=rec['valid_frac'])
         f.create_dataset('tile_pulse', data=rec['tile_pulse'])
         f.create_dataset('tile_range', data=rec['tile_range'])
+
+        # Only present for 3-input models. Recorded so a flagged tile's diagonal
+        # profile can be re-examined without re-reading the granule, exactly as
+        # 'eigenvalues' allows for the eigenvalue profile.
+        f.attrs['diag_profile_used'] = bool(rec.get('diag_profile') is not None)
+        if rec.get('diag_profile') is not None:
+            f.create_dataset('diag_profile', data=rec['diag_profile'],
+                             compression='gzip')
+            f.create_dataset('diag_valid_fraction', data=rec['diag_valid_frac'])
 
     print(f"  Saved {path}")
 
