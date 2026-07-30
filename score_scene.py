@@ -66,7 +66,6 @@ Usage
     python score_scene.py \\
         /scratch/bohuang/rfi/la/NISAR_L0_PR_RRSD_006_112_D_197S_20251006T024004_20251006T024139_P00410_F_J_001.h5 \\
         --model models/rfi_train/best_model.keras \\
-        --compute-subswath-mask \\
         --off-diag-overlap-ratio 0.03 --diag-valid-ratio 0.02 \\
         --output-dir results/la_scene
 
@@ -76,7 +75,6 @@ Usage
         --model models/rfi_train/best_model.keras \\
         --pulse-start 46528 --pulse-end 124580 \\
         --range-start 0 --range-end 25600 \\
-        --compute-subswath-mask \\
         --off-diag-overlap-ratio 0.03 --diag-valid-ratio 0.02 \\
         --output-dir results/la_scene
 
@@ -1056,9 +1054,20 @@ def parse_args():
                         action='store_false',
                         help='Leave the caltone in the raw data (legacy behavior).')
 
-    parser.add_argument('--compute-subswath-mask', action='store_true',
+    # Paired flag, same shape as --remove-caltone above. Defaults ON: the tile
+    # generators are run with gap exclusion, and a mismatch here corrupts the SCM
+    # diagonal rows that fall in a transmit gap -- which reads as "some pulse rows
+    # are elevated", exactly the signature the diagonal branch keys on. Silent and
+    # damaging, so the safe setting is the default.
+    parser.add_argument('--compute-subswath-mask', dest='compute_subswath_mask',
+                        action='store_true', default=True,
                         help='Gap-exclusion SCM via ISCE3 subswaths. Must match how '
-                             'the training data was generated.')
+                             'the training data was generated (default: on).')
+    parser.add_argument('--no-compute-subswath-mask', dest='compute_subswath_mask',
+                        action='store_false',
+                        help='Plain SCM with no gap exclusion (legacy behavior). '
+                             'Only correct if the training tiles were generated '
+                             'without --compute-subswath-mask.')
     parser.add_argument('--off-diag-overlap-ratio', type=float,
                         default=OFF_DIAG_OVERLAP_RATIO_DEFAULT)
     parser.add_argument('--diag-valid-ratio', type=float,
