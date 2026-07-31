@@ -1,0 +1,96 @@
+{
+  "granule": "NISAR_L0_PR_RRSD_006_091_A_156S_20251128T115759_20251128T120946_X05008_N_J_001.h5",
+  "model": "models/urClean_mtnContam_amzContam_lowjsr/best_model.keras",
+  "labeled": false,
+  "pulse_window": [
+    968193,
+    1040337
+  ],
+  "range_window": [
+    0,
+    55750
+  ],
+  "n_keep": 12,
+  "gap_exclusion_used": true,
+  "off_diag_overlap_ratio": 0.25,
+  "diag_valid_ratio": 0.2,
+  "channels": {
+    "A-HH": {
+      "n_tiles": 1005507,
+      "flagged": 162465,
+      "flagged_fraction": 0.16157520534416966,
+      "prediction_distribution": {
+        "0": 843042,
+        "1": 129521,
+        "2": 25725,
+        "3": 4388,
+        "4": 451,
+        "5": 2288,
+        "6": 92
+      },
+      "mean_confidence": 0.9177471399307251,
+      "mean_confidence_flagged": 0.8437920212745667,
+      "mean_confidence_clean": 0.9319994449615479,
+      "knee_vs_power_correlation": 0.049884717139387344,
+      "range_columns_flagged_over_half": [
+        33,
+        204
+      ],
+      "n_range_tiles": 223,
+      "max_slowtime_block_flag_rate": 0.9372197309417041
+    },
+    "A-HV": {
+      "n_tiles": 1005507,
+      "flagged": 350199,
+      "flagged_fraction": 0.3482810164424514,
+      "prediction_distribution": {
+        "0": 655308,
+        "1": 247555,
+        "2": 90125,
+        "3": 9364,
+        "4": 898,
+        "5": 2207,
+        "6": 50
+      },
+      "mean_confidence": 0.931023359298706,
+      "mean_confidence_flagged": 0.8427644968032837,
+      "mean_confidence_clean": 0.9781892895698547,
+      "knee_vs_power_correlation": 0.13155425380279442,
+      "range_columns_flagged_over_half": [
+        14,
+        19,
+        33,
+        38,
+        67,
+        70,
+        71,
+        83,
+        90,
+        93,
+        102,
+        106,
+        107,
+        108,
+        109,
+        111,
+        114,
+        118,
+        119,
+        121,
+        159,
+        166,
+        171,
+        175,
+        178,
+        185,
+        190,
+        196,
+        197,
+        204,
+        216
+      ],
+      "n_range_tiles": 223,
+      "max_slowtime_block_flag_rate": 0.9417040358744395
+    }
+  }
+}
