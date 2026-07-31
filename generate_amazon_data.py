@@ -871,7 +871,14 @@ def generate_dataset(raw, freq, pol, args, out_dir):
     """
     cpi_len = args.cpi_len
     cpi_width = args.cpi_width
-    max_bands = args.max_bands
+
+    # Width of the per-band columns (jsr_db, band_rows). Normally max_bands, but
+    # a clean-only set (--max-bands 0) would ask HDF5 for a zero-wide chunk,
+    # which it rejects. Keep one all-padding column instead: an all-NaN jsr_db
+    # row and an all -1 band_rows row is already the documented encoding for a
+    # clean tile, so readers need no special case and the file stays uniform
+    # with every other set. f.attrs['max_bands'] still records the real 0.
+    band_cols = max(args.max_bands, 1)
 
     dataset = raw.getRawDataset(freq, pol)
     total_pulses, total_range = dataset.shape
@@ -912,7 +919,7 @@ def generate_dataset(raw, freq, pol, args, out_dir):
         if caltone_freq is not None:
             f.attrs['caltone_freq_hz'] = float(caltone_freq)
             f.attrs['caltone_window_size'] = CALTONE_WINDOW_SIZE
-        writer = TileWriter(f, cpi_len, cpi_width, max_bands, args.save_cpi)
+        writer = TileWriter(f, cpi_len, cpi_width, band_cols, args.save_cpi)
 
         for chunk_start_tile in range(0, n_pulse_tiles, chunk_tiles):
             n_tiles_here = min(chunk_tiles, n_pulse_tiles - chunk_start_tile)
@@ -949,8 +956,8 @@ def generate_dataset(raw, freq, pol, args, out_dir):
 
             n_batch = n_tiles_here * n_range_tiles
             b_labels = np.zeros(n_batch, dtype=np.int8)
-            b_jsr = np.full((n_batch, max_bands), np.nan, dtype=np.float32)
-            b_rows = np.full((n_batch, max_bands), -1, dtype=np.int8)
+            b_jsr = np.full((n_batch, band_cols), np.nan, dtype=np.float32)
+            b_rows = np.full((n_batch, band_cols), -1, dtype=np.int8)
             b_eigs = np.zeros((n_batch, cpi_len), dtype=np.float32)
             b_diag = np.zeros((n_batch, cpi_len), dtype=np.float32)
             b_diag_valid = np.zeros((n_batch, cpi_len), dtype=bool)
@@ -1023,7 +1030,8 @@ def generate_dataset(raw, freq, pol, args, out_dir):
         f.attrs['label_histogram'] = json.dumps(hist)
         f.attrs['n_records'] = writer.n
 
-    report_text, _ = format_class_distribution(knee_counts, max_bands + 1)
+    # The real label space, not band_cols: a clean-only set has exactly one class.
+    report_text, _ = format_class_distribution(knee_counts, args.max_bands + 1)
     print(report_text)
 
     return knee_counts, out_path
