@@ -31,6 +31,14 @@ stream after the granule has already been read.
 Comparing two models is a separate, explicit step -- run this per model, then
 diff_predictions.py on the resulting predictions_<freq>_<pol>.h5 files.
 
+Frequency default
+-----------------
+score_scene.py defaults --freq to "every frequency in the granule". Here the
+default is frequency A only. The diagonal branch is being evaluated against
+A-band baselines, and silently pulling in a B channel would add per-channel
+outputs that have nothing to diff against while roughly doubling the runtime.
+Pass --freq B explicitly to score B.
+
 Usage
 -----
     python score_scene_diag.py /path/to/NISAR_L0_..._001.h5 \\
@@ -44,7 +52,20 @@ import sys
 import score_scene
 
 
+def _default_freq_a():
+    """Inject --freq A into argv unless the caller already chose a frequency.
+
+    score_scene.main() re-parses sys.argv rather than taking an args object, so
+    the default has to live in argv for both parses to agree. Mutating argv
+    before either parse is what keeps them consistent.
+    """
+    if any(a == '--freq' or a.startswith('--freq=') for a in sys.argv[1:]):
+        return
+    sys.argv.extend(['--freq', 'A'])
+
+
 def main():
+    _default_freq_a()
     args = score_scene.parse_args()
 
     import tensorflow as tf
