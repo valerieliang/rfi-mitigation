@@ -1,0 +1,70 @@
+{
+  "granule": "NISAR_L0_PR_RRSD_006_091_A_156S_20251128T115759_20251128T120946_X05008_N_J_001.h5",
+  "model": "models/model_new_globals_baseline/best_model.keras",
+  "labeled": false,
+  "pulse_window": [
+    968193,
+    1040337
+  ],
+  "range_window": [
+    0,
+    55750
+  ],
+  "n_keep": 12,
+  "gap_exclusion_used": true,
+  "off_diag_overlap_ratio": 0.25,
+  "diag_valid_ratio": 0.2,
+  "channels": {
+    "A-HH": {
+      "n_tiles": 1005507,
+      "flagged": 122855,
+      "flagged_fraction": 0.12218214293883584,
+      "prediction_distribution": {
+        "0": 882652,
+        "1": 95300,
+        "2": 23974,
+        "3": 2988,
+        "4": 453,
+        "5": 91,
+        "6": 49
+      },
+      "mean_confidence": 0.9454888105392456,
+      "mean_confidence_flagged": 0.8759809732437134,
+      "mean_confidence_clean": 0.9551632404327393,
+      "knee_vs_power_correlation": 0.09048542204901969,
+      "range_columns_flagged_over_half": [],
+      "n_range_tiles": 223,
+      "max_slowtime_block_flag_rate": 0.9327354260089686
+    },
+    "A-HV": {
+      "n_tiles": 1005507,
+      "flagged": 275926,
+      "flagged_fraction": 0.27441479770901644,
+      "prediction_distribution": {
+        "0": 729581,
+        "1": 183117,
+        "2": 82933,
+        "3": 8720,
+        "4": 982,
+        "5": 131,
+        "6": 43
+      },
+      "mean_confidence": 0.9467723369598389,
+      "mean_confidence_flagged": 0.8830747008323669,
+      "mean_confidence_clean": 0.9708629250526428,
+      "knee_vs_power_correlation": 0.1505690738371071,
+      "range_columns_flagged_over_half": [
+        10,
+        33,
+        102,
+        109,
+        114,
+        178,
+        197,
+        204
+      ],
+      "n_range_tiles": 223,
+      "max_slowtime_block_flag_rate": 0.9417040358744395
+    }
+  }
+}
