@@ -117,7 +117,8 @@ from isce3.focus import ToneRemover
 # Shared with train_diag_profile.py / test_only.py: one implementation of the
 # sorted-diagonal-profile feature, so scene scoring cannot drift from training.
 from diag_features import (
-    diag_profile_features, DIAG_CHANNELS, N_GLOBAL_DIAG, N_KEEP_DIAG)
+    diag_profile_features, DIAG_CHANNELS, N_GLOBAL_DIAG, N_KEEP_DIAG,
+    new_global_features, N_GLOBAL_NEW, GAP_K, GAP_SCALE)
 
 try:  # Prefer isce3's official caltone-frequency helper; fall back to the local copy.
     from nisar.products.readers.Raw import caltone_frequency_from_raw
@@ -340,10 +341,24 @@ def score_channel(raw, freq, pol, model, args):
     # [eigen, diag, global] models from model_diag.py, which additionally consume
     # the sorted SCM diagonal profile. Decided once per channel so the per-tile
     # loop stays cheap and baseline runs allocate nothing extra.
+    #
+    # Arity alone does NOT identify the model: model_new_globals.py also takes
+    # two inputs, but its global vector is N_GLOBAL_NEW wide rather than 3. So
+    # the two-input case is split further on the global input's width -- getting
+    # this wrong would hand Keras a 3-vector where it wants 5 and fail deep in
+    # predict(), after the whole granule has been read and tiled.
     want_diag = (len(model.inputs) == 3)
     if len(model.inputs) not in (2, 3):
         raise ValueError(f"Unsupported model with {len(model.inputs)} inputs; "
-                         f"expected 2 (baseline) or 3 (diagonal profile).")
+                         f"expected 2 (baseline or new-globals) or 3 "
+                         f"(diagonal profile).")
+
+    n_global_model = int(model.inputs[-1].shape[-1])
+    want_new_globals = (not want_diag) and (n_global_model == N_GLOBAL_NEW)
+    if not want_diag and n_global_model not in (3, N_GLOBAL_NEW):
+        raise ValueError(
+            f"Two-input model wants a {n_global_model}-wide global vector; "
+            f"expected 3 (baseline) or {N_GLOBAL_NEW} (new globals).")
 
     eigen_all = np.zeros((n_tiles, N_KEEP, 2), dtype=np.float32)
     global_all = np.zeros((n_tiles, 3), dtype=np.float32)
@@ -364,6 +379,19 @@ def score_channel(raw, freq, pol, model, args):
     else:
         diag_all = None
         diag_valid_frac = None
+
+    if want_new_globals:
+        print(f"  model takes a {N_GLOBAL_NEW}-wide global vector -> also "
+              f"keeping the raw SCM diagonal for the Schur-Horn gap")
+        # The gap needs the RAW diagonal and the RAW eigenvalues together, and
+        # over all M entries -- Schur-Horn's non-negativity only holds for the
+        # complete vectors. features_from_eigenvalues folds the diagonal into
+        # one scalar and drops the rest, so it has to be retained here.
+        diag_lin_all = np.zeros((n_tiles, M), dtype=np.float64)
+        diag_valid_all = np.zeros((n_tiles, M), dtype=bool)
+    else:
+        diag_lin_all = None
+        diag_valid_all = None
 
     chunk_tiles = max(1, args.pulse_chunk // cpi_len)
     k = 0
@@ -418,6 +446,9 @@ def score_channel(raw, freq, pol, model, args):
                     diag_all[k], diag_valid_frac[k] = diag_profile_features(
                         diag_lin, diag_valid
                     )
+                if want_new_globals:
+                    diag_lin_all[k] = diag_lin
+                    diag_valid_all[k] = diag_valid
                 eigvals_all[k] = eigvals
                 power_db[k] = 10.0 * np.log10(tile_signal_power(cpi, cpi_mask))
                 valid_frac[k] = (float(cpi_mask.sum()) / cpi_mask.size
@@ -437,8 +468,18 @@ def score_channel(raw, freq, pol, model, args):
         # provenance.
         global_diag = global_all[:, :N_GLOBAL_DIAG].astype(np.float32)
         model_inputs = [eigen_all, diag_all, global_diag]
+        global_used = global_diag
+    elif want_new_globals:
+        # Same first three scalars as the baseline, plus the Schur-Horn gap and
+        # the diagonal participation ratio. Built by the SAME function
+        # train_new_globals.py uses, so scoring cannot drift from training.
+        global_used = new_global_features(
+            global_all, eigvals_all.astype(np.float64),
+            diag_lin_all, diag_valid_all)
+        model_inputs = [eigen_all, global_used]
     else:
         model_inputs = [eigen_all, global_all]
+        global_used = global_all
 
     probs = model.predict(model_inputs, batch_size=args.batch_size, verbose=0)
 
@@ -451,6 +492,7 @@ def score_channel(raw, freq, pol, model, args):
         'knee': knee, 'confidence': confidence, 'entropy': entropy,
         'eigvals': eigvals_all, 'power_db': power_db, 'valid_frac': valid_frac,
         'diag_profile': diag_all, 'diag_valid_frac': diag_valid_frac,
+        'global_features': global_used,
         'tile_pulse': tile_pulse, 'tile_range': tile_range,
         'n_pt': n_pt, 'n_rt': n_rt,
         'pulse_window': [p_start, p_end], 'range_window': [r_start, r_end],
@@ -500,6 +542,21 @@ def save_predictions_h5(rec, args, out_dir):
             f.create_dataset('diag_profile', data=rec['diag_profile'],
                              compression='gzip')
             f.create_dataset('diag_valid_fraction', data=rec['diag_valid_frac'])
+
+        # The global vector actually fed to the model. Recorded for every model
+        # so a prediction can be re-examined without re-reading the granule, the
+        # same reason 'eigenvalues' and 'diag_profile' are stored. Width tells
+        # the variants apart: 3 = baseline / diagonal-profile, N_GLOBAL_NEW =
+        # model_new_globals.
+        if rec.get('global_features') is not None:
+            g = np.asarray(rec['global_features'])
+            names = ['cond_db', 'eff_rank', 'diag_median_max_ratio']
+            if g.shape[1] == N_GLOBAL_NEW:
+                names += [f'schur_horn_gap@{GAP_K}', 'participation_ratio']
+                f.attrs['gap_k'] = GAP_K
+                f.attrs['gap_scale'] = GAP_SCALE
+            ds = f.create_dataset('global_features', data=g.astype(np.float32))
+            ds.attrs['columns'] = names
 
     print(f"  Saved {path}")
 
