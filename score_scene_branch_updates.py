@@ -32,8 +32,8 @@ from score_scene import (
     read_raw_data_batch, get_subswath_mask, compute_scm_and_eigs,
     tile_signal_power, build_tone_remover, PULSE_CHUNK_DEFAULT,
     save_predictions_h5, plot_knee_map, plot_confidence_map,
-    plot_power_vs_knee, plot_confidence_by_knee, plot_eigen_profiles,
-    plot_selected_predictions, plot_pred_hist_all_channels,
+    plot_power_vs_knee, plot_confidence_by_knee, plot_eigen_profiles_by_class,
+    plot_selected_predictions, plot_pred_hist,
     CPI_LEN_DEFAULT, CPI_WIDTH_DEFAULT
 )
 
@@ -247,11 +247,11 @@ def main():
         plot_confidence_map(rec, args.output_dir)
         plot_power_vs_knee(rec, args.output_dir)
         plot_confidence_by_knee(rec, args.output_dir)
-        plot_eigen_profiles(rec, args.output_dir)
-        plot_selected_predictions(rec, args.output_dir)
+        plot_eigen_profiles_by_class(rec, args.output_dir)
+        plot_selected_predictions(rec, args.output_dir,
+                                  args.n_examples_per_class, args.example_seed)
 
-    if len(recs) > 1:
-        plot_pred_hist_all_channels(recs, args.output_dir)
+    plot_pred_hist(recs, args.output_dir)
 
     # Save summary
     summary = {
