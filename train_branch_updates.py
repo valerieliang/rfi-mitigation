@@ -1,25 +1,25 @@
 """
 train_branch_updates.py
 
-Trains model_branch_updates with combined branch structure:
+Trains model_branch_updates with two-branch structure:
   Branch 1: 12 EVs + 11 EV slopes + 12 SCM diagonal + [max EV, max pulse power]
-            (all normalized within the branch)
+            = 37 features (all normalized)
+  Branch 2: 3 global scalars (condition_number_db, eff_rank, diag_median_max_ratio)
 
 This follows the new convention where:
-- EVs are the 12 valid eigenvalues (out of 16)
+- EVs are the 12 valid eigenvalues (out of 16), max-normalized
 - EV slopes are the 11 differences between consecutive EVs
 - SCM diagonal are the 12 valid diagonal entries (max-normalized)
 - The 2-element emphasis vector [max EV, max pulse power] reinforces the
   lossless transformation relationship between EV and SCM diagonal
+- Global scalars provide contextual information about the overall tile structure
 
-The first branch contains: 12 + 11 + 12 + 2 = 37 features total.
-
-All features within the first branch are normalized to emphasize their
-structural relationships rather than absolute scales.
+Branch 1 contains the detailed feature profiles (37 features).
+Branch 2 contains summary statistics (3 scalars).
 
 Usage:
-    python train_branch_updates.py --run-name model_branch_updates --epochs 100 `
-        --batch-size 256 --learning-rate 3e-4 --dropout-rate 0.6 `
+    python train_branch_updates.py --run-name model_branch_updates --epochs 100 \
+        --batch-size 256 --learning-rate 3e-4 --dropout-rate 0.6 \
         --weight-decay 1e-4
 
 Outputs:
@@ -63,7 +63,7 @@ BENCHMARK_DIRS = ['data/czech_contam', 'data/amazon_contam', 'data/berlin_clean'
 
 def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
     """
-    Build the single combined branch input tensor.
+    Build the two branch input tensors.
 
     Returns:
         branch1: (N, N_BRANCH_FEATURES) float32 array containing:
@@ -72,6 +72,10 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
                  - 12 valid diagonal entries (max-normalized, in dB)
                  - 2 emphasis values [max EV linear, max pulse power linear]
                    (normalized by global max across batch for scale-free comparison)
+        global_: (N, 3) float32 array containing:
+                 - condition number (dB)
+                 - effective rank
+                 - diagonal median/max ratio
     """
     single = (np.asarray(eigvals_linear).ndim == 1)
     ev = np.atleast_2d(np.asarray(eigvals_linear, dtype=np.float64))
@@ -129,7 +133,7 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
     emphasis_max = np.maximum(emphasis_raw.max(axis=0, keepdims=True), EPS)
     emphasis_norm = emphasis_raw / emphasis_max
 
-    # --- Concatenate all features into a single branch ---
+    # --- Branch 1: concatenate EVs, slopes, diagonal, emphasis ---
     branch1 = np.concatenate([
         ev_db,           # 12 features
         ev_slopes,       # 11 features
@@ -137,9 +141,27 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
         emphasis_norm    # 2 features
     ], axis=1).astype(np.float32)
 
+    # --- Branch 2: global scalars ---
+    # Condition number in dB (over the kept 12 EVs)
+    cond_db = ev_db[:, 0] - np.maximum(ev_db[:, -1], DB_FLOOR)
+
+    # Effective rank (over the kept 12 EVs)
+    p = ev_keep / np.maximum(ev_keep.sum(axis=1, keepdims=True), EPS)
+    p = np.maximum(p, EPS)
+    eff_rank = np.exp(-np.sum(p * np.log(p), axis=1))
+
+    # Diagonal median/max ratio
+    masked = np.where(valid, diag, np.nan)
+    with np.errstate(invalid='ignore'):
+        vmax = np.nanmax(masked, axis=1)
+        vmed = np.nanmedian(masked, axis=1)
+    diag_ratio = np.where(n_valid >= 2, vmed / np.maximum(vmax, EPS), 1.0)
+
+    global_ = np.stack([cond_db, eff_rank, diag_ratio], axis=-1).astype(np.float32)
+
     if single:
-        return branch1[0]
-    return branch1
+        return branch1[0], global_[0]
+    return branch1, global_
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +170,13 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
 
 def load_rfi_data_branch_updates(data_dirs, max_samples=None, tag=''):
     """
-    Load tile records and assemble the combined branch features.
+    Load tile records and assemble the two-branch features.
     """
     if isinstance(data_dirs, str):
         data_dirs = [data_dirs]
 
     branch_parts = []
+    global_parts = []
     label_parts, group_parts, source_parts = [], [], []
     n_classes = 0
     meta = {'dirs': list(data_dirs), 'files': [], 'channels': [],
@@ -195,9 +218,10 @@ def load_rfi_data_branch_updates(data_dirs, max_samples=None, tag=''):
                 diag = np.asarray(f['diagonal'][sel], dtype=np.float64)
                 diag_valid = np.asarray(f['diag_valid_idx'][sel], dtype=bool)
 
-                branch1 = features_from_records(eigvals, diag, diag_valid)
+                branch1, global_ = features_from_records(eigvals, diag, diag_valid)
 
                 branch_parts.append(branch1)
+                global_parts.append(global_)
                 label_parts.append(labels)
                 group_parts.append(source_id * GROUP_OFFSET + groups_raw)
                 source_parts.append(np.full(len(labels), source_id, dtype=np.int32))
@@ -219,6 +243,7 @@ def load_rfi_data_branch_updates(data_dirs, max_samples=None, tag=''):
     labels = np.concatenate(label_parts, axis=0)
     return {
         'branch1': np.concatenate(branch_parts, axis=0),
+        'global': np.concatenate(global_parts, axis=0),
         'labels': labels,
         'groups': np.concatenate(group_parts, axis=0),
         'sources': np.concatenate(source_parts, axis=0),
@@ -244,8 +269,9 @@ def train_model(run_name, n_classes, train_inputs, y_train, val_inputs, y_val,
     print(f"\n{'='*60}")
     print(f"Run : {run_name}")
     print(f"  train={len(y_train)}  val={len(y_val)}")
-    print(f"  branch1 input : ({N_BRANCH_FEATURES},)   classes: {n_classes}")
+    print(f"  branch1 input : ({N_BRANCH_FEATURES},)   global input: (3,)   classes: {n_classes}")
     print(f"    [12 EVs + 11 slopes + 12 diag + 2 emphasis = {N_BRANCH_FEATURES}]")
+    print(f"    [cond_db, eff_rank, diag_median_max_ratio]")
     print(f"{'='*60}")
 
     model = build_model_branch_updates(
@@ -343,8 +369,8 @@ def main():
         data['labels'], data['sources'], data['meta']['source_names'],
         idx_train, idx_val, n_classes)
 
-    train_inputs = data['branch1'][idx_train]
-    val_inputs = data['branch1'][idx_val]
+    train_inputs = [data['branch1'][idx_train], data['global'][idx_train]]
+    val_inputs = [data['branch1'][idx_val], data['global'][idx_val]]
 
     model, out_dir, history = train_model(
         run_name, n_classes,
@@ -359,20 +385,24 @@ def main():
         'run': run_name,
         'variant': 'branch_updates',
         'feature_change': (
-            'Combined single branch with 12 valid EVs + 11 EV slopes + '
+            'Two-branch architecture: Branch 1 combines 12 valid EVs + 11 EV slopes + '
             '12 valid SCM diagonal entries (all max-normalized, dB) + '
             '2 emphasis features [max EV, max pulse power] to reinforce '
-            'the lossless transformation relationship'
+            'the lossless transformation relationship. Branch 2 contains 3 global '
+            'scalars (cond_db, eff_rank, diag_median_max_ratio).'
         ),
         'branch_structure': {
-            'n_evs': N_KEEP,
-            'n_ev_slopes': N_EV_SLOPES,
-            'n_diag': N_DIAG,
-            'n_emphasis': N_EMPHASIS,
-            'total': N_BRANCH_FEATURES,
+            'branch1': {
+                'n_evs': N_KEEP,
+                'n_ev_slopes': N_EV_SLOPES,
+                'n_diag': N_DIAG,
+                'n_emphasis': N_EMPHASIS,
+                'total': N_BRANCH_FEATURES,
+            },
+            'branch2_global': 3,
         },
         'scope': 'per-CPI only',
-        'inputs': {'branch1': [N_BRANCH_FEATURES]},
+        'inputs': {'branch1': [N_BRANCH_FEATURES], 'global': [3]},
         'n_train': int(len(idx_train)),
         'n_val': int(len(idx_val)),
         'n_classes': n_classes,
@@ -394,7 +424,9 @@ def main():
     print('Training complete!')
     print(f"  Model saved to: {os.path.join(out_dir, 'best_model.keras')}")
     print(f"  Summary saved to: {summary_path}")
-    print(f"\nNOTE: this model takes a SINGLE input with {N_BRANCH_FEATURES} features.")
+    print(f"\nNOTE: this model takes TWO inputs:")
+    print(f"      - branch1: {N_BRANCH_FEATURES} features (EVs + slopes + diag + emphasis)")
+    print(f"      - global: 3 scalars (cond_db, eff_rank, diag_median_max_ratio)")
     print(f"      Use score_scene_branch_updates.py to score real scenes.")
     print(f"{'='*60}")
 

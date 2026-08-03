@@ -88,10 +88,11 @@ def score_channel_branch_updates(raw, freq, pol, model, args):
         remover = None
         print("  caltone removal OFF")
 
-    print(f"  model takes 1 input with {N_BRANCH_FEATURES} features -> building combined branch")
+    print(f"  model takes 2 inputs -> building branch1 ({N_BRANCH_FEATURES} features) + global (3 scalars)")
 
     # Allocate arrays
     branch1_all = np.zeros((n_tiles, N_BRANCH_FEATURES), dtype=np.float32)
+    global_all = np.zeros((n_tiles, 3), dtype=np.float32)
     eigvals_all = np.zeros((n_tiles, M), dtype=np.float32)
     power_db = np.zeros(n_tiles, dtype=np.float32)
     valid_frac = np.zeros(n_tiles, dtype=np.float32)
@@ -143,8 +144,8 @@ def score_channel_branch_updates(raw, freq, pol, model, args):
                     args.off_diag_overlap_ratio, args.diag_valid_ratio
                 )
 
-                # Build the combined 37-feature branch
-                branch1_all[k] = features_from_records(eigvals, diag_lin, diag_valid)
+                # Build the two branches
+                branch1_all[k], global_all[k] = features_from_records(eigvals, diag_lin, diag_valid)
                 eigvals_all[k] = eigvals
                 power_db[k] = 10.0 * np.log10(tile_signal_power(cpi, cpi_mask))
                 valid_frac[k] = (float(cpi_mask.sum()) / cpi_mask.size
@@ -156,7 +157,7 @@ def score_channel_branch_updates(raw, freq, pol, model, args):
         print(f"    pulse tiles {chunk_start + n_here}/{n_pt}")
 
     print(f"  predicting on {n_tiles} tiles ...")
-    probs = model.predict(branch1_all, batch_size=args.batch_size, verbose=0)
+    probs = model.predict([branch1_all, global_all], batch_size=args.batch_size, verbose=0)
 
     knee = np.argmax(probs, axis=-1).astype(np.int8)
     confidence = np.max(probs, axis=-1).astype(np.float32)
@@ -167,8 +168,8 @@ def score_channel_branch_updates(raw, freq, pol, model, args):
         'knee': knee, 'confidence': confidence, 'entropy': entropy,
         'eigvals': eigvals_all, 'power_db': power_db, 'valid_frac': valid_frac,
         'diag_profile': None, 'diag_valid_frac': None,
-        'global_features': None,  # Combined into branch1, not stored separately
-        'branch1_features': branch1_all,  # Store the combined features
+        'global_features': global_all,  # Store the 3 global scalars
+        'branch1_features': branch1_all,  # Store the 37 combined features
         'tile_pulse': tile_pulse, 'tile_range': tile_range,
         'n_pt': n_pt, 'n_rt': n_rt,
         'pulse_window': [p_start, p_end], 'range_window': [r_start, r_end],
@@ -184,25 +185,27 @@ def main():
     model = tf.keras.models.load_model(args.model)
 
     n_inputs = len(model.inputs)
-    if n_inputs != 1:
+    if n_inputs != 2:
         raise SystemExit(
-            f"{args.model} takes {n_inputs} input(s), not 1, so it is not a "
+            f"{args.model} takes {n_inputs} input(s), not 2, so it is not a "
             f"branch-updates model. Models by input count:\n"
-            f"  1 input  = branch_updates (THIS SCRIPT)\n"
-            f"  2 inputs = baseline or new-globals (use score_scene.py or "
-            f"score_scene_new_globals.py)\n"
+            f"  2 inputs = branch_updates (THIS SCRIPT) or baseline/new-globals\n"
             f"  3 inputs = sorted diagonal profile (use score_scene_diag.py)"
         )
 
-    n_features = int(model.inputs[0].shape[-1])
-    if n_features != N_BRANCH_FEATURES:
+    n_branch_features = int(model.inputs[0].shape[-1])
+    n_global_features = int(model.inputs[1].shape[-1])
+
+    if n_branch_features != N_BRANCH_FEATURES or n_global_features != 3:
         raise SystemExit(
-            f"{args.model} wants {n_features} features, not {N_BRANCH_FEATURES}, "
-            f"so it does not match the branch_updates architecture. Expected:\n"
-            f"  12 EVs + 11 EV slopes + 12 SCM diagonal + 2 emphasis = {N_BRANCH_FEATURES} features"
+            f"{args.model} has input shapes ({n_branch_features}, {n_global_features}), "
+            f"expected ({N_BRANCH_FEATURES}, 3) for branch_updates.\n"
+            f"Expected branch1: 12 EVs + 11 slopes + 12 diag + 2 emphasis = {N_BRANCH_FEATURES}\n"
+            f"Expected global: 3 scalars (cond_db, eff_rank, diag_median_max_ratio)\n"
+            f"If this is a baseline model (12, 3), use score_scene.py instead."
         )
 
-    print(f"1 input confirmed, {n_features} features: single-branch combined model")
+    print(f"2 inputs confirmed: branch1={n_branch_features} features, global={n_global_features} scalars")
 
     # Import NISAR reader
     from nisar.products.readers.Raw import Raw
@@ -258,8 +261,9 @@ def main():
         'granule': os.path.basename(args.l0b_file),
         'model': os.path.basename(args.model),
         'model_variant': 'branch_updates',
-        'n_inputs': 1,
-        'n_features': N_BRANCH_FEATURES,
+        'n_inputs': 2,
+        'branch1_features': N_BRANCH_FEATURES,
+        'global_features': 3,
         'channels': [rec['chan'] for rec in recs],
         'predictions_by_channel': {}
     }
