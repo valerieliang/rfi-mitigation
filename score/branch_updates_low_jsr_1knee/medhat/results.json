@@ -1,0 +1,42 @@
+{
+  "granule": "NISAR_L0_PR_RRSD_006_091_A_156S_20251128T115759_20251128T120946_X05008_N_J_001.h5",
+  "model": "best_model.keras",
+  "model_variant": "branch_updates",
+  "n_inputs": 2,
+  "branch1_features": 37,
+  "global_features": 3,
+  "channels": [
+    "A-HH",
+    "A-HV"
+  ],
+  "predictions_by_channel": {
+    "A-HH": {
+      "n_tiles": 1005507,
+      "class_counts": {
+        "0": 93065,
+        "1": 909813,
+        "2": 2302,
+        "3": 254,
+        "4": 56,
+        "5": 4,
+        "6": 13
+      },
+      "mean_confidence": 0.9899776577949524,
+      "mean_entropy": 0.02501487173140049
+    },
+    "A-HV": {
+      "n_tiles": 1005507,
+      "class_counts": {
+        "0": 219961,
+        "1": 781804,
+        "2": 3056,
+        "3": 570,
+        "4": 100,
+        "5": 14,
+        "6": 2
+      },
+      "mean_confidence": 0.9397755265235901,
+      "mean_entropy": 0.1371838003396988
+    }
+  }
+}

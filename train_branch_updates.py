@@ -128,9 +128,10 @@ def features_from_records(eigvals_linear, diag_lin, diag_valid_idx):
     max_pulse_power = np.where(dead, 0.0, mx_diag)
 
     # Normalize emphasis values for scale-free comparison
-    # Use batch-level normalization (per batch max)
+    # Use per-tile normalization by the larger of the two values
+    # This makes the emphasis vector direction-informative: which is larger?
     emphasis_raw = np.stack([max_ev, max_pulse_power], axis=1)
-    emphasis_max = np.maximum(emphasis_raw.max(axis=0, keepdims=True), EPS)
+    emphasis_max = np.maximum(emphasis_raw.max(axis=1, keepdims=True), EPS)
     emphasis_norm = emphasis_raw / emphasis_max
 
     # --- Branch 1: concatenate EVs, slopes, diagonal, emphasis ---
