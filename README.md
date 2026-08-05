@@ -223,6 +223,5 @@ From [`model.py`](model.py):
 
 ## Notes
 
-- This model **only supports the baseline eigenvalue-based architecture**. Alternative variants (diagonal profile branch, new global features) have been removed for clarity.
 - The model was trained on CPI size M=16 pulses; only the top 12 eigenvalues are used as features (the bottom 4 are dropped to avoid quantization dithering artifacts).
 - Eigenvalue normalization (divide by λ_max) provides scale invariance across different signal-to-noise regimes.
