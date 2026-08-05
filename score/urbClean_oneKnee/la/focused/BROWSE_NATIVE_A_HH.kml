@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns:gx="http://www.google.com/kml/ext/2.2">
+  <Document>
+    <name>overlay image</name>
+    <GroundOverlay>
+      <name>overlay image</name>
+      <Icon>
+        <href>BROWSE_NATIVE_A_HH.png</href>
+      </Icon>
+      <gx:LatLonQuad>
+        <coordinates>-119.41929984784413,33.95826093433464 -116.71892665327351,33.27747864512412 -115.91247844607602,35.374965920915606 -118.67773534842526,36.07418577485854</coordinates>
+      </gx:LatLonQuad>
+    </GroundOverlay>
+  </Document>
+</kml>
