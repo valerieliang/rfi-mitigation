@@ -1,0 +1,771 @@
+{
+  "mode": "combined_synthetic",
+  "data_dirs": [
+    "data/amazon_test_high_jsr/",
+    "data/amazon_test_low_jsr/",
+    "data/rfi_test_mountains"
+  ],
+  "n_classes": 7,
+  "class_names": [
+    "clean",
+    "1 RFI eigenvalue",
+    "2 RFI eigenvalues",
+    "3 RFI eigenvalues",
+    "4 RFI eigenvalues",
+    "5 RFI eigenvalues",
+    "6 RFI eigenvalues"
+  ],
+  "total_samples": 231016,
+  "per_dataset_samples": {
+    "amazon_test_high_jsr": 92000,
+    "amazon_test_low_jsr": 92000,
+    "rfi_test_mountains": 47016
+  },
+  "overall_accuracy": 0.8866875021643522,
+  "per_dataset_accuracy": {
+    "amazon_test_high_jsr": 0.8900217391304348,
+    "amazon_test_low_jsr": 0.8822391304347826,
+    "rfi_test_mountains": 0.8888676195337757
+  },
+  "confusion_matrix": [
+    [
+      33271,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      1211,
+      31413,
+      222,
+      59,
+      39,
+      33,
+      35
+    ],
+    [
+      24,
+      2451,
+      30241,
+      209,
+      46,
+      41,
+      29
+    ],
+    [
+      0,
+      100,
+      3464,
+      29045,
+      139,
+      51,
+      45
+    ],
+    [
+      0,
+      4,
+      150,
+      4517,
+      28116,
+      167,
+      54
+    ],
+    [
+      0,
+      2,
+      4,
+      285,
+      5587,
+      26727,
+      268
+    ],
+    [
+      0,
+      0,
+      1,
+      2,
+      453,
+      6484,
+      26026
+    ]
+  ],
+  "classification_report": {
+    "clean": {
+      "precision": 0.9642091230510635,
+      "recall": 0.9999699446982447,
+      "f1-score": 0.9817639942164124,
+      "support": 33272.0
+    },
+    "1 RFI eigenvalue": {
+      "precision": 0.9247004798210238,
+      "recall": 0.9515630679752817,
+      "f1-score": 0.9379394771807772,
+      "support": 33012.0
+    },
+    "2 RFI eigenvalues": {
+      "precision": 0.8873012147174462,
+      "recall": 0.9152568021548985,
+      "f1-score": 0.9010622290422061,
+      "support": 33041.0
+    },
+    "3 RFI eigenvalues": {
+      "precision": 0.8513351115279773,
+      "recall": 0.8843319936670321,
+      "f1-score": 0.8675198996430759,
+      "support": 32844.0
+    },
+    "4 RFI eigenvalues": {
+      "precision": 0.8178010471204189,
+      "recall": 0.8517935046049443,
+      "f1-score": 0.8344512376090699,
+      "support": 33008.0
+    },
+    "5 RFI eigenvalues": {
+      "precision": 0.7977494552726622,
+      "recall": 0.8130380555471055,
+      "f1-score": 0.8053212004338918,
+      "support": 32873.0
+    },
+    "6 RFI eigenvalues": {
+      "precision": 0.9837094152776202,
+      "recall": 0.7894800703755385,
+      "f1-score": 0.8759571209800919,
+      "support": 32966.0
+    },
+    "accuracy": 0.8866875021643522,
+    "macro avg": {
+      "precision": 0.8895436923983161,
+      "recall": 0.8864904912890065,
+      "f1-score": 0.8862878798722179,
+      "support": 231016.0
+    },
+    "weighted avg": {
+      "precision": 0.8896929537827756,
+      "recall": 0.8866875021643522,
+      "f1-score": 0.8864625093197624,
+      "support": 231016.0
+    }
+  },
+  "per_dataset": {
+    "amazon_test_high_jsr": {
+      "n_samples": 92000,
+      "accuracy": 0.8900217391304348,
+      "confusion_matrix": [
+        [
+          13362,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          486,
+          12638,
+          11,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          9,
+          975,
+          11991,
+          9,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          27,
+          1377,
+          11672,
+          6,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          61,
+          1838,
+          11244,
+          5,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          115,
+          2314,
+          10665,
+          29
+        ],
+        [
+          0,
+          0,
+          0,
+          1,
+          169,
+          2685,
+          10310
+        ]
+      ],
+      "classification_report": {
+        "clean": {
+          "precision": 0.9642779822472397,
+          "recall": 1.0,
+          "f1-score": 0.9818141739226276,
+          "support": 13362.0
+        },
+        "1 RFI eigenvalue": {
+          "precision": 0.9265395894428152,
+          "recall": 0.9621621621621622,
+          "f1-score": 0.944014939309057,
+          "support": 13135.0
+        },
+        "2 RFI eigenvalues": {
+          "precision": 0.8921211219403318,
+          "recall": 0.9235212569316081,
+          "f1-score": 0.9075496688741722,
+          "support": 12984.0
+        },
+        "3 RFI eigenvalues": {
+          "precision": 0.856032269893656,
+          "recall": 0.8922183152423176,
+          "f1-score": 0.8737507953737321,
+          "support": 13082.0
+        },
+        "4 RFI eigenvalues": {
+          "precision": 0.8187577368382728,
+          "recall": 0.8551871006997261,
+          "f1-score": 0.8365760202373423,
+          "support": 13148.0
+        },
+        "5 RFI eigenvalues": {
+          "precision": 0.7985773118682141,
+          "recall": 0.8126333434928376,
+          "f1-score": 0.8055440160126893,
+          "support": 13124.0
+        },
+        "6 RFI eigenvalues": {
+          "precision": 0.9971950865654319,
+          "recall": 0.7831371059627801,
+          "f1-score": 0.8772974812797821,
+          "support": 13165.0
+        },
+        "accuracy": 0.8900217391304348,
+        "macro avg": {
+          "precision": 0.8933572998279944,
+          "recall": 0.889837040641633,
+          "f1-score": 0.8895067278584861,
+          "support": 92000.0
+        },
+        "weighted avg": {
+          "precision": 0.8935904716052502,
+          "recall": 0.8900217391304348,
+          "f1-score": 0.889712527682603,
+          "support": 92000.0
+        }
+      }
+    },
+    "amazon_test_low_jsr": {
+      "n_samples": 92000,
+      "accuracy": 0.8822391304347826,
+      "confusion_matrix": [
+        [
+          13091,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          537,
+          12604,
+          1,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          1120,
+          12219,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          54,
+          1539,
+          11455,
+          2,
+          0,
+          0
+        ],
+        [
+          0,
+          2,
+          61,
+          1967,
+          11159,
+          3,
+          0
+        ],
+        [
+          0,
+          1,
+          3,
+          129,
+          2411,
+          10494,
+          4
+        ],
+        [
+          0,
+          0,
+          1,
+          0,
+          212,
+          2776,
+          10144
+        ]
+      ],
+      "classification_report": {
+        "clean": {
+          "precision": 0.9598914796891039,
+          "recall": 0.9999236174763214,
+          "f1-score": 0.9794986906098018,
+          "support": 13092.0
+        },
+        "1 RFI eigenvalue": {
+          "precision": 0.9145261935858366,
+          "recall": 0.9590625475574494,
+          "f1-score": 0.9362650423414054,
+          "support": 13142.0
+        },
+        "2 RFI eigenvalues": {
+          "precision": 0.8838975694444444,
+          "recall": 0.9153494643793543,
+          "f1-score": 0.8993486181135686,
+          "support": 13349.0
+        },
+        "3 RFI eigenvalues": {
+          "precision": 0.845325068260645,
+          "recall": 0.8777777777777778,
+          "f1-score": 0.8612458178263975,
+          "support": 13050.0
+        },
+        "4 RFI eigenvalues": {
+          "precision": 0.8095618107951248,
+          "recall": 0.8458914493632504,
+          "f1-score": 0.8273279952550415,
+          "support": 13192.0
+        },
+        "5 RFI eigenvalues": {
+          "precision": 0.7906275898440444,
+          "recall": 0.8046311915350406,
+          "f1-score": 0.7975679270378111,
+          "support": 13042.0
+        },
+        "6 RFI eigenvalues": {
+          "precision": 0.9996058336618053,
+          "recall": 0.7724053909997716,
+          "f1-score": 0.8714402302306602,
+          "support": 13133.0
+        },
+        "accuracy": 0.8822391304347826,
+        "macro avg": {
+          "precision": 0.8862050778972863,
+          "recall": 0.8821487770127093,
+          "f1-score": 0.8818134744878122,
+          "support": 92000.0
+        },
+        "weighted avg": {
+          "precision": 0.8862518601276731,
+          "recall": 0.8822391304347826,
+          "f1-score": 0.8818833807738878,
+          "support": 92000.0
+        }
+      }
+    },
+    "rfi_test_mountains": {
+      "n_samples": 47016,
+      "accuracy": 0.8888676195337757,
+      "confusion_matrix": [
+        [
+          6818,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          188,
+          6171,
+          210,
+          59,
+          39,
+          33,
+          35
+        ],
+        [
+          5,
+          356,
+          6031,
+          200,
+          46,
+          41,
+          29
+        ],
+        [
+          0,
+          19,
+          548,
+          5918,
+          131,
+          51,
+          45
+        ],
+        [
+          0,
+          2,
+          28,
+          712,
+          5713,
+          159,
+          54
+        ],
+        [
+          0,
+          1,
+          0,
+          41,
+          862,
+          5568,
+          235
+        ],
+        [
+          0,
+          0,
+          0,
+          1,
+          72,
+          1023,
+          5572
+        ]
+      ],
+      "classification_report": {
+        "clean": {
+          "precision": 0.9724718299814578,
+          "recall": 1.0,
+          "f1-score": 0.9860438209559621,
+          "support": 6818.0
+        },
+        "1 RFI eigenvalue": {
+          "precision": 0.9422812643151626,
+          "recall": 0.9162583518930958,
+          "f1-score": 0.9290876242095755,
+          "support": 6735.0
+        },
+        "2 RFI eigenvalues": {
+          "precision": 0.8847000146692093,
+          "recall": 0.8990757304710794,
+          "f1-score": 0.8918299445471349,
+          "support": 6708.0
+        },
+        "3 RFI eigenvalues": {
+          "precision": 0.853845044005194,
+          "recall": 0.8817044100119189,
+          "f1-score": 0.8675511251191087,
+          "support": 6712.0
+        },
+        "4 RFI eigenvalues": {
+          "precision": 0.8324347952790325,
+          "recall": 0.8567786442711458,
+          "f1-score": 0.8444313058901781,
+          "support": 6668.0
+        },
+        "5 RFI eigenvalues": {
+          "precision": 0.8098909090909091,
+          "recall": 0.830177426569256,
+          "f1-score": 0.819908702694743,
+          "support": 6707.0
+        },
+        "6 RFI eigenvalues": {
+          "precision": 0.9333333333333333,
+          "recall": 0.8356328734253149,
+          "f1-score": 0.8817850925779396,
+          "support": 6668.0
+        },
+        "accuracy": 0.8888676195337757,
+        "macro avg": {
+          "precision": 0.8898510272391856,
+          "recall": 0.8885182052345444,
+          "f1-score": 0.8886625165706631,
+          "support": 47016.0
+        },
+        "weighted avg": {
+          "precision": 0.89008493054705,
+          "recall": 0.8888676195337757,
+          "f1-score": 0.8889567158862925,
+          "support": 47016.0
+        }
+      }
+    }
+  },
+  "per_file": {
+    "amazon_test_high_jsr__rfi_data_A_HH": {
+      "path": "data/amazon_test_high_jsr/rfi_data_A_HH.h5",
+      "n_samples": 46000,
+      "accuracy": 0.8912173913043479,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "10to20dB": {
+          "accuracy": 0.9357332155477032,
+          "n_samples": 4528
+        },
+        "20to35dB": {
+          "accuracy": 0.8646933853927423,
+          "n_samples": 34832
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "10to20dB": {
+          "accuracy": 0.858307646415432,
+          "n_samples": 30171
+        },
+        "20to35dB": {
+          "accuracy": 0.920666013712047,
+          "n_samples": 9189
+        }
+      }
+    },
+    "amazon_test_high_jsr__rfi_data_A_HV": {
+      "path": "data/amazon_test_high_jsr/rfi_data_A_HV.h5",
+      "n_samples": 46000,
+      "accuracy": 0.8888260869565218,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "10to20dB": {
+          "accuracy": 0.9324029655473179,
+          "n_samples": 4586
+        },
+        "20to35dB": {
+          "accuracy": 0.8615242707252393,
+          "n_samples": 34692
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "10to20dB": {
+          "accuracy": 0.8543105148944565,
+          "n_samples": 30414
+        },
+        "20to35dB": {
+          "accuracy": 0.9229467509025271,
+          "n_samples": 8864
+        }
+      }
+    },
+    "amazon_test_low_jsr__rfi_data_A_HH": {
+      "path": "data/amazon_test_low_jsr/rfi_data_A_HH.h5",
+      "n_samples": 46000,
+      "accuracy": 0.8816739130434783,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "0to10dB": {
+          "accuracy": 0.8845665027352599,
+          "n_samples": 18097
+        },
+        "10to20dB": {
+          "accuracy": 0.8435415403274712,
+          "n_samples": 21437
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "0to10dB": {
+          "accuracy": 0.8579771701619325,
+          "n_samples": 37670
+        },
+        "10to20dB": {
+          "accuracy": 0.950107296137339,
+          "n_samples": 1864
+        }
+      }
+    },
+    "amazon_test_low_jsr__rfi_data_A_HV": {
+      "path": "data/amazon_test_low_jsr/rfi_data_A_HV.h5",
+      "n_samples": 46000,
+      "accuracy": 0.882804347826087,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "0to10dB": {
+          "accuracy": 0.887796478364717,
+          "n_samples": 18003
+        },
+        "10to20dB": {
+          "accuracy": 0.8423096719854007,
+          "n_samples": 21371
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "0to10dB": {
+          "accuracy": 0.8587411097200395,
+          "n_samples": 37541
+        },
+        "10to20dB": {
+          "accuracy": 0.9525368248772504,
+          "n_samples": 1833
+        }
+      }
+    },
+    "rfi_test_mountains__mountain_jsr15_30_rfi_data_A_HH": {
+      "path": "data/rfi_test_mountains/mountain_jsr15_30_rfi_data_A_HH.h5",
+      "n_samples": 6691,
+      "accuracy": 0.9394709311014796,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "10to20dB": {
+          "accuracy": 0.9094567404426559,
+          "n_samples": 497
+        },
+        "20to35dB": {
+          "accuracy": 0.9307958477508651,
+          "n_samples": 5202
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "10to20dB": {
+          "accuracy": 0.9400654746915135,
+          "n_samples": 3971
+        },
+        "20to35dB": {
+          "accuracy": 0.9033564814814815,
+          "n_samples": 1728
+        }
+      }
+    },
+    "rfi_test_mountains__mountain_jsr15_30_rfi_data_A_HV": {
+      "path": "data/rfi_test_mountains/mountain_jsr15_30_rfi_data_A_HV.h5",
+      "n_samples": 16817,
+      "accuracy": 0.8515192959505262,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "10to20dB": {
+          "accuracy": 0.8814638027048528,
+          "n_samples": 1257
+        },
+        "20to35dB": {
+          "accuracy": 0.821404122613524,
+          "n_samples": 13147
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "10to20dB": {
+          "accuracy": 0.8152478017585931,
+          "n_samples": 10008
+        },
+        "20to35dB": {
+          "accuracy": 0.8525932666060054,
+          "n_samples": 4396
+        }
+      }
+    },
+    "rfi_test_mountains__mountain_jsr3_14_rfi_data_A_HH": {
+      "path": "data/rfi_test_mountains/mountain_jsr3_14_rfi_data_A_HH.h5",
+      "n_samples": 6691,
+      "accuracy": 0.9739949185473024,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "0to10dB": {
+          "accuracy": 0.9645390070921985,
+          "n_samples": 1551
+        },
+        "10to20dB": {
+          "accuracy": 0.9714970059880239,
+          "n_samples": 4175
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "0to10dB": {
+          "accuracy": 0.9700057681215151,
+          "n_samples": 5201
+        },
+        "10to20dB": {
+          "accuracy": 0.9657142857142857,
+          "n_samples": 525
+        }
+      }
+    },
+    "rfi_test_mountains__mountain_jsr3_14_rfi_data_A_HV": {
+      "path": "data/rfi_test_mountains/mountain_jsr3_14_rfi_data_A_HV.h5",
+      "n_samples": 16817,
+      "accuracy": 0.8722126419694357,
+      "strength_metric": "JSR (dB)",
+      "strength_analysis": {
+        "0to10dB": {
+          "accuracy": 0.8961665397308962,
+          "n_samples": 3939
+        },
+        "10to20dB": {
+          "accuracy": 0.8331735378715245,
+          "n_samples": 10430
+        }
+      },
+      "strength_analysis_weakest_band": {
+        "0to10dB": {
+          "accuracy": 0.8426181706568447,
+          "n_samples": 13032
+        },
+        "10to20dB": {
+          "accuracy": 0.9267015706806283,
+          "n_samples": 1337
+        }
+      }
+    }
+  },
+  "strength_metric": "JSR (dB)",
+  "jsr_analysis": {
+    "0to10dB": {
+      "accuracy": 0.8900456840586679,
+      "n_samples": 41590
+    },
+    "10to20dB": {
+      "accuracy": 0.8626557900440825,
+      "n_samples": 68281
+    },
+    "20to35dB": {
+      "accuracy": 0.8608787682223209,
+      "n_samples": 87873
+    }
+  },
+  "jsr_analysis_weakest_band": {
+    "0to10dB": {
+      "accuracy": 0.8623774667180343,
+      "n_samples": 93444
+    },
+    "10to20dB": {
+      "accuracy": 0.8616002895548095,
+      "n_samples": 80123
+    },
+    "20to35dB": {
+      "accuracy": 0.9078876618273566,
+      "n_samples": 24177
+    }
+  }
+}
