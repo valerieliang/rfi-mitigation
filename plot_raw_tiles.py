@@ -58,15 +58,20 @@ Three ways to choose locations, in decreasing order of usefulness:
 
 Usage
 -----
-    # Process specific pulse and range windows
-    python plot_raw_tiles.py granule.h5 --freq A --pol HV \\
+    # Process specific pulse and range windows (defaults to freq A, all pols)
+    python plot_raw_tiles.py granule.h5 \\
         --pulse-start 700435 --pulse-end 715206 \\
         --range-start 0 --range-end 512 \\
         --output-dir figs/la_blob
 
-    # Process entire granule (warning will be shown)
+    # Process entire granule with specific frequency and polarization
     python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
         --output-dir figs/full_granule
+
+    # Process all polarizations (default behavior when --pol is omitted)
+    python plot_raw_tiles.py granule.h5 \\
+        --pulse-start 700435 --pulse-end 715206 \\
+        --output-dir figs/all_pols
 
     # Legacy: Look at known contaminated locations in a scene
     python plot_raw_tiles.py granule.h5 --freq A --pol HV \\
@@ -634,6 +639,79 @@ def render_all(tiles, valids, locations, out_dir, args, tag=''):
 # MODES
 # ---------------------------------------------------------------------------
 
+def process_single_channel(raw, freq, pol, args, pulse_start, pulse_end, range_start, range_end,
+                          n_pulses, range_width, locations):
+    """Process a single frequency/polarization channel."""
+    dataset = raw.getRawDataset(freq, pol)
+    n_pulses_total, n_range_total = dataset.shape
+
+    print(f'\n  Processing {freq} {pol}')
+    print(f'  granule shape    : {n_pulses_total} pulses x {n_range_total} range samples')
+
+    # Validate bounds for this channel
+    actual_pulse_end = min(pulse_end, n_pulses_total)
+    actual_range_end = min(range_end, n_range_total)
+    actual_n_pulses = min(n_pulses, n_pulses_total - pulse_start)
+    actual_range_width = min(range_width, n_range_total - range_start)
+
+    print(f'  processing window: pulses [{pulse_start}, {actual_pulse_end}) x range [{range_start}, {actual_range_end})')
+    print(f'  window size      : {actual_n_pulses} pulses x {actual_range_width} range samples')
+
+    if args.remove_caltone:
+        remover, caltone_freq = build_tone_remover(raw, freq, pol, n_range_total)
+        print(f'  caltone removal  : ON (f = {caltone_freq / 1e6:.4f} MHz)')
+    else:
+        remover, caltone_freq = None, None
+        print('  caltone removal  : OFF')
+
+    tiles, valids, kept = [], [], []
+    for p0, r0 in locations:
+        tile_n_pulses = args.pulses if args.pulses else actual_n_pulses
+        tile_range_width = args.range_width if args.range_width else actual_range_width
+
+        if p0 + tile_n_pulses > n_pulses_total or r0 + tile_range_width > n_range_total:
+            print(f'  [skip] ({p0}, {r0}) extends past the granule bounds')
+            continue
+
+        tile = read_raw_tile(raw, freq, pol, p0, tile_n_pulses, r0,
+                             tile_range_width, remover)
+
+        if args.mask_mode == 'subswath':
+            valid = get_subswath_mask(raw, freq, pol, p0, tile_n_pulses, r0,
+                                      tile_range_width)
+        elif args.mask_mode == 'amplitude':
+            valid = amplitude_gap_mask(tile, args.gap_frac)
+        else:
+            valid = np.ones(tile.shape, dtype=bool)
+
+        tiles.append(tile)
+        valids.append(valid)
+        kept.append((p0, r0))
+
+    if not tiles:
+        print(f'  [skip] No tiles could be read for {freq} {pol}')
+        return []
+
+    out_h5 = os.path.join(args.output_dir, f'raw_tiles_{freq}_{pol}.h5')
+    meta = dict(
+        l0b_file=os.path.basename(args.l0b_file),
+        frequency=freq,
+        polarization=pol,
+        cpi_len=args.cpi_len,
+        mask_mode=args.mask_mode,
+        caltone_removed=bool(args.remove_caltone),
+        caltone_freq_hz=float(caltone_freq) if caltone_freq else None,
+        scene_tag=args.scene_tag or '',
+    )
+    write_tiles(out_h5, tiles, valids, kept, meta)
+    print(f'  wrote            : {out_h5}')
+
+    tag = f'   |   {args.scene_tag}' if args.scene_tag else ''
+    figs = render_all(np.asarray(tiles), np.asarray(valids),
+                      np.asarray(kept), args.output_dir, args, tag)
+    return [out_h5] + figs
+
+
 def run_from_granule(args):
     """Read tiles from an L0B granule, store them, and render them."""
     _import_l0b_readers()
@@ -642,13 +720,29 @@ def run_from_granule(args):
     raw.parsePolarizations()
 
     freq = args.freq
-    pol = args.pol
-    if freq is None or pol is None:
-        raise ValueError('--freq and --pol are required when reading a granule')
 
-    dataset = raw.getRawDataset(freq, pol)
+    # Determine which polarizations to process
+    if args.pol:
+        pols = [args.pol]
+    else:
+        # Get all available polarizations for this frequency
+        available_pols = []
+        for pol_candidate in ['HH', 'HV', 'VH', 'VV']:
+            try:
+                raw.getRawDataset(freq, pol_candidate)
+                available_pols.append(pol_candidate)
+            except (KeyError, RuntimeError):
+                pass
+
+        if not available_pols:
+            raise ValueError(f'No polarizations found for frequency {freq}')
+
+        pols = available_pols
+        print(f'  polarizations    : {", ".join(pols)} (all available)')
+
+    # Get initial dataset to determine bounds
+    dataset = raw.getRawDataset(freq, pols[0])
     n_pulses_total, n_range_total = dataset.shape
-    print(f'  granule shape    : {n_pulses_total} pulses x {n_range_total} range samples')
 
     # Handle new pulse-start/pulse-end and range-start/range-end arguments
     pulse_start = args.pulse_start if args.pulse_start is not None else 0
@@ -668,8 +762,6 @@ def run_from_granule(args):
 
     n_pulses = pulse_end - pulse_start
     range_width = range_end - range_start
-    print(f'  processing window: pulses [{pulse_start}, {pulse_end}) x range [{range_start}, {range_end})')
-    print(f'  window size      : {n_pulses} pulses x {range_width} range samples')
 
     locations = parse_at(args.at)
 
@@ -679,7 +771,7 @@ def run_from_granule(args):
             locations = [(pulse_start, range_start)]
 
     if args.from_clean:
-        tile_pulse, tile_range = load_clean_locations(args.from_clean, freq, pol)
+        tile_pulse, tile_range = load_clean_locations(args.from_clean, freq, pols[0])
         print(f'  clean CPI blocks : {len(tile_pulse)}')
         tile_pulses_to_check = {args.pulses, 128, 256, 512} if args.pulses else {n_pulses}
         for n_p in sorted(tile_pulses_to_check):
@@ -708,59 +800,15 @@ def run_from_granule(args):
     locations = ordered[:args.max_tiles]
     print(f'  tiles to extract : {len(locations)}')
 
-    if args.remove_caltone:
-        remover, caltone_freq = build_tone_remover(raw, freq, pol, n_range_total)
-        print(f'  caltone removal  : ON (f = {caltone_freq / 1e6:.4f} MHz)')
-    else:
-        remover, caltone_freq = None, None
-        print('  caltone removal  : OFF')
+    # Process each polarization
+    all_written = []
+    for pol in pols:
+        written = process_single_channel(raw, freq, pol, args,
+                                        pulse_start, pulse_end, range_start, range_end,
+                                        n_pulses, range_width, locations)
+        all_written.extend(written)
 
-    tiles, valids, kept = [], [], []
-    for p0, r0 in locations:
-        tile_n_pulses = args.pulses if args.pulses else n_pulses
-        tile_range_width = args.range_width if args.range_width else range_width
-
-        if p0 + tile_n_pulses > n_pulses_total or r0 + tile_range_width > n_range_total:
-            print(f'  [skip] ({p0}, {r0}) extends past the granule bounds')
-            continue
-
-        tile = read_raw_tile(raw, freq, pol, p0, tile_n_pulses, r0,
-                             tile_range_width, remover)
-
-        if args.mask_mode == 'subswath':
-            valid = get_subswath_mask(raw, freq, pol, p0, tile_n_pulses, r0,
-                                      tile_range_width)
-        elif args.mask_mode == 'amplitude':
-            valid = amplitude_gap_mask(tile, args.gap_frac)
-        else:
-            valid = np.ones(tile.shape, dtype=bool)
-
-        tiles.append(tile)
-        valids.append(valid)
-        kept.append((p0, r0))
-
-    if not tiles:
-        raise RuntimeError('No tiles could be read; check the locations given')
-
-    out_h5 = os.path.join(args.output_dir,
-                          f'raw_tiles_{freq}_{pol}.h5')
-    meta = dict(
-        l0b_file=os.path.basename(args.l0b_file),
-        frequency=freq,
-        polarization=pol,
-        cpi_len=args.cpi_len,
-        mask_mode=args.mask_mode,
-        caltone_removed=bool(args.remove_caltone),
-        caltone_freq_hz=float(caltone_freq) if caltone_freq else None,
-        scene_tag=args.scene_tag or '',
-    )
-    write_tiles(out_h5, tiles, valids, kept, meta)
-    print(f'  wrote            : {out_h5}')
-
-    tag = f'   |   {args.scene_tag}' if args.scene_tag else ''
-    figs = render_all(np.asarray(tiles), np.asarray(valids),
-                      np.asarray(kept), args.output_dir, args, tag)
-    return [out_h5] + figs
+    return all_written
 
 
 def run_replot(args):
@@ -841,8 +889,8 @@ def parse_args():
 
     p.add_argument('l0b_file', nargs='?', default=None,
                    help='NISAR L0B granule (omit with --replot or --demo)')
-    p.add_argument('--freq', default=None, help="frequency band, 'A' or 'B'")
-    p.add_argument('--pol', default=None, help="polarization, e.g. 'HH', 'HV'")
+    p.add_argument('--freq', default='A', help="frequency band, 'A' or 'B' (default: A)")
+    p.add_argument('--pol', default=None, help="polarization, e.g. 'HH', 'HV'; if omitted, processes all available polarizations")
 
     p.add_argument('--pulse-start', type=int, default=None,
                    help='starting pulse index (0-based); if omitted, starts at 0')
