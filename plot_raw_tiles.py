@@ -58,19 +58,21 @@ Three ways to choose locations, in decreasing order of usefulness:
 
 Usage
 -----
-    # Look at known contaminated locations in a scene
+    # Process specific pulse and range windows
+    python plot_raw_tiles.py granule.h5 --freq A --pol HV \\
+        --pulse-start 700435 --pulse-end 715206 \\
+        --range-start 0 --range-end 512 \\
+        --output-dir figs/la_blob
+
+    # Process entire granule (warning will be shown)
+    python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
+        --output-dir figs/full_granule
+
+    # Legacy: Look at known contaminated locations in a scene
     python plot_raw_tiles.py granule.h5 --freq A --pol HV \\
         --at 12000,3000 --at 12256,3000 \\
         --pulses 256 --range-width 512 \\
         --output-dir figs/vienna
-
-    # Sweep tile geometry on the same underlying data
-    python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
-        --at 40000,5000 --pulses 256 --range-width 250 --output-dir figs/geom_256x250
-    python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
-        --at 40000,5000 --pulses 256 --range-width 512 --output-dir figs/geom_256x512
-    python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
-        --at 40000,5000 --pulses 512 --range-width 512 --output-dir figs/geom_512x512
 
     # Clean-run census plus a contact sheet, no per-tile figures
     python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
@@ -648,22 +650,49 @@ def run_from_granule(args):
     n_pulses_total, n_range_total = dataset.shape
     print(f'  granule shape    : {n_pulses_total} pulses x {n_range_total} range samples')
 
+    # Handle new pulse-start/pulse-end and range-start/range-end arguments
+    pulse_start = args.pulse_start if args.pulse_start is not None else 0
+    pulse_end = args.pulse_end if args.pulse_end is not None else n_pulses_total
+    range_start = args.range_start if args.range_start is not None else 0
+    range_end = args.range_end if args.range_end is not None else n_range_total
+
+    if args.pulse_start is None and args.pulse_end is None and args.range_start is None and args.range_end is None:
+        if not (args.at or args.from_clean or args.grid):
+            print('  WARNING: No pulse/range bounds specified. Processing ENTIRE granule.')
+            print(f'           This will process {n_pulses_total} x {n_range_total} samples.')
+
+    if pulse_start < 0 or pulse_end > n_pulses_total or pulse_start >= pulse_end:
+        raise ValueError(f'Invalid pulse range: [{pulse_start}, {pulse_end}) for granule with {n_pulses_total} pulses')
+    if range_start < 0 or range_end > n_range_total or range_start >= range_end:
+        raise ValueError(f'Invalid range: [{range_start}, {range_end}) for granule with {n_range_total} samples')
+
+    n_pulses = pulse_end - pulse_start
+    range_width = range_end - range_start
+    print(f'  processing window: pulses [{pulse_start}, {pulse_end}) x range [{range_start}, {range_end})')
+    print(f'  window size      : {n_pulses} pulses x {range_width} range samples')
+
     locations = parse_at(args.at)
+
+    # If using new-style pulse/range bounds, create a single tile at the specified window
+    if args.pulse_start is not None or args.pulse_end is not None or args.range_start is not None or args.range_end is not None:
+        if not locations:
+            locations = [(pulse_start, range_start)]
 
     if args.from_clean:
         tile_pulse, tile_range = load_clean_locations(args.from_clean, freq, pol)
         print(f'  clean CPI blocks : {len(tile_pulse)}')
-        for n_p in sorted({args.pulses, 128, 256, 512}):
+        tile_pulses_to_check = {args.pulses, 128, 256, 512} if args.pulses else {n_pulses}
+        for n_p in sorted(tile_pulses_to_check):
             runs = find_clean_runs(tile_pulse, tile_range, n_p,
                                    args.cpi_len, args.min_clean_frac)
-            marker = ' <-- requested' if n_p == args.pulses else ''
+            marker = ' <-- requested' if n_p == (args.pulses or n_pulses) else ''
             print(f'  clean runs of {n_p:>4} pulses : {len(runs)}{marker}')
-        locations += find_clean_runs(tile_pulse, tile_range, args.pulses,
+        locations += find_clean_runs(tile_pulse, tile_range, args.pulses or n_pulses,
                                      args.cpi_len, args.min_clean_frac)
 
     if args.grid:
         locations += grid_locations(
-            n_pulses_total, n_range_total, args.pulses, args.range_width,
+            n_pulses_total, n_range_total, args.pulses or n_pulses, args.range_width or range_width,
             args.stride_pulse, args.stride_range, args.max_tiles)
 
     if not locations:
@@ -688,16 +717,19 @@ def run_from_granule(args):
 
     tiles, valids, kept = [], [], []
     for p0, r0 in locations:
-        if p0 + args.pulses > n_pulses_total or r0 + args.range_width > n_range_total:
+        tile_n_pulses = args.pulses if args.pulses else n_pulses
+        tile_range_width = args.range_width if args.range_width else range_width
+
+        if p0 + tile_n_pulses > n_pulses_total or r0 + tile_range_width > n_range_total:
             print(f'  [skip] ({p0}, {r0}) extends past the granule bounds')
             continue
 
-        tile = read_raw_tile(raw, freq, pol, p0, args.pulses, r0,
-                             args.range_width, remover)
+        tile = read_raw_tile(raw, freq, pol, p0, tile_n_pulses, r0,
+                             tile_range_width, remover)
 
         if args.mask_mode == 'subswath':
-            valid = get_subswath_mask(raw, freq, pol, p0, args.pulses, r0,
-                                      args.range_width)
+            valid = get_subswath_mask(raw, freq, pol, p0, tile_n_pulses, r0,
+                                      tile_range_width)
         elif args.mask_mode == 'amplitude':
             valid = amplitude_gap_mask(tile, args.gap_frac)
         else:
@@ -812,10 +844,19 @@ def parse_args():
     p.add_argument('--freq', default=None, help="frequency band, 'A' or 'B'")
     p.add_argument('--pol', default=None, help="polarization, e.g. 'HH', 'HV'")
 
-    p.add_argument('--pulses', type=int, default=PULSES_DEFAULT,
-                   help='pulse (azimuth) extent of each tile')
-    p.add_argument('--range-width', type=int, default=RANGE_WIDTH_DEFAULT,
-                   help='range sample (fast time) extent of each tile')
+    p.add_argument('--pulse-start', type=int, default=None,
+                   help='starting pulse index (0-based); if omitted, starts at 0')
+    p.add_argument('--pulse-end', type=int, default=None,
+                   help='ending pulse index (exclusive); if omitted, processes to end')
+    p.add_argument('--range-start', type=int, default=None,
+                   help='starting range sample index (0-based); if omitted, starts at 0')
+    p.add_argument('--range-end', type=int, default=None,
+                   help='ending range sample index (exclusive); if omitted, processes to end')
+
+    p.add_argument('--pulses', type=int, default=None,
+                   help='(legacy) pulse (azimuth) extent of each tile')
+    p.add_argument('--range-width', type=int, default=None,
+                   help='(legacy) range sample (fast time) extent of each tile')
     p.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT,
                    help='pulses per CPI block, for clean-run bookkeeping')
 
@@ -874,7 +915,10 @@ def main():
     print('Raw time-domain tile extraction and rendering')
     print('(pulse x range sample; no SCM, no eigenvalues, no FFT)')
     print('=' * 70)
-    print(f'  tile geometry    : {args.pulses} pulses x {args.range_width} range samples')
+
+    if args.pulses or args.range_width:
+        print(f'  tile geometry    : {args.pulses or "auto"} pulses x {args.range_width or "auto"} range samples')
+
     print(f'  output dir       : {args.output_dir}')
 
     if args.demo:
