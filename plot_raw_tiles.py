@@ -20,18 +20,11 @@ would actually see.
 
 Panels
 ------
-For each tile, up to six panels are rendered:
+Four panels are rendered for each tile, corresponding to the UNet input channels:
 
-  magnitude   Floor relative log magnitude in dB. The general brightness
-              cue. Wideband RFI raises the speckle level. This matches
-              UNet input channel 0 (after scaling).
-
-  phasediff   Adjacent-pulse phase difference, arg(x[m] * conj(x[m-1])),
-              in radians. The slow-time coherence cue, and the direct
-              pointwise analog of what the SCM off-diagonal terms measure.
-              An emitter with a fixed Doppler shows a near constant value
-              across range samples. Terrain returns in RAW data are also
-              pulse-to-pulse correlated, so this is not an RFI-only cue.
+  magnitude   Absolute log magnitude in dB (power). Wideband RFI raises
+              the speckle level. This matches UNet input channel 0 (after
+              scaling).
 
   phase_cos   Cosine of the adjacent-pulse phase difference. This matches
               UNet input channel 1 exactly. Fixed-Doppler emitters appear
@@ -40,13 +33,6 @@ For each tile, up to six panels are rendered:
   phase_sin   Sine of the adjacent-pulse phase difference. This matches
               UNet input channel 2 exactly. Used with phase_cos to encode
               phase coherence without discontinuities at ±π.
-
-  texture     Local coefficient of variation of the amplitude, computed in a
-              small range window. This is the narrowband cue in the time
-              domain: a constant modulus tone REDUCES local amplitude
-              fluctuation relative to speckle, so narrowband RFI appears as
-              a dark (low variation) region rather than a bright one.
-              NOT a UNet input - diagnostic only.
 
   valid       ADC gap / subswath validity mask. This matches UNet input
               channel 3 exactly.
@@ -196,16 +182,6 @@ CALTONE_DEFAULT_FREQ_HZ = 1214.883e6
 CALTONE_LO_HZ = 1200e6
 CALTONE_CLOCK_HZ = 240e6
 
-# Display defaults for the magnitude panel, in dB above the per-tile floor.
-# The upper limit is deliberately modest: high power RFI saturates any scale,
-# but moderate and low JSR contamination is only a few dB above the floor and
-# is invisible on a wide scale. Raise --vmax-db for the strong blob scenes.
-MAG_VMIN_DB = -5.0
-MAG_VMAX_DB = 15.0
-
-# Range window (in samples) for the local amplitude coefficient of variation.
-TEXTURE_WINDOW_DEFAULT = 9
-
 # Amplitude gap mask threshold, as a fraction of the peak mean magnitude.
 GAP_FRAC_DEFAULT = 0.10
 
@@ -310,50 +286,6 @@ def absolute_log_magnitude(tile):
     return (20.0 * np.log10(np.abs(tile) + EPS)).astype(np.float32)
 
 
-def adjacent_pulse_phase_diff(tile):
-    """
-    arg(x[m] * conj(x[m-1])) at every range sample, in radians.
-
-    Row 0 has no predecessor and is replicated from row 1 so the output keeps
-    the tile shape.
-    """
-    if tile.shape[0] < 2:
-        return np.zeros(tile.shape, dtype=np.float32)
-    phase = np.angle(tile[1:] * np.conj(tile[:-1])).astype(np.float32)
-    out = np.empty(tile.shape, dtype=np.float32)
-    out[1:] = phase
-    out[0] = phase[0]
-    return out
-
-
-def amplitude_texture(tile, window=TEXTURE_WINDOW_DEFAULT):
-    """
-    Local coefficient of variation of the amplitude along range.
-
-    For fully developed speckle this sits near 0.52 (the Rayleigh value). A
-    constant modulus component such as a narrowband tone pulls it DOWN, so
-    narrowband RFI reads as a dark region here even where the magnitude panel
-    shows nothing obvious. This is the main reason the panel exists.
-    """
-    if window < 3:
-        raise ValueError("texture window must be >= 3")
-    if window % 2 == 0:
-        window += 1
-
-    amp = np.abs(tile).astype(np.float32)
-    kernel = np.ones(window, dtype=np.float32) / window
-
-    # Reflect-pad along range so the edges are not biased by zero padding.
-    pad = window // 2
-    padded = np.pad(amp, ((0, 0), (pad, pad)), mode='reflect')
-
-    mean = np.apply_along_axis(
-        lambda row: np.convolve(row, kernel, mode='valid'), 1, padded)
-    mean_sq = np.apply_along_axis(
-        lambda row: np.convolve(row, kernel, mode='valid'), 1, padded ** 2)
-
-    var = np.maximum(mean_sq - mean ** 2, 0.0)
-    return (np.sqrt(var) / np.maximum(mean, EPS)).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -569,55 +501,46 @@ def adjacent_pulse_phase_cos_sin(tile):
     return cos_d, sin_d
 
 
-def plot_tile(tile, valid, p0, r0, out_path, panels=('magnitude', 'phasediff',
-                                                     'texture', 'valid'),
-              texture_window=TEXTURE_WINDOW_DEFAULT,
-              vmin_db=MAG_VMIN_DB, vmax_db=MAG_VMAX_DB, title_extra=''):
-    """Render one tile as a row of panels and save it."""
-    panels = [p for p in panels]
-    n_panels = len(panels)
-    if n_panels == 0:
-        raise ValueError("at least one panel is required")
-
+def plot_tile(tile, valid, p0, r0, out_path, title_extra=''):
+    """Render one tile as a row of 4 panels (UNet input channels) and save it."""
     mag_db = absolute_log_magnitude(tile)
+    cos_d, sin_d = adjacent_pulse_phase_cos_sin(tile)
 
-    fig_w = 4.2 * n_panels + 1.0
-    fig, axes = plt.subplots(1, n_panels, figsize=(fig_w, 4.8),
-                             squeeze=False)
+    fig_w = 4.2 * 4 + 1.0
+    fig, axes = plt.subplots(1, 4, figsize=(fig_w, 4.8), squeeze=False)
     axes = axes[0]
 
-    for ax, name in zip(axes, panels):
-        if name == 'magnitude':
-            img, cmap, vmin, vmax, label = (mag_db, 'gray', None, None,
-                                            'dB absolute')
-        elif name == 'phasediff':
-            img, cmap, vmin, vmax, label = (adjacent_pulse_phase_diff(tile),
-                                            'gray', -np.pi, np.pi,
-                                            'radians')
-        elif name == 'phase_cos':
-            cos_d, _ = adjacent_pulse_phase_cos_sin(tile)
-            img, cmap, vmin, vmax, label = (cos_d, 'gray', -1.0, 1.0,
-                                            'cos(phase diff)')
-        elif name == 'phase_sin':
-            _, sin_d = adjacent_pulse_phase_cos_sin(tile)
-            img, cmap, vmin, vmax, label = (sin_d, 'gray', -1.0, 1.0,
-                                            'sin(phase diff)')
-        elif name == 'texture':
-            img, cmap, vmin, vmax, label = (
-                amplitude_texture(tile, texture_window), 'gray', 0.0, 1.0,
-                'amplitude CV')
-        elif name == 'valid':
-            img, cmap, vmin, vmax, label = (valid.astype(np.float32), 'gray',
-                                            0.0, 1.0, 'valid')
-        else:
-            raise ValueError(f"unknown panel '{name}'")
+    # Panel 0: magnitude (power)
+    im0 = axes[0].imshow(mag_db, aspect='auto', origin='upper', cmap='gray',
+                         interpolation='nearest')
+    axes[0].set_title('magnitude')
+    axes[0].set_xlabel('range sample')
+    axes[0].set_ylabel('pulse')
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04, label='dB absolute')
 
-        im = ax.imshow(img, aspect='auto', origin='upper', cmap=cmap,
-                       vmin=vmin, vmax=vmax, interpolation='nearest')
-        ax.set_title(name)
-        ax.set_xlabel('range sample')
-        ax.set_ylabel('pulse')
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=label)
+    # Panel 1: phase_cos
+    im1 = axes[1].imshow(cos_d, aspect='auto', origin='upper', cmap='gray',
+                         vmin=-1.0, vmax=1.0, interpolation='nearest')
+    axes[1].set_title('phase_cos')
+    axes[1].set_xlabel('range sample')
+    axes[1].set_ylabel('pulse')
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04, label='cos(phase diff)')
+
+    # Panel 2: phase_sin
+    im2 = axes[2].imshow(sin_d, aspect='auto', origin='upper', cmap='gray',
+                         vmin=-1.0, vmax=1.0, interpolation='nearest')
+    axes[2].set_title('phase_sin')
+    axes[2].set_xlabel('range sample')
+    axes[2].set_ylabel('pulse')
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04, label='sin(phase diff)')
+
+    # Panel 3: valid
+    im3 = axes[3].imshow(valid.astype(np.float32), aspect='auto', origin='upper',
+                         cmap='gray', vmin=0.0, vmax=1.0, interpolation='nearest')
+    axes[3].set_title('valid')
+    axes[3].set_xlabel('range sample')
+    axes[3].set_ylabel('pulse')
+    fig.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04, label='valid')
 
     valid_frac = float(valid.mean())
     title = (f'pulse {p0}, range {r0}   |   {tile.shape[0]} x {tile.shape[1]}   |   '
@@ -629,12 +552,8 @@ def plot_tile(tile, valid, p0, r0, out_path, panels=('magnitude', 'phasediff',
     return out_path
 
 
-def plot_contact_sheet(tiles, valids, locations, out_path, n_cols=6,
-                       vmin_db=MAG_VMIN_DB, vmax_db=MAG_VMAX_DB,
-                       max_tiles=60):
-    """
-    Grid of magnitude thumbnails for fast scanning across many tiles.
-    """
+def plot_contact_sheet(tiles, valids, locations, out_path, n_cols=6, max_tiles=60):
+    """Grid of magnitude thumbnails for fast scanning across many tiles."""
     n = min(len(tiles), max_tiles)
     if n == 0:
         return None
@@ -668,7 +587,6 @@ def plot_contact_sheet(tiles, valids, locations, out_path, n_cols=6,
 def render_all(tiles, valids, locations, out_dir, args, tag=''):
     """Per-tile figures plus the contact sheet."""
     written = []
-    panels = tuple(args.panels)
 
     if not args.no_per_tile:
         for idx, (tile, valid, (p0, r0)) in enumerate(
@@ -677,14 +595,12 @@ def render_all(tiles, valids, locations, out_dir, args, tag=''):
             written.append(plot_tile(
                 tile, valid, int(p0), int(r0),
                 os.path.join(out_dir, name),
-                panels=panels, texture_window=args.texture_window,
-                vmin_db=args.vmin_db, vmax_db=args.vmax_db,
                 title_extra=tag))
 
     sheet = plot_contact_sheet(
         tiles, valids, locations,
         os.path.join(out_dir, 'contact_sheet.png'),
-        n_cols=args.sheet_cols, vmin_db=args.vmin_db, vmax_db=args.vmax_db,
+        n_cols=args.sheet_cols,
         max_tiles=args.max_tiles)
     if sheet:
         written.append(sheet)
@@ -773,6 +689,10 @@ def process_single_channel(raw, freq, pol, args, pulse_start, pulse_end, range_s
         print(f'  [skip] No tiles could be read for {freq} {pol}')
         return []
 
+    # Create polarization-specific subdirectory
+    pol_output_dir = os.path.join(args.output_dir, pol)
+    os.makedirs(pol_output_dir, exist_ok=True)
+
     out_h5 = os.path.join(args.output_dir, f'raw_tiles_{freq}_{pol}.h5')
     meta = dict(
         l0b_file=os.path.basename(args.l0b_file),
@@ -789,7 +709,7 @@ def process_single_channel(raw, freq, pol, args, pulse_start, pulse_end, range_s
 
     tag = f'   |   {args.scene_tag}' if args.scene_tag else ''
     figs = render_all(np.asarray(tiles), np.asarray(valids),
-                      np.asarray(kept), args.output_dir, args, tag)
+                      np.asarray(kept), pol_output_dir, args, tag)
     return [out_h5] + figs
 
 
@@ -1023,15 +943,8 @@ def parse_args():
     p.add_argument('--no-remove-caltone', dest='remove_caltone',
                    action='store_false')
 
-    p.add_argument('--panels', nargs='+',
-                   default=['magnitude', 'phasediff', 'texture', 'valid'],
-                   choices=['magnitude', 'phasediff', 'phase_cos', 'phase_sin', 'texture', 'valid'],
-                   help='panels rendered per tile (phase_cos and phase_sin match UNet channels 1-2)')
-    p.add_argument('--texture-window', type=int, default=TEXTURE_WINDOW_DEFAULT,
-                   help='range window for the amplitude CV panel')
-    p.add_argument('--vmin-db', type=float, default=MAG_VMIN_DB)
-    p.add_argument('--vmax-db', type=float, default=MAG_VMAX_DB)
-    p.add_argument('--sheet-cols', type=int, default=6)
+    p.add_argument('--sheet-cols', type=int, default=6,
+                   help='number of columns in contact sheet')
     p.add_argument('--no-per-tile', action='store_true',
                    help='contact sheet only, skip the per-tile figures')
 
@@ -1056,10 +969,8 @@ def main():
     print('(pulse x range sample; no SCM, no eigenvalues, no FFT)')
     print('=' * 70)
 
-    if args.pulses or args.range_width:
-        print(f'  tile geometry    : {args.pulses or "auto"} pulses x {args.range_width or "auto"} range samples')
-
     print(f'  output dir       : {args.output_dir}')
+    print(f'  panels           : magnitude (power), phase_cos, phase_sin, valid (UNet inputs)')
 
     if args.demo:
         written = run_demo(args)
