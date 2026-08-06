@@ -20,10 +20,11 @@ would actually see.
 
 Panels
 ------
-For each tile, up to four panels are rendered:
+For each tile, up to six panels are rendered:
 
   magnitude   Floor relative log magnitude in dB. The general brightness
-              cue. Wideband RFI raises the speckle level.
+              cue. Wideband RFI raises the speckle level. This matches
+              UNet input channel 0 (after scaling).
 
   phasediff   Adjacent-pulse phase difference, arg(x[m] * conj(x[m-1])),
               in radians. The slow-time coherence cue, and the direct
@@ -32,13 +33,23 @@ For each tile, up to four panels are rendered:
               across range samples. Terrain returns in RAW data are also
               pulse-to-pulse correlated, so this is not an RFI-only cue.
 
+  phase_cos   Cosine of the adjacent-pulse phase difference. This matches
+              UNet input channel 1 exactly. Fixed-Doppler emitters appear
+              as constant-valued regions.
+
+  phase_sin   Sine of the adjacent-pulse phase difference. This matches
+              UNet input channel 2 exactly. Used with phase_cos to encode
+              phase coherence without discontinuities at ±π.
+
   texture     Local coefficient of variation of the amplitude, computed in a
               small range window. This is the narrowband cue in the time
               domain: a constant modulus tone REDUCES local amplitude
               fluctuation relative to speckle, so narrowband RFI appears as
               a dark (low variation) region rather than a bright one.
+              NOT a UNet input - diagnostic only.
 
-  valid       ADC gap / subswath validity mask.
+  valid       ADC gap / subswath validity mask. This matches UNet input
+              channel 3 exactly.
 
 Tile selection
 --------------
@@ -294,19 +305,9 @@ def amplitude_gap_mask(tile, gap_frac=GAP_FRAC_DEFAULT):
 # DERIVED DISPLAY QUANTITIES (all pointwise, no SCM, no FFT)
 # ---------------------------------------------------------------------------
 
-def floor_relative_db(tile, valid=None, quantile=0.5):
-    """
-    Log magnitude in dB relative to the per-tile floor.
-
-    The floor is estimated over valid samples only, so an ADC gap cannot drag
-    the estimate down and inflate the apparent contrast everywhere else.
-    """
-    mag_db = 20.0 * np.log10(np.abs(tile) + EPS)
-    if valid is not None and valid.any():
-        floor = float(np.quantile(mag_db[valid], quantile))
-    else:
-        floor = float(np.quantile(mag_db, quantile))
-    return (mag_db - floor).astype(np.float32), floor
+def absolute_log_magnitude(tile):
+    """Absolute log magnitude in dB, no floor subtraction."""
+    return (20.0 * np.log10(np.abs(tile) + EPS)).astype(np.float32)
 
 
 def adjacent_pulse_phase_diff(tile):
@@ -544,6 +545,30 @@ def read_tiles(path):
 # PLOTTING
 # ---------------------------------------------------------------------------
 
+def adjacent_pulse_phase_cos_sin(tile):
+    """
+    cos and sin of arg(x[m] * conj(x[m-1])) at every range sample.
+
+    This matches the UNet input channels 1 and 2 exactly.
+    """
+    if tile.shape[0] < 2:
+        zeros = np.zeros(tile.shape, dtype=np.float32)
+        return zeros, zeros.copy()
+
+    prod = tile[1:] * np.conj(tile[:-1])
+    phase = np.angle(prod)
+
+    cos_d = np.empty(tile.shape, dtype=np.float32)
+    sin_d = np.empty(tile.shape, dtype=np.float32)
+
+    cos_d[1:] = np.cos(phase)
+    sin_d[1:] = np.sin(phase)
+    cos_d[0] = cos_d[1]
+    sin_d[0] = sin_d[1]
+
+    return cos_d, sin_d
+
+
 def plot_tile(tile, valid, p0, r0, out_path, panels=('magnitude', 'phasediff',
                                                      'texture', 'valid'),
               texture_window=TEXTURE_WINDOW_DEFAULT,
@@ -554,7 +579,7 @@ def plot_tile(tile, valid, p0, r0, out_path, panels=('magnitude', 'phasediff',
     if n_panels == 0:
         raise ValueError("at least one panel is required")
 
-    mag_db, floor = floor_relative_db(tile, valid)
+    mag_db = absolute_log_magnitude(tile)
 
     fig_w = 4.2 * n_panels + 1.0
     fig, axes = plt.subplots(1, n_panels, figsize=(fig_w, 4.8),
@@ -563,15 +588,23 @@ def plot_tile(tile, valid, p0, r0, out_path, panels=('magnitude', 'phasediff',
 
     for ax, name in zip(axes, panels):
         if name == 'magnitude':
-            img, cmap, vmin, vmax, label = (mag_db, 'viridis', vmin_db,
-                                            vmax_db, 'dB above floor')
+            img, cmap, vmin, vmax, label = (mag_db, 'gray', None, None,
+                                            'dB absolute')
         elif name == 'phasediff':
             img, cmap, vmin, vmax, label = (adjacent_pulse_phase_diff(tile),
-                                            'twilight', -np.pi, np.pi,
+                                            'gray', -np.pi, np.pi,
                                             'radians')
+        elif name == 'phase_cos':
+            cos_d, _ = adjacent_pulse_phase_cos_sin(tile)
+            img, cmap, vmin, vmax, label = (cos_d, 'gray', -1.0, 1.0,
+                                            'cos(phase diff)')
+        elif name == 'phase_sin':
+            _, sin_d = adjacent_pulse_phase_cos_sin(tile)
+            img, cmap, vmin, vmax, label = (sin_d, 'gray', -1.0, 1.0,
+                                            'sin(phase diff)')
         elif name == 'texture':
             img, cmap, vmin, vmax, label = (
-                amplitude_texture(tile, texture_window), 'magma', 0.0, 1.0,
+                amplitude_texture(tile, texture_window), 'gray', 0.0, 1.0,
                 'amplitude CV')
         elif name == 'valid':
             img, cmap, vmin, vmax, label = (valid.astype(np.float32), 'gray',
@@ -587,10 +620,9 @@ def plot_tile(tile, valid, p0, r0, out_path, panels=('magnitude', 'phasediff',
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=label)
 
     valid_frac = float(valid.mean())
-    fig.suptitle(
-        f'pulse {p0}, range {r0}   |   {tile.shape[0]} x {tile.shape[1]}   |   '
-        f'floor {floor:.1f} dB   |   valid {100 * valid_frac:.0f}%{title_extra}',
-        fontsize=11)
+    title = (f'pulse {p0}, range {r0}   |   {tile.shape[0]} x {tile.shape[1]}   |   '
+             f'valid {100 * valid_frac:.0f}%{title_extra}')
+    fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(out_path, dpi=110)
     plt.close(fig)
@@ -602,9 +634,6 @@ def plot_contact_sheet(tiles, valids, locations, out_path, n_cols=6,
                        max_tiles=60):
     """
     Grid of magnitude thumbnails for fast scanning across many tiles.
-
-    Every thumbnail uses the SAME colour limits, relative to its own floor,
-    so relative contamination is comparable across the sheet.
     """
     n = min(len(tiles), max_tiles)
     if n == 0:
@@ -623,13 +652,13 @@ def plot_contact_sheet(tiles, valids, locations, out_path, n_cols=6,
         if idx >= n:
             ax.axis('off')
             continue
-        mag_db, _ = floor_relative_db(tiles[idx], valids[idx])
-        ax.imshow(mag_db, aspect='auto', origin='upper', cmap='viridis',
-                  vmin=vmin_db, vmax=vmax_db, interpolation='nearest')
+        mag_db = absolute_log_magnitude(tiles[idx])
+        ax.imshow(mag_db, aspect='auto', origin='upper', cmap='gray',
+                  interpolation='nearest')
         ax.set_title(f'{idx}: p{locations[idx][0]} r{locations[idx][1]}',
                      fontsize=7)
 
-    fig.suptitle('floor relative magnitude, dB', fontsize=11)
+    fig.suptitle('absolute magnitude, dB', fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=110)
     plt.close(fig)
@@ -655,7 +684,8 @@ def render_all(tiles, valids, locations, out_dir, args, tag=''):
     sheet = plot_contact_sheet(
         tiles, valids, locations,
         os.path.join(out_dir, 'contact_sheet.png'),
-        n_cols=args.sheet_cols, vmin_db=args.vmin_db, vmax_db=args.vmax_db)
+        n_cols=args.sheet_cols, vmin_db=args.vmin_db, vmax_db=args.vmax_db,
+        max_tiles=args.max_tiles)
     if sheet:
         written.append(sheet)
     return written
@@ -981,7 +1011,7 @@ def parse_args():
                    help='add a dense strided grid of tile origins')
     p.add_argument('--stride-pulse', type=int, default=4096)
     p.add_argument('--stride-range', type=int, default=2048)
-    p.add_argument('--max-tiles', type=int, default=24,
+    p.add_argument('--max-tiles', type=int, default=50,
                    help='cap on the number of tiles extracted')
 
     p.add_argument('--mask-mode', choices=['subswath', 'amplitude', 'none'],
@@ -995,8 +1025,8 @@ def parse_args():
 
     p.add_argument('--panels', nargs='+',
                    default=['magnitude', 'phasediff', 'texture', 'valid'],
-                   choices=['magnitude', 'phasediff', 'texture', 'valid'],
-                   help='panels rendered per tile')
+                   choices=['magnitude', 'phasediff', 'phase_cos', 'phase_sin', 'texture', 'valid'],
+                   help='panels rendered per tile (phase_cos and phase_sin match UNet channels 1-2)')
     p.add_argument('--texture-window', type=int, default=TEXTURE_WINDOW_DEFAULT,
                    help='range window for the amplitude CV panel')
     p.add_argument('--vmin-db', type=float, default=MAG_VMIN_DB)
