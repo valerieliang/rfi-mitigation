@@ -59,10 +59,17 @@ Three ways to choose locations, in decreasing order of usefulness:
 Usage
 -----
     # Process specific pulse and range windows (defaults to freq A, all pols)
+    # Large windows are automatically tiled into 256x256 blocks
     python plot_raw_tiles.py granule.h5 \\
         --pulse-start 700435 --pulse-end 715206 \\
         --range-start 0 --range-end 512 \\
         --output-dir figs/la_blob
+
+    # Custom tile size for auto-tiling
+    python plot_raw_tiles.py granule.h5 \\
+        --pulse-start 700435 --pulse-end 715206 \\
+        --tile-pulses 512 --tile-range 512 \\
+        --output-dir figs/la_blob_512
 
     # Process entire granule with specific frequency and polarization
     python plot_raw_tiles.py granule.h5 --freq A --pol HH \\
@@ -167,6 +174,10 @@ CPI_WIDTH_DEFAULT = 250       # range samples per clean-tile record
 
 PULSES_DEFAULT = 256
 RANGE_WIDTH_DEFAULT = 512
+
+# Default tile size for automatic tiling of large windows
+DEFAULT_TILE_PULSES = 256
+DEFAULT_TILE_RANGE = 256
 
 # Caltone removal, matching the detection and generation paths.
 CALTONE_WINDOW_SIZE = 64
@@ -485,10 +496,25 @@ def write_tiles(path, tiles, valids, locations, meta):
     locations = np.asarray(locations, dtype=np.int32)
 
     n, p, k = tiles.shape
+
+    # Calculate safe chunk size to avoid HDF5 4GB limit
+    # complex64 = 8 bytes, bool = 1 byte
+    # For tiles: 1 * p * k * 8 bytes must be < 4GB
+    # For valid: 1 * p * k * 1 byte must be < 4GB
+    max_chunk_elements = (4 * 1024**3) // 8  # 4GB / 8 bytes
+
+    if p * k > max_chunk_elements:
+        # Need to chunk in smaller pieces
+        chunk_p = min(p, 256)
+        chunk_k = min(k, min(max_chunk_elements // chunk_p, 4096))
+    else:
+        chunk_p = p
+        chunk_k = k
+
     with h5py.File(path, 'w') as f:
-        f.create_dataset('tiles', data=tiles, chunks=(1, p, k),
+        f.create_dataset('tiles', data=tiles, chunks=(1, chunk_p, chunk_k),
                          compression='gzip', compression_opts=1)
-        f.create_dataset('valid', data=valids, chunks=(1, p, k),
+        f.create_dataset('valid', data=valids, chunks=(1, chunk_p, chunk_k),
                          compression='gzip', compression_opts=1)
         f.create_dataset('tile_pulse', data=locations[:, 0])
         f.create_dataset('tile_range', data=locations[:, 1])
@@ -639,6 +665,26 @@ def render_all(tiles, valids, locations, out_dir, args, tag=''):
 # MODES
 # ---------------------------------------------------------------------------
 
+def generate_tile_grid(pulse_start, pulse_end, range_start, range_end,
+                       tile_pulses=DEFAULT_TILE_PULSES, tile_range=DEFAULT_TILE_RANGE):
+    """
+    Divide a large pulse/range window into smaller tiles for visualization.
+
+    Returns list of (p0, r0, n_pulses, range_width) tuples.
+    """
+    tiles = []
+    p0 = pulse_start
+    while p0 < pulse_end:
+        p_len = min(tile_pulses, pulse_end - p0)
+        r0 = range_start
+        while r0 < range_end:
+            r_len = min(tile_range, range_end - r0)
+            tiles.append((p0, r0, p_len, r_len))
+            r0 += tile_range
+        p0 += tile_pulses
+    return tiles
+
+
 def process_single_channel(raw, freq, pol, args, pulse_start, pulse_end, range_start, range_end,
                           n_pulses, range_width, locations):
     """Process a single frequency/polarization channel."""
@@ -666,10 +712,15 @@ def process_single_channel(raw, freq, pol, args, pulse_start, pulse_end, range_s
 
     tiles, valids, kept = [], [], []
     for p0, r0 in locations:
-        tile_n_pulses = args.pulses if args.pulses else actual_n_pulses
-        tile_range_width = args.range_width if args.range_width else actual_range_width
+        # Use explicit tile sizes if given, otherwise use auto-tile sizes
+        tile_n_pulses = args.pulses if args.pulses else args.tile_pulses
+        tile_range_width = args.range_width if args.range_width else args.tile_range
 
-        if p0 + tile_n_pulses > n_pulses_total or r0 + tile_range_width > n_range_total:
+        # Clip to actual bounds
+        tile_n_pulses = min(tile_n_pulses, n_pulses_total - p0)
+        tile_range_width = min(tile_range_width, n_range_total - r0)
+
+        if tile_n_pulses <= 0 or tile_range_width <= 0:
             print(f'  [skip] ({p0}, {r0}) extends past the granule bounds')
             continue
 
@@ -765,10 +816,17 @@ def run_from_granule(args):
 
     locations = parse_at(args.at)
 
-    # If using new-style pulse/range bounds, create a single tile at the specified window
+    # If using new-style pulse/range bounds, tile the window if it's large
     if args.pulse_start is not None or args.pulse_end is not None or args.range_start is not None or args.range_end is not None:
         if not locations:
-            locations = [(pulse_start, range_start)]
+            # Check if window is large enough to warrant auto-tiling
+            if n_pulses * range_width > (args.tile_pulses * args.tile_range * 4):
+                tile_grid = generate_tile_grid(pulse_start, pulse_end, range_start, range_end,
+                                              args.tile_pulses, args.tile_range)
+                locations = [(p0, r0) for p0, r0, _, _ in tile_grid]
+                print(f'  auto-tiling      : {len(locations)} tiles of {args.tile_pulses}x{args.tile_range}')
+            else:
+                locations = [(pulse_start, range_start)]
 
     if args.from_clean:
         tile_pulse, tile_range = load_clean_locations(args.from_clean, freq, pols[0])
@@ -905,6 +963,10 @@ def parse_args():
                    help='(legacy) pulse (azimuth) extent of each tile')
     p.add_argument('--range-width', type=int, default=None,
                    help='(legacy) range sample (fast time) extent of each tile')
+    p.add_argument('--tile-pulses', type=int, default=DEFAULT_TILE_PULSES,
+                   help='pulse extent for auto-generated tiles')
+    p.add_argument('--tile-range', type=int, default=DEFAULT_TILE_RANGE,
+                   help='range extent for auto-generated tiles')
     p.add_argument('--cpi-len', type=int, default=CPI_LEN_DEFAULT,
                    help='pulses per CPI block, for clean-run bookkeeping')
 
