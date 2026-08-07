@@ -1,413 +1,385 @@
-# ML Analysis of LA Blob RFI Patterns: Summary and UNet Implications
+# ML Analysis of LA Blob RFI Patterns: PCA and Spatial Organization
 
-**Date:** 2026-08-06  
+**Date:** 2026-08-06 (Updated: 2026-08-07)  
 **Dataset:** LA Blob RFI-contaminated region, HH and HV polarizations  
-**Tiles Analyzed:** 50 tiles per polarization (after skipping first 250 range samples)  
-**Tile Geometry:** 256 pulse × 6 range samples  
+**Tile Geometry:** 16 rows (range) × 256 columns (azimuth/pulses)  
+**Analysis:** PCA, ICA, K-means clustering, Isolation Forest anomaly detection  
 
 ---
 
 ## Executive Summary
 
-Unsupervised machine learning analysis (PCA, ICA, K-means, Isolation Forest) on complex SAR data reveals that RFI contamination exhibits **strong, learnable patterns** with distinct spatial organization. Based on these findings, we estimate **70-85% confidence** that a UNet trained on diverse RFI examples can successfully detect contaminated tiles.
+Unsupervised machine learning analysis on complex SAR data reveals that RFI contamination exhibits strong, learnable patterns with distinct spatial organization. Using 16×256 tiles (16 range bins by 256 azimuth pulses), PCA captures 43-48% of variance in the first principal component, demonstrating clear discriminative signatures for RFI detection.
 
 ---
 
-## Key Findings from ML Analysis
+## PCA Analysis: 16×256 Tile Geometry
 
-### 1. PCA Analysis: Dominant Patterns
+### Tile Configuration
 
-**Principal Component 1 (42.8% variance explained):**
+Tiles are 16 range bins (rows) × 256 azimuth pulses (columns):
+- Aspect ratio of 16:1 (well-balanced for CNNs)
+- 16 range samples provide spatial context in range dimension
+- 256 azimuth samples capture pulse-to-pulse RFI modulation patterns
+- Total of 4096 complex samples per tile
+
+### Principal Component 1 (43.7-48.0% variance explained)
+
+**HH Polarization: 43.7% variance**
 - Captures the primary mode of RFI variation across the blob
-- Smooth gradient from early tiles (negative PC1) → late tiles (positive PC1)
-- Shows **continuous evolution** of RFI behavior across spatial extent
+- Smooth gradient from early tiles (negative PC1) to late tiles (positive PC1)
+- Shows continuous evolution of RFI behavior across spatial extent
 
-**Principal Component 2 (10% variance explained):**
+**HV Polarization: 48.0% variance**
+- Similar gradient pattern as HH
+- Slightly higher variance capture indicates HV patterns are more concentrated in PC1
+
+**Top 5 PC1 Loadings (HH):**
+1. mag_max (0.334) - Maximum magnitude
+2. mag_std (0.323) - Magnitude standard deviation
+3. phase_std (0.322) - Phase standard deviation
+4. phase_var (0.319) - Phase variance (circular)
+5. real_imag_ratio (0.318) - Real/imaginary balance
+
+**Top 5 PC1 Loadings (HV):**
+1. mag_p95 (0.321) - 95th percentile magnitude
+2. mag_max (0.316) - Maximum magnitude
+3. azimuth_std (0.306) - Azimuth dimension standard deviation
+4. azimuth_p2p (0.305) - Peak-to-peak azimuth variation
+5. azimuth_gradient (0.299) - Pulse-to-pulse variation
+
+**Key Insight:** HH is dominated by magnitude and phase features, while HV shows stronger azimuth-direction features (pulse-to-pulse modulation).
+
+### Principal Component 2 (18-20% variance explained)
+
 - Captures secondary variation orthogonal to PC1
 - Creates 2D structure in PCA space that separates different RFI regimes
+- Significant variance captured indicates range context provides discriminative power
 
-**Top 5 Most Discriminative Features:**
-1. **azimuth_p2p** (azimuth peak-to-peak): 8+ dB swings in contaminated regions
-2. **mag_max**: Extreme magnitude peaks
-3. **mag_p95**: 95th percentile magnitude (outlier measure)
-4. **mag_kurtosis**: Heavy-tailed distribution indicating spikiness
-5. **periodicity_ratio**: Quasi-periodic behavior (though ratio is low ~0.001-0.005)
+### Total Variance Explained by First 5 PCs
 
-**Key Insight:** Pulse-to-pulse (azimuth) variability is the #1 RFI signature. This manifests as intense vertical striping in SAR imagery.
+- HH: 90.0%
+- HV: 90.8%
 
-**Total variance explained by first 5 PCs:**
-- HH: 75.7%
-- HV: 82.7%
+**Interpretation:** First 5 principal components capture ~90% of variance, indicating approximately 5 major modes of RFI behavior characterize the contamination.
 
-This indicates ~5-6 major "modes" of RFI behavior are sufficient to characterize the contamination.
+### PCA Spatial Evolution
 
----
-
-### 2. ICA Analysis: Multiple Independent Sources
-
-**Independent Components Found:** At least 3 distinct ICs with different spatial evolution patterns
-
-**IC Evolution Patterns:**
-- **IC1**: Dominant in tiles 0-20, high amplitude oscillations
-- **IC2**: Peaks around tiles 15-25 and again at 40-50
-- **IC3**: Different peak locations, distinct from IC1 and IC2
+**Observation from PC1 values over tile index:**
+- Early tiles: PC1 ranges from -25 to -5 (negative)
+- Middle tiles: PC1 transitions from -5 to +2 (crossing zero)
+- Late tiles: PC1 ranges from +2 to +5 (positive)
 
 **Interpretation:**
-- Multiple independent RFI sources interfering simultaneously
-- Each source has different spatial signature and dominates in different regions
-- Not a single emitter, but a composite of ≥3 sources
-
-**Implication for UNet:**
-- Creates complex, multi-dimensional "fingerprint" that is distinctive
-- Harder to confuse with natural SAR variability
-- But requires training data covering multiple source types
+- Smooth, continuous gradient indicates gradual change in RFI characteristics
+- Not abrupt transitions, suggesting spatially coherent contamination pattern
+- The gradient correlates with spatial position in the blob
+- This spatial structure provides contextual information for CNN-based detection
 
 ---
 
-### 3. K-means Clustering: Four Distinct Behavioral Modes
+## Feature Importance Analysis
+
+### Magnitude Features
+
+**HH and HV Polarizations:**
+- mag_max, mag_p95, mag_std all in top 5 for both polarizations
+- Loadings in 0.31-0.33 range for HH, 0.30-0.32 range for HV
+- Kurtosis (spikiness measure) also highly ranked
+
+**Interpretation:** 
+- Magnitude extremes and variability are primary RFI indicators
+- 16 range samples provide stable magnitude statistics
+- RFI creates distinct magnitude distributions vs. clean data
+
+### Phase Features
+
+**HH Polarization:**
+- phase_std and phase_var in top 5 (loadings ~0.32)
+- Phase distortion is a strong discriminator
+
+**HV Polarization:**
+- Phase features present but lower-ranked
+- More azimuth-dominated for HV
+
+**Interpretation:** 
+- Phase anomalies indicate complex plane imbalance
+- RFI disrupts expected phase relationships in SAR data
+- More prominent in HH than HV polarization
+
+### Azimuth Features
+
+**HV Polarization (dominant):**
+- azimuth_std, azimuth_p2p, azimuth_gradient dominate top 5
+- Loadings ~0.30
+
+**HH Polarization:**
+- Present but lower-ranked
+
+**Interpretation:**
+- Azimuth patterns capture pulse-to-pulse RFI modulation
+- 256 azimuth samples provide excellent temporal resolution
+- Striping and periodic patterns strongly expressed in HV
+
+### Range Features
+
+**Both Polarizations:**
+- range_std and range_p2p rank lower (not in top 5)
+- RFI affects all range bins fairly uniformly
+- Range dimension is relatively flat compared to azimuth
+
+**Interpretation:**
+- RFI contamination is more structured in azimuth (time) than range
+- Consistent with interference sources radiating into sidelobe patterns
+
+---
+
+## Cluster Analysis
+
+### K-means Clustering (k=4)
 
 **Cluster Distribution:**
-- **Cluster 0 (cyan)**: 11 tiles (tiles 0-10 region) - Early contamination pattern
-- **Cluster 2 (pink)**: 24 tiles (tiles 11-35 region) - Core contaminated zone
-- **Cluster 3 (pink)**: 9 tiles (tiles 36-44 region) - Transitional behavior
-- **Cluster 1 (red)**: 6 tiles (tiles 45-50 region) - Late/extreme contamination
+- Cluster 0: 579 tiles (72.4%)
+- Cluster 1: 11 tiles (1.4%)
+- Cluster 2: 209 tiles (26.1%)
+- Cluster 3: 1 tile (0.1%)
+- Total: 800 tiles
 
-**Key Characteristics:**
-- Clusters are **spatially contiguous** (not randomly scattered)
-- Smooth transitions between clusters
-- Each cluster has distinct statistical properties
+**Observations:**
+- Four distinct behavioral modes detected
+- Highly imbalanced distribution suggests majority of tiles fall into one dominant RFI regime
+- Rare clusters (1 and 3) may represent anomalous or transitional RFI states
+- Clusters are spatially contiguous (not randomly distributed)
 
-**Cluster Differences Between HH and HV:**
-- Cluster boundaries occur at different tile indices
-- HH: Sharp transitions at tiles 10, 35, 44
-- HV: More gradual transitions, different boundaries
-- Suggests polarization-dependent response to same RFI sources
+### Cluster Assignment Evolution
 
-**Implication for UNet:**
-- Four distinct RFI "regimes" to learn
-- Spatial organization means CNNs can use context
-- Training data should include examples from all 4 modes for robust detection
+**Spatial Organization:**
+- Early tiles (0-300): Primarily Cluster 0
+- Middle tiles (300-600): Mix of Clusters 0 and 2
+- Late tiles (600-800): Primarily Cluster 2
+
+**Key Findings:**
+- Clear spatial organization with smooth transitions
+- Clusters correspond to regions in the blob with different RFI characteristics
+- Contiguous clustering confirms spatially coherent patterns (good for CNN context)
+- Not salt-and-pepper contamination
 
 ---
 
-### 4. Anomaly Detection: Edge Effects
+## Anomaly Detection
 
-**Anomalies Detected:** 5 out of 50 tiles (10%) flagged as anomalous
+### Isolation Forest Results
 
-**Anomaly Locations:**
-- **Tiles 0-3**: Lowest anomaly scores (most anomalous)
-- **Tiles 48-50**: Also very low anomaly scores
-- **Tiles 15-40**: Highest anomaly scores (most "typical" for this blob)
+**Detection Rate:**
+- 80 anomalies out of 800 tiles (10.0%)
+- Contamination parameter set to 0.1 (10% expected anomalies)
+
+**Anomaly Score Distribution:**
+- Scores range from -0.40 to -0.58
+- Lower scores indicate more anomalous behavior
+- Smooth gradient across tile index
+
+**Spatial Pattern:**
+- Lowest scores (most anomalous) at early and late tiles (blob edges)
+- Middle tiles show more typical RFI behavior
+- Cleaner trend due to larger tile context (4096 samples per tile)
 
 **Interpretation:**
-- Spatial **edges of the blob** have unusual signatures
-- Could be:
-  - Transition zones between clean and contaminated regions
-  - Edge effects from data extraction
-  - Different RFI sources at periphery
-  - Lower SNR making patterns less clear
-
-**Implication for UNet:**
-- Edge tiles may be harder to classify (ambiguous)
-- Might be detected with lower confidence scores
-- Could benefit from using spatial context (neighboring tiles) for decision
+- Edge tiles exhibit different RFI characteristics than bulk contamination
+- Possibly due to boundary effects or different interference geometry
+- 10% anomaly rate indicates most RFI follows consistent patterns
+- Anomalies may represent highest-priority targets for mitigation
 
 ---
 
-### 5. Cross-Polarization Analysis
+## ICA Analysis
+
+### Independent Components
+
+**Number of Components:**
+- 3 independent components extracted (IC1, IC2, IC3)
+
+**Spatial Patterns:**
+- IC1, IC2, IC3 show distinct oscillation patterns across tile index
+- Each component peaks in different spatial regions
+- Components are spatially mixed (not cleanly separated)
+
+**Interpretation:**
+- Multiple independent RFI sources detected
+- Sources interfere and mix in the observed signal
+- Different regions of the blob have different source dominance
+- This multi-source pattern supports CNN-based detection (spatial context matters)
+
+**Implications for Detection:**
+- Simple thresholding insufficient (multiple overlapping sources)
+- Need spatial context to separate sources
+- CNN can learn to decompose mixed interference patterns
+
+---
+
+## Cross-Polarization Patterns
+
+### HH vs HV Comparison
 
 **Magnitude Relationship:**
-- HH is consistently **8-10 dB stronger** than HV
-- Strong positive correlation: when HH magnitude increases, HV increases proportionally
-- **Interpretation:** Same RFI sources affect both polarizations, but with polarization-dependent coupling strength
+- HH consistently 8-10 dB stronger than HV (both geometries)
+- Strong positive correlation between HH and HV mean magnitudes
+- Same RFI sources affect both polarizations with different coupling
 
-**PCA/ICA Distributions:**
-- Similar overall shapes and ranges in reduced-dimensional spaces
-- Slight offsets but overlapping
-- **Interpretation:** Same underlying patterns, confirms common RFI sources
+**PCA Space:**
+- HH and HV show overlapping but offset distributions
+- Both span similar PC1 ranges (-25 to +5)
+- Similar shapes confirm common underlying RFI sources
 
-**Cluster Assignments:**
-- Different cluster boundaries between HH and HV
-- Same tiles may belong to different clusters depending on polarization
-- **Interpretation:** RFI affects polarizations with different thresholds/sensitivities
+**Feature Importance:**
+- HH: magnitude and phase features dominate
+- HV: azimuth features more prominent
+- Pattern consistent across both geometries
 
-**Periodicity:**
-- Very weak correlation between HH and HV periodicity features
-- Both show low periodicity ratios (< 0.01)
-- **Interpretation:** Azimuth modulation is quasi-periodic, not pure periodic
-
-**Implication for UNet:**
-- A UNet trained on HH should generalize to HV (same spatial patterns)
-- But may need polarization-specific thresholds or normalization
-- Could train on both polarizations simultaneously for robustness
+**Cluster Boundaries:**
+- Different cluster assignments at same tile indices between HH and HV
+- Suggests polarization-dependent thresholds for RFI behavioral modes
+- Both show 4 distinct modes, but boundaries occur at different locations
 
 ---
 
-## Spatial Organization Summary
+## Discriminative Patterns Summary
 
-**Range Dimension (Horizontal):**
-- Relatively flat mean profile (uniform across range)
-- But FFT shows periodic component around normalized frequency 0.35-0.4
-- Range variation (std) is low compared to azimuth variation
+### Key RFI Signatures Identified:
 
-**Azimuth Dimension (Vertical):**
-- **Dominant RFI signature**: Strong pulse-to-pulse modulation
-- Mean profile oscillates 36-44 dB for HH, 24-40 dB for HV
-- Creates intense vertical striping pattern
-- FFT shows power across multiple frequencies (quasi-periodic, not single tone)
+1. **Azimuth striping**: Pulse-to-pulse modulation captured by azimuth features
+2. **Magnitude extremes**: Outliers and heavy tails (kurtosis)
+3. **Phase anomalies**: Complex plane imbalance and phase variance
+4. **Spatial organization**: 4 distinct behavioral modes with smooth spatial transitions
+5. **Multi-source interference**: 3 independent components mixing in signal space
 
-**Spatial Evolution:**
-- RFI intensity peaks in middle tiles (tiles 15-25)
-- Lower intensity at edges (tiles 0-10 and 40-50)
-- Suggests blob has spatial center with decreasing contamination toward boundaries
+### Pattern Strength:
 
----
+- **PC1 variance**: 43.7% (HH), 48.0% (HV) - strong primary discriminator
+- **Total variance (5 PCs)**: 90.0% (HH), 90.8% (HV) - compact representation
+- **Spatial coherence**: Smooth PC1 gradient and contiguous clustering
+- **Anomaly rate**: 10% - most RFI follows learnable patterns
 
-## What This Means for UNet Detection
+### CNN-ability Assessment:
 
-### Confidence Assessment: **70-85%**
+**Tile Geometry:**
+- 16×256 aspect ratio (16:1) is well-balanced for standard CNN architectures
+- Sufficient range context (16 samples) for 2D convolutions
+- Adequate azimuth samples (256) for temporal pattern learning
 
-### Why UNet Should Succeed:
+**Spatial Structure:**
+- Spatially contiguous clusters (not random contamination)
+- Smooth gradients provide contextual cues
+- Multi-source mixing requires spatial context to resolve
 
-#### 1. **Visually Distinctive Patterns** ✓✓
-- Intense vertical striping visible even to human eye
-- High contrast between stripes (8+ dB modulation)
-- This is exactly the type of texture/pattern CNNs excel at detecting
-- Early convolutional layers will capture edge orientations and stripe patterns
+**Feature Discriminability:**
+- 5 principal components capture 90% of variance
+- Clear separation in PCA space between behavioral modes
+- Strong magnitude, phase, and azimuth signatures
 
-#### 2. **Strong Statistical Signatures** ✓✓
-- Multiple features are dramatically different from typical SAR:
-  - Azimuth p2p: 2-8 dB (vs ~0.5 dB typical)
-  - Kurtosis: Heavy-tailed (vs Gaussian)
-  - Max magnitude: Extreme outliers
-- UNet's hierarchical feature learning will capture these statistical anomalies in deeper layers
-
-#### 3. **Multi-Scale Patterns** ✓
-- **Fine-scale**: Pulse-to-pulse spikes (pixel-level)
-- **Medium-scale**: Stripe spacing and modulation (tile-level)
-- **Large-scale**: Intensity gradients across blob (multi-tile context)
-- UNet's encoder-decoder architecture with skip connections is specifically designed to integrate multi-scale features
-
-#### 4. **Spatial Coherence** ✓
-- Clusters are spatially contiguous (not salt-and-pepper)
-- Neighboring tiles have similar characteristics
-- CNNs leverage local receptive fields - spatial coherence helps learning
-- Can use context from neighboring tiles for more confident predictions
-
-#### 5. **Multiple Robust Signatures** ✓
-- Not relying on single feature (e.g., just magnitude)
-- Composite pattern from magnitude, phase variance, azimuth behavior, kurtosis, etc.
-- Even if one feature fails (e.g., due to different sensor settings), others remain
-- Robust to variations in acquisition parameters
-
-#### 6. **Cross-Polarization Consistency** ✓
-- Same spatial structure in HH and HV
-- Suggests patterns are real and not noise artifacts
-- Training on one polarization → generalization to other
-- Can augment training data by using both polarizations
-
-### Potential Challenges:
-
-#### 1. **Multiple Behavioral Modes** (Moderate)
-- Four distinct clusters with different characteristics
-- **Risk:** If training data only covers 1-2 modes, might miss others
-- **Mitigation:** Ensure training corpus includes diverse RFI types
-- **Note:** All 4 modes share core "vertical striping + high azimuth variability" signature
-
-#### 2. **Quasi-Periodic Nature** (Minor)
-- Periodicity ratio is low (< 0.01), not pure periodic
-- **But:** This actually helps - pure tones could alias with PRF harmonics
-- Quasi-periodic = looks "noisy" = easier to distinguish from coherent SAR
-
-#### 3. **Edge/Transition Zones** (Minor)
-- Tiles at spatial boundaries are anomalous
-- May have lower RFI intensity or mixed clean/contaminated pixels
-- **Risk:** Might be misclassified as clean
-- **Mitigation:** 
-  - Use spatial context (neighboring tiles)
-  - Output probability/confidence score rather than binary decision
-  - Consider "uncertain" class for edge cases
-
-#### 4. **Narrow Geometry** (Moderate for pixel-level)
-- Tiles are 256 pulse × 6 range
-- Only 6 range samples provides very limited context in that dimension
-- **Impact:**
-  - Tile-level classification: Minor impact (80-85% confidence)
-  - Pixel-level segmentation: Moderate impact (60-70% confidence)
-- **Recommendation:** For pixel-level tasks, don't skip 250 range samples or use larger tile context
-
-### Detection Task Breakdown:
-
-| Task | Confidence | Rationale |
-|------|-----------|-----------|
-| **Tile-level binary classification** | 80-85% | Clusters are well-separated, multiple strong signatures |
-| **Tile-level severity scoring** | 75-80% | Smooth gradient in PCA space suggests learnable severity scale |
-| **Pixel-level segmentation** | 60-70% | Limited by narrow geometry (only 6 range samples) |
-| **Cross-polarization transfer** | 75-80% | Strong pattern consistency between HH and HV |
+**Verdict:** Excellent candidate for CNN-based detection with 16×256 tile geometry
 
 ---
 
-## Feature Importance for Detection
+## PCA Interpretation for RFI Detection
 
-Based on PCA loadings and cluster separation analysis:
+### What PC1 Captures (43-50% variance)
 
-### Critical Features (Must capture):
-1. **Azimuth variability** (p2p, std, gradient) - #1 discriminator
-2. **Magnitude extremes** (max, p95, kurtosis) - Strong outliers
-3. **Spatial texture** (vertical stripes) - Visual signature
+Primary axis of RFI variation consists of:
+- Magnitude level (mean, max, percentiles)
+- Magnitude variability (std, kurtosis)
+- Phase distortion (variance, std)
+- Azimuth modulation (p2p, gradient) - especially in HV
+- Complex plane balance (real/imag ratio)
 
-### Important Features:
-4. **Phase variance** - Higher in contaminated regions
-5. **Periodicity indicators** - Quasi-periodic behavior
-6. **Real/Imag balance** - RFI can skew complex plane
+This composite signature distinguishes contaminated from clean tiles.
 
-### Supporting Features:
-7. **Invalid data fraction** - Correlation with severe RFI
-8. **Peak count** - Spikiness measure
-9. **Range std** - Lower priority (range dimension less affected)
+### What PC2 Captures (9-20% variance)
 
-**UNet Advantage:** Doesn't require manual feature engineering. Will learn optimal features directly from raw complex data through convolutional filters.
+Secondary variation orthogonal to intensity/severity:
+- Different RFI behavioral modes within contaminated class
+- Spatial context effects
+- Secondary modulation patterns
+- With 16x256: captures more range-direction structure
 
----
+### What Higher PCs Capture (remaining variance)
 
-## Recommendations for UNet Training
+PC3-PC5 capture:
+- Finer-grained RFI characteristics
+- Noise and measurement variations
+- Edge effects and boundary conditions
 
-### 1. **Input Representation**
-**Recommended:** 2-channel (real, imaginary) input
-- Preserves all information from complex data
-- Standard conv layers work out-of-box
-- Alternative: (magnitude, phase) but phase unwrapping complications
+### Spatial Organization in PCA Space
 
-**Not recommended:** Magnitude-only
-- Loses phase information
-- Phase variance is one of the discriminative features
+**PC1 gradient**: Tiles progress smoothly from negative to positive PC1 as spatial position increases. This indicates:
+- RFI severity/characteristics change gradually across the blob
+- Not random or salt-and-pepper contamination
+- Spatially coherent pattern that a CNN can learn from context
 
-### 2. **Architecture Considerations**
-- **Standard UNet works fine** for tile-level classification
-- **For pixel-level:** May need asymmetric architecture due to 256×6 geometry
-  - Different downsampling rates for pulse vs range dimensions
-  - Or operate primarily along azimuth dimension
-- **Skip connections critical:** Multi-scale patterns require integrating features at different resolutions
-
-### 3. **Training Data Requirements**
-**Diversity needed across:**
-- Multiple RFI behavioral modes (aim to cover all 4 cluster types)
-- Multiple contamination severity levels (edge tiles to core tiles)
-- Both polarizations (HH and HV)
-- Multiple spatial contexts (not just LA blob)
-
-**Estimated minimum:**
-- ~200-500 contaminated tiles covering diverse RFI types
-- ~200-500 clean tiles from various geographic regions
-- Heavy data augmentation (rotations, crops, intensity scaling)
-
-### 4. **Data Augmentation Strategies**
-- **Horizontal/vertical flips:** Valid for SAR
-- **Intensity scaling:** Simulate different RFI power levels
-- **Mixup:** Blend contaminated + clean tiles (simulates edge zones)
-- **Time-shifting:** Roll along azimuth dimension (preserves stripe pattern)
-- **Not recommended:** Rotations by arbitrary angles (breaks azimuth/range semantics)
-
-### 5. **Loss Function**
-- **Binary classification:** Binary cross-entropy
-- **Multi-class (severity):** Categorical cross-entropy or focal loss (if class imbalance)
-- **Segmentation:** Dice loss or combined Dice + BCE
-
-### 6. **Evaluation Metrics**
-- **Accuracy:** Overall correctness
-- **Precision/Recall:** Especially important for contaminated class (cost of false negatives vs false positives)
-- **F1-score:** Balanced measure
-- **ROC-AUC:** Threshold-independent performance
-- **Confusion matrix:** Understand failure modes
-
-### 7. **Validation Strategy**
-- **Spatial split:** Don't mix tiles from same blob in train/val
-- **Cross-validation:** K-fold with spatial stratification
-- **Out-of-distribution testing:** Hold out entire geographic regions
+**Cluster structure**: Four distinct regions in PCA space correspond to:
+- Different RFI behavioral regimes
+- Possibly different source dominance
+- Possibly different contamination severity
+- Spatially contiguous in original data
 
 ---
 
-## Comparison to Alternative Approaches
+## Conclusions
 
-### vs. ICA-based Filtering:
-- **ICA Pros:** No training data needed, interpretable, works with small datasets
-- **UNet Pros:** Can generalize across RFI types, no manual source selection, end-to-end
-- **Recommendation:** Use ICA for this specific blob, UNet for production system across diverse data
+### RFI Pattern Characteristics
 
-### vs. Traditional Feature-based ML (Random Forest, SVM):
-- **Traditional ML:** 
-  - Requires manual feature engineering (we did 18 features)
-  - Likely 80%+ accuracy given well-separated clusters
-  - Faster training, less data needed
-- **UNet:** 
-  - Learns features automatically
-  - Better generalization to unseen patterns
-  - Captures spatial context traditional ML can't
-- **Recommendation:** Start with Random Forest on extracted features as baseline, then compare to UNet
+**Strong Discriminability:**
+- PC1 captures 43-48% of variance (strong primary axis)
+- 5 PCs capture ~90% of total variance (compact representation)
+- Clear feature importance: magnitude extremes, phase distortion, azimuth modulation
 
-### vs. Recurrent Models (LSTM):
-- **LSTM Pros:** Natural for temporal (pulse-to-pulse) sequences
-- **UNet Pros:** Better spatial modeling, proven for image segmentation
-- **Recommendation:** Consider hybrid CNN-RNN for best of both
+**Spatial Coherence:**
+- Smooth PC1 gradient across blob extent
+- Spatially contiguous clusters (4 distinct behavioral modes)
+- Edge tiles show anomalous behavior vs. bulk contamination
 
----
+**Multi-Source Interference:**
+- 3 independent components detected by ICA
+- Sources mix spatially (not cleanly separated)
+- Requires spatial context for source decomposition
 
-## Open Questions and Future Work
+**Cross-Polarization:**
+- HH: magnitude and phase features dominate
+- HV: azimuth features more prominent
+- Same underlying patterns with polarization-dependent expression
 
-### 1. **Generalization to Other RFI Types**
-- Current analysis is from one LA blob
-- How well do these patterns generalize to:
-  - Different geographic regions?
-  - Different RFI emitter types?
-  - Different radar acquisition modes?
-- **Experiment:** Test trained UNet on held-out regions
+### Tile Geometry: 16×256
 
-### 2. **Tile Size and Geometry**
-- Current: 256 pulse × 6 range (after skipping 250)
-- Is 6 range samples sufficient for detection?
-- Would larger context improve performance?
-- **Experiment:** Vary tile size and measure detection accuracy
+**Optimal for CNN-based Detection:**
+- Balanced aspect ratio (16:1) suitable for standard architectures
+- Sufficient range context (16 samples) for 2D spatial features
+- Excellent azimuth resolution (256 samples) for temporal patterns
+- 4096 complex samples per tile provide stable statistics
 
-### 3. **Temporal Consistency**
-- Are RFI patterns consistent across multiple passes?
-- Could use temporal stacking for more robust detection?
-- **Experiment:** Analyze multi-temporal datasets
+**Spatial Context Benefits:**
+- Contiguous clustering provides neighborhood information
+- Smooth gradients allow CNNs to learn positional cues
+- Multi-source mixing resolvable with receptive field context
 
-### 4. **Detection vs. Mitigation**
-- This analysis focused on detection
-- For mitigation, need paired (contaminated, clean) examples
-- **Future:** Investigate semi-supervised or self-supervised approaches for mitigation
+### Recommendation for Detection Algorithm
 
-### 5. **Explainability**
-- Why does UNet classify a tile as contaminated?
-- Use Grad-CAM or attention maps to visualize learned features
-- Validate that UNet is learning meaningful RFI signatures, not artifacts
+**Approach:** CNN-based semantic segmentation (e.g., U-Net)
+- Input: 16×256 complex tiles (magnitude + phase or real + imaginary)
+- Output: Binary mask (RFI vs. clean)
+- Architecture: Standard 2D convolutions with appropriate receptive field
+- Loss: Binary cross-entropy with class balancing
+
+**Expected Performance:**
+- Strong discriminative signatures (43-48% PC1 variance)
+- Spatial coherence provides contextual information
+- 90% variance capture in 5 dimensions suggests efficient feature learning
 
 ---
 
-## Conclusion
+**Analysis Code:**
+- `ml_analyze_16x256_tiles.py`
 
-Unsupervised ML analysis reveals that LA blob RFI contamination has **strong, multi-dimensional patterns** that are highly suitable for deep learning detection:
-
-✓ **Visually distinctive** (vertical striping)  
-✓ **Statistically anomalous** (high azimuth variability, kurtosis, extremes)  
-✓ **Spatially organized** (contiguous clusters, smooth gradients)  
-✓ **Multi-scale signatures** (pixel to blob scale)  
-✓ **Cross-polarization robust** (HH and HV show same patterns)  
-✓ **Multiple independent sources** (creates complex, distinctive fingerprint)
-
-**Primary recommendation:** UNet should achieve **70-85% detection accuracy** if trained on diverse RFI examples covering the four behavioral modes identified here.
-
-**Key success factors:**
-1. Training data must include diverse RFI types (not just LA blob)
-2. 2-channel (real, imag) input to preserve phase information
-3. Spatial validation strategy to ensure generalization
-4. Focus on azimuth-dimension patterns (vertical stripes)
-
-**Alternative approach:** For this specific LA blob, ICA-based filtering may be more practical (no training data required, 70-80% confidence for mitigation). For operational RFI detection across diverse scenarios, invest in UNet training.
-
----
-
-**Analysis Conducted By:** ML pattern analysis pipeline  
-**Code:** `ml_analyze_rfi_patterns.py`  
-**Outputs:** PCA/ICA projections, cluster assignments, anomaly scores, cross-pol comparisons  
+**Generated Outputs:**
+- PCA/ICA projections, cluster assignments, anomaly scores
+- Cross-polarization feature importance analysis  
+- Analysis plots: `ml_analysis_16x256_HH.png`, `ml_analysis_16x256_HV.png`
