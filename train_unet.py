@@ -283,7 +283,7 @@ def compute_metrics(pred, target, valid_mask=None, threshold=0.5):
 # TRAINING
 # ===========================================================================
 
-def train_epoch(model, loader, criterion, optimizer, device):
+def train_epoch(model, loader, criterion, optimizer, device, scaler=None):
     model.train()
     total_loss = 0.0
     metrics = {'iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
@@ -292,10 +292,20 @@ def train_epoch(model, loader, criterion, optimizer, device):
         tiles, masks, valid = tiles.to(device), masks.to(device), valid.to(device)
 
         optimizer.zero_grad()
-        outputs = model(tiles)
-        loss = criterion(outputs, masks, valid)
-        loss.backward()
-        optimizer.step()
+
+        # Mixed precision training
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                outputs = model(tiles)
+                loss = criterion(outputs, masks, valid)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            outputs = model(tiles)
+            loss = criterion(outputs, masks, valid)
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
         batch_metrics = compute_metrics(outputs, masks, valid)
@@ -306,7 +316,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
     return total_loss / n, {k: v / n for k, v in metrics.items()}
 
 
-def validate_epoch(model, loader, criterion, device):
+def validate_epoch(model, loader, criterion, device, scaler=None):
     model.eval()
     total_loss = 0.0
     metrics = {'iou': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
@@ -315,8 +325,13 @@ def validate_epoch(model, loader, criterion, device):
         for tiles, masks, valid in loader:
             tiles, masks, valid = tiles.to(device), masks.to(device), valid.to(device)
 
-            outputs = model(tiles)
-            loss = criterion(outputs, masks, valid)
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    outputs = model(tiles)
+                    loss = criterion(outputs, masks, valid)
+            else:
+                outputs = model(tiles)
+                loss = criterion(outputs, masks, valid)
 
             total_loss += loss.item()
             batch_metrics = compute_metrics(outputs, masks, valid)
@@ -391,14 +406,19 @@ def main(args):
     optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
+    # Mixed precision scaler for H100
+    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() and not args.no_amp else None
+    if scaler:
+        print("Using mixed precision (AMP) for faster training\n")
+
     # Train
     print(f"Training for {args.epochs} epochs...\n")
     best_val_iou = 0.0
     history = {'train_loss': [], 'val_loss': [], 'val_iou': [], 'val_f1': []}
 
     for epoch in range(args.epochs):
-        train_loss, train_metrics = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_metrics = validate_epoch(model, val_loader, criterion, device)
+        train_loss, train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, scaler)
+        val_loss, val_metrics = validate_epoch(model, val_loader, criterion, device, scaler)
         scheduler.step(val_loss)
 
         print(f"Epoch {epoch+1}/{args.epochs} | "
@@ -419,7 +439,7 @@ def main(args):
 
     # Test
     print(f"\n{'='*60}")
-    test_loss, test_metrics = validate_epoch(model, test_loader, criterion, device)
+    test_loss, test_metrics = validate_epoch(model, test_loader, criterion, device, scaler)
     print(f"Test: Loss={test_loss:.3f} IoU={test_metrics['iou']:.3f} "
           f"P={test_metrics['precision']:.3f} R={test_metrics['recall']:.3f} F1={test_metrics['f1']:.3f}")
 
@@ -446,6 +466,7 @@ if __name__ == '__main__':
     parser.add_argument('--loss', choices=['bce', 'dice', 'combined'], default='combined')
     parser.add_argument('--features', type=int, nargs='+', default=[64, 128, 256, 512])
     parser.add_argument('--no-cache', action='store_true', help='Disable RAM caching')
+    parser.add_argument('--no-amp', action='store_true', help='Disable mixed precision (AMP)')
     parser.add_argument('--output-dir', default='results/unet')
     parser.add_argument('--run-name', default=None)
     parser.add_argument('--save-every', type=int, default=10)
