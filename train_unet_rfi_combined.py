@@ -524,7 +524,7 @@ def train_model(args):
         criterion = CombinedLoss(bce_weight=0.5, dice_weight=0.5)
 
     optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
     # Training loop
     print(f"\nStarting training for {args.epochs} epochs...")
