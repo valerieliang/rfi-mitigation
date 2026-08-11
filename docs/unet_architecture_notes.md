@@ -61,10 +61,10 @@ Modern GPUs (H100, A100, V100) have specialized **Tensor Cores** optimized for F
 
 **No.** Mixed precision is now industry standard with no observed accuracy loss:
 
-✅ **Proven safe for CNNs** (ResNet, U-Net, etc.) - NVIDIA 2018 paper  
-✅ **Used in production** by all major AI labs since 2018  
-✅ **Critical operations stay FP32** - loss, batch norm, final weights  
-✅ **Gradient scaling prevents underflow** - no numerical instability  
+- **Proven safe for CNNs** (ResNet, U-Net, etc.) - NVIDIA 2018 paper  
+- **Used in production** by all major AI labs since 2018  
+- **Critical operations stay FP32** - loss, batch norm, final weights  
+- **Gradient scaling prevents underflow** - no numerical instability  
 
 **For RFI segmentation**: Binary segmentation is robust to minor precision differences. Your JSR range (3-30 dB) doesn't require extreme numerical precision.
 
