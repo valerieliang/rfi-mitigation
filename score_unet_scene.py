@@ -52,13 +52,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
-# Import NISAR reading utilities
-from read_nisar_isce3 import (
-    read_raw_data_batch,
-    get_subswath_mask,
-    CPI_LEN_DEFAULT,
-    CPI_WIDTH_DEFAULT,
-)
+# NISAR readers
 from nisar.products.readers.Raw import Raw
 from isce3.focus import ToneRemover
 
@@ -67,7 +61,43 @@ from unet import SegUNet, build_input_channels
 
 # Constants
 EPS = 1e-12
+CPI_LEN_DEFAULT = 16
+CPI_WIDTH_DEFAULT = 250
 PULSE_CHUNK_DEFAULT = 1600
+
+
+# ---------------------------------------------------------------------------
+# NISAR UTILITY FUNCTIONS (embedded - no external module needed)
+# ---------------------------------------------------------------------------
+
+def read_raw_data_batch(raw: Raw, freq: str, pol: str, pulse_slice: slice, range_slice: slice):
+    """Read a (pulse, range) window; ISCE3 handles BFPQLUT decoding."""
+    dataset = raw.getRawDataset(freq, pol)
+    p0 = pulse_slice.start if pulse_slice.start is not None else 0
+    p1 = pulse_slice.stop if pulse_slice.stop is not None else dataset.shape[0]
+    r0 = range_slice.start if range_slice.start is not None else 0
+    r1 = range_slice.stop if range_slice.stop is not None else dataset.shape[1]
+    return dataset[p0:p1, r0:r1]
+
+
+def get_subswath_mask(raw: Raw, freq: str, pol: str,
+                      pulse_indices: np.ndarray, range_indices: np.ndarray) -> np.ndarray:
+    """Boolean valid-sample mask from the ISCE3 subswath boundaries."""
+    tx_pol = pol[0]
+    subswaths = raw.getSubSwaths(freq, tx_pol)
+    swaths = subswaths[:, pulse_indices, :]
+    num_pulses = len(pulse_indices)
+    num_range_samples = len(range_indices)
+    mask = np.zeros((num_pulses, num_range_samples), dtype=bool)
+    r_offset = int(range_indices[0])
+    if swaths is not None:
+        for i in range(num_pulses):
+            for start, end in swaths[:, i, :]:
+                s = max(int(start) - r_offset, 0)
+                e = min(int(end) - r_offset, num_range_samples)
+                if e > s:
+                    mask[i, s:e] = True
+    return mask
 
 # Caltone removal (same as score_scene.py)
 CALTONE_WINDOW_SIZE = 64
