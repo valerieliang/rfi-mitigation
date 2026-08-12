@@ -56,9 +56,11 @@ from matplotlib.gridspec import GridSpec
 from nisar.products.readers.Raw import Raw
 from isce3.focus import ToneRemover
 
-# Import UNet - NOT using SegUNet, using the training architecture
+# Import UNet architecture and preprocessing
 import torch.nn as nn
 import torch.nn.functional as F
+from unet import UNet
+from input_transforms import prepare_tile_2channel
 
 # Constants
 EPS = 1e-12
@@ -66,102 +68,13 @@ CPI_LEN_DEFAULT = 16
 CPI_WIDTH_DEFAULT = 250
 PULSE_CHUNK_DEFAULT = 1600
 
-
-# ---------------------------------------------------------------------------
-# UNET ARCHITECTURE (from train_unet.py)
-# ---------------------------------------------------------------------------
-
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.double_conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        return self.double_conv(x)
-
-
-class UNet(nn.Module):
-    """U-Net for binary RFI segmentation (matches training architecture)."""
-    def __init__(self, in_channels=2, out_channels=1, features=[64, 128, 256, 512]):
-        super().__init__()
-        self.downs = nn.ModuleList()
-        self.ups = nn.ModuleList()
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Encoder
-        for feature in features:
-            self.downs.append(DoubleConv(in_channels, feature))
-            in_channels = feature
-
-        # Bottleneck
-        self.bottleneck = DoubleConv(features[-1], features[-1] * 2)
-
-        # Decoder
-        for feature in reversed(features):
-            self.ups.append(nn.ConvTranspose2d(feature * 2, feature, kernel_size=2, stride=2))
-            self.ups.append(DoubleConv(feature * 2, feature))
-
-        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
-
-    def forward(self, x):
-        skip_connections = []
-
-        for down in self.downs:
-            x = down(x)
-            skip_connections.append(x)
-            x = self.pool(x)
-
-        x = self.bottleneck(x)
-        skip_connections = skip_connections[::-1]
-
-        for idx in range(0, len(self.ups), 2):
-            x = self.ups[idx](x)
-            skip = skip_connections[idx // 2]
-            if x.shape != skip.shape:
-                x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
-            x = torch.cat((skip, x), dim=1)
-            x = self.ups[idx + 1](x)
-
-        return self.final_conv(x)
-
     def n_parameters(self):
         """Count trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
-def prepare_tile_for_unet(tile: np.ndarray, valid: np.ndarray = None) -> np.ndarray:
-    """
-    Convert complex tile to [real, imag] channels as used in training.
-
-    Parameters
-    ----------
-    tile : (P, K) complex64
-    valid : (P, K) bool, optional (not used, but kept for compatibility)
-
-    Returns
-    -------
-    (2, P, K) float32 - [real, imag] normalized by 99th percentile
-    """
-    # Stack real and imaginary parts
-    tile_real_imag = np.stack([tile.real, tile.imag], axis=0).astype(np.float32)
-
-    # Normalize by 99th percentile of magnitude over valid samples
-    magnitude = np.sqrt(tile_real_imag[0]**2 + tile_real_imag[1]**2)
-    if valid is not None and valid.sum() > 0:
-        scale = np.percentile(magnitude[valid], 99)
-    else:
-        scale = np.percentile(magnitude, 99)
-
-    tile_real_imag = tile_real_imag / max(scale, 1e-6)
-
-    return tile_real_imag
+# Use prepare_tile_2channel from input_transforms.py
+prepare_tile_for_unet = prepare_tile_2channel
 
 
 # ---------------------------------------------------------------------------
@@ -427,25 +340,37 @@ def save_predictions_h5(rec, args, out_dir):
 # ---------------------------------------------------------------------------
 
 def plot_contamination_map(rec, out_dir):
-    """Spatial heatmap of contamination fraction."""
-    grid = rec['contamination_fractions'].reshape(rec['n_pt'], rec['n_rt'])
+    """Spatial heatmap showing number of RFI-contaminated samples per tile."""
+    from matplotlib.colors import PowerNorm
+
+    # Use contaminated sample counts instead of fractions
+    grid = rec['contaminated_samples'].reshape(rec['n_pt'], rec['n_rt'])
+
+    # Get max tile size for reference
+    max_samples = rec['tile_height'] * rec['tile_width']
 
     fig, ax = plt.subplots(figsize=(13, 6))
+
+    # Use power-law normalization to compress dynamic range
+    # gamma < 1 expands low values, compresses high values
     im = ax.imshow(grid, aspect='auto', cmap='YlOrRd', origin='upper',
-                   vmin=0, vmax=0.5, interpolation='nearest',
-                   extent=[0, rec['n_rt'], rec['n_pt'], 0])
+                   vmin=0, vmax=max_samples, interpolation='nearest',
+                   extent=[0, rec['n_rt'], rec['n_pt'], 0],
+                   norm=PowerNorm(gamma=0.5))
+
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Contamination fraction (RFI samples / valid samples)')
+    cbar.set_label('Number of RFI-contaminated samples per tile')
 
     ax.set_xlabel('Range tile index')
     ax.set_ylabel('Pulse tile index')
 
-    mean_contam = rec['contamination_fractions'].mean()
-    n_flagged = (rec['contamination_fractions'] > 0.01).sum()
+    mean_count = rec['contaminated_samples'].mean()
+    n_flagged = (rec['contaminated_samples'] > 0).sum()
 
     ax.set_title(f"UNet RFI Contamination Map -- {rec['chan']} (REAL DATA, NO LABELS)\n"
-                 f"Mean contamination: {mean_contam:.1%}, "
-                 f"{n_flagged}/{len(rec['contamination_fractions'])} tiles with RFI")
+                 f"Mean: {mean_count:.0f} samples/tile, "
+                 f"{n_flagged}/{len(rec['contaminated_samples'])} tiles with RFI "
+                 f"(tile size: {rec['tile_height']}x{rec['tile_width']} = {max_samples} samples)")
 
     fig.tight_layout()
     path = os.path.join(out_dir, f"contamination_map_{rec['freq']}_{rec['pol']}.png")

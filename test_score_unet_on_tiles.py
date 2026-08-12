@@ -49,14 +49,13 @@ from matplotlib.gridspec import GridSpec
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 
-# Try importing from unet.py (newer), fall back to inline definition
+# Import model and preprocessing functions
 try:
-    from unet import SegUNet, build_input_channels
-    print("Using UNet from unet.py")
+    from unet import SegUNet
+    from input_transforms import build_input_channels
+    print("Using UNet from unet.py and input_transforms.py")
 except ImportError:
-    print("unet.py not found, using inline definitions")
-    # Fallback inline definitions would go here
-    # For now, just raise since unet.py should exist
+    print("Required modules not found")
     raise
 
 
@@ -192,12 +191,14 @@ def save_predictions_h5(probs, tiles, valid_masks, tile_pulse, tile_range,
 
 def plot_contamination_map(stats, tile_pulse, tile_range, channel_name, output_dir):
     """
-    Spatial heatmap of contamination fraction per tile.
+    Spatial heatmap showing number of RFI-contaminated samples per tile.
 
-    Similar to the knee_map from score_scene.py, but shows contamination
-    fraction instead of number of RFI eigenvalues.
+    Uses power-law normalization to better visualize low RFI levels.
     """
-    contamination = stats['contamination_fractions']
+    from matplotlib.colors import PowerNorm
+
+    # Use contaminated sample counts instead of fractions
+    contaminated_samples = stats['contaminated_samples']
 
     # Determine grid structure from tile origins
     unique_pulse = np.unique(tile_pulse)
@@ -207,24 +208,34 @@ def plot_contamination_map(stats, tile_pulse, tile_range, channel_name, output_d
 
     # Reshape to grid
     try:
-        grid = contamination.reshape(n_pt, n_rt)
+        grid = contaminated_samples.reshape(n_pt, n_rt)
     except ValueError:
         # Fallback: assume tiles are in order
-        n_pt = int(np.sqrt(len(contamination)))
-        n_rt = len(contamination) // n_pt
-        grid = contamination[:n_pt * n_rt].reshape(n_pt, n_rt)
+        n_pt = int(np.sqrt(len(contaminated_samples)))
+        n_rt = len(contaminated_samples) // n_pt
+        grid = contaminated_samples[:n_pt * n_rt].reshape(n_pt, n_rt)
+
+    # Assume 256x256 tiles (max possible)
+    max_samples = 256 * 256
 
     fig, ax = plt.subplots(figsize=(13, 6))
+
+    # Use power-law normalization to compress dynamic range
+    # gamma < 1 expands low values, compresses high values
     im = ax.imshow(grid, aspect='auto', cmap='YlOrRd', origin='upper',
-                   vmin=0, vmax=0.5, interpolation='nearest',
-                   extent=[0, n_rt, n_pt, 0])
+                   vmin=0, vmax=max_samples, interpolation='nearest',
+                   extent=[0, n_rt, n_pt, 0],
+                   norm=PowerNorm(gamma=0.5))
+
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Contamination fraction (RFI samples / valid samples)')
+    cbar.set_label('Number of RFI-contaminated samples per tile')
 
     ax.set_xlabel('Range tile index')
     ax.set_ylabel('Pulse tile index')
+
+    mean_count = contaminated_samples.mean()
     ax.set_title(f'UNet RFI Contamination Map - {channel_name} (REAL DATA, NO LABELS)\n'
-                 f'Mean: {stats["mean_contamination"]:.1%}, '
+                 f'Mean: {mean_count:.0f} samples/tile, '
                  f'{stats["tiles_with_contamination"]}/{stats["n_tiles"]} tiles with RFI')
 
     fig.tight_layout()
