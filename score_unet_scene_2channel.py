@@ -68,11 +68,6 @@ CPI_LEN_DEFAULT = 16
 CPI_WIDTH_DEFAULT = 250
 PULSE_CHUNK_DEFAULT = 1600
 
-    def n_parameters(self):
-        """Count trainable parameters."""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-
-
 # Use prepare_tile_2channel from input_transforms.py
 prepare_tile_for_unet = prepare_tile_2channel
 
