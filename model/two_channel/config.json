@@ -1,0 +1,27 @@
+{
+  "data": [
+    "data/unet_amazon_train/amazon_unet_seg_A_HH.h5",
+    "data/unet_amazon_train/amazon_unet_seg_A_HV.h5"
+  ],
+  "train_frac": 0.7,
+  "val_frac": 0.15,
+  "test_frac": 0.15,
+  "load_splits": null,
+  "epochs": 100,
+  "batch_size": 256,
+  "lr": 0.001,
+  "weight_decay": 1e-05,
+  "loss": "combined",
+  "features": [
+    64,
+    128,
+    256,
+    512
+  ],
+  "no_cache": false,
+  "no_amp": false,
+  "output_dir": "results/unet_amazon",
+  "run_name": "amazon_mix_precision",
+  "save_every": 10,
+  "seed": 42
+}
