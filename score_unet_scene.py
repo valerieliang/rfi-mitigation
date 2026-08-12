@@ -56,14 +56,108 @@ from matplotlib.gridspec import GridSpec
 from nisar.products.readers.Raw import Raw
 from isce3.focus import ToneRemover
 
-# Import UNet
-from unet import SegUNet, build_input_channels
+# Import UNet - NOT using SegUNet, using the training architecture
+import torch.nn as nn
+import torch.nn.functional as F
 
 # Constants
 EPS = 1e-12
 CPI_LEN_DEFAULT = 16
 CPI_WIDTH_DEFAULT = 250
 PULSE_CHUNK_DEFAULT = 1600
+
+
+# ---------------------------------------------------------------------------
+# UNET ARCHITECTURE (from train_unet.py)
+# ---------------------------------------------------------------------------
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class UNet(nn.Module):
+    """U-Net for binary RFI segmentation (matches training architecture)."""
+    def __init__(self, in_channels=2, out_channels=1, features=[64, 128, 256, 512]):
+        super().__init__()
+        self.downs = nn.ModuleList()
+        self.ups = nn.ModuleList()
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Encoder
+        for feature in features:
+            self.downs.append(DoubleConv(in_channels, feature))
+            in_channels = feature
+
+        # Bottleneck
+        self.bottleneck = DoubleConv(features[-1], features[-1] * 2)
+
+        # Decoder
+        for feature in reversed(features):
+            self.ups.append(nn.ConvTranspose2d(feature * 2, feature, kernel_size=2, stride=2))
+            self.ups.append(DoubleConv(feature * 2, feature))
+
+        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)
+
+    def forward(self, x):
+        skip_connections = []
+
+        for down in self.downs:
+            x = down(x)
+            skip_connections.append(x)
+            x = self.pool(x)
+
+        x = self.bottleneck(x)
+        skip_connections = skip_connections[::-1]
+
+        for idx in range(0, len(self.ups), 2):
+            x = self.ups[idx](x)
+            skip = skip_connections[idx // 2]
+            if x.shape != skip.shape:
+                x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=True)
+            x = torch.cat((skip, x), dim=1)
+            x = self.ups[idx + 1](x)
+
+        return self.final_conv(x)
+
+
+def prepare_tile_for_unet(tile: np.ndarray, valid: np.ndarray = None) -> np.ndarray:
+    """
+    Convert complex tile to [real, imag] channels as used in training.
+
+    Parameters
+    ----------
+    tile : (P, K) complex64
+    valid : (P, K) bool, optional (not used, but kept for compatibility)
+
+    Returns
+    -------
+    (2, P, K) float32 - [real, imag] normalized by 99th percentile
+    """
+    # Stack real and imaginary parts
+    tile_real_imag = np.stack([tile.real, tile.imag], axis=0).astype(np.float32)
+
+    # Normalize by 99th percentile of magnitude over valid samples
+    magnitude = np.sqrt(tile_real_imag[0]**2 + tile_real_imag[1]**2)
+    if valid is not None and valid.sum() > 0:
+        scale = np.percentile(magnitude[valid], 99)
+    else:
+        scale = np.percentile(magnitude, 99)
+
+    tile_real_imag = tile_real_imag / max(scale, 1e-6)
+
+    return tile_real_imag
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +352,7 @@ def score_channel_unet(raw, freq, pol, model, args, device='cuda'):
             if batch_tiles:
                 inputs = []
                 for tile, valid in zip(batch_tiles, batch_valid):
-                    x = build_input_channels(tile, valid, n_channels=4)
+                    x = prepare_tile_for_unet(tile, valid)
                     inputs.append(x)
 
                 inputs = torch.from_numpy(np.stack(inputs, axis=0)).to(device)
@@ -722,8 +816,8 @@ def main():
                  f"{args.pulse_end if args.pulse_end is not None else 'full'})")
     print(f"  pulses  : {pulse_str}")
 
-    # Load model
-    model = SegUNet(in_channels=4, out_channels=1, base_channels=16, depth=3)
+    # Load model (matching training architecture)
+    model = UNet(in_channels=2, out_channels=1, features=[64, 128, 256, 512])
     checkpoint = torch.load(args.model, map_location=device)
     if isinstance(checkpoint, dict):
         if 'model_state_dict' in checkpoint:
