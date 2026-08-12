@@ -131,6 +131,10 @@ class UNet(nn.Module):
 
         return self.final_conv(x)
 
+    def n_parameters(self):
+        """Count trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
 
 def prepare_tile_for_unet(tile: np.ndarray, valid: np.ndarray = None) -> np.ndarray:
     """
