@@ -349,9 +349,9 @@ def plot_contamination_map(rec, out_dir):
     # Use power-law normalization to compress dynamic range
     # gamma < 1 expands low values, compresses high values
     im = ax.imshow(grid, aspect='auto', cmap='YlOrRd', origin='upper',
-                   vmin=0, vmax=max_samples, interpolation='nearest',
+                   interpolation='nearest',
                    extent=[0, rec['n_rt'], rec['n_pt'], 0],
-                   norm=PowerNorm(gamma=0.5))
+                   norm=PowerNorm(gamma=0.5, vmin=0, vmax=max_samples))
 
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label('Number of RFI-contaminated samples per tile')
