@@ -1,0 +1,21 @@
+{
+  "data": [
+    "data/unet_amazon_train/amazon_unet_seg_A_HH.h5",
+    "data/unet_amazon_train/amazon_unet_seg_A_HV.h5"
+  ],
+  "train_frac": 0.7,
+  "val_frac": 0.15,
+  "test_frac": 0.15,
+  "load_splits": "model/two_channel/splits.npz",
+  "epochs": 100,
+  "batch_size": 16,
+  "lr": 0.001,
+  "weight_decay": 1e-05,
+  "loss": "combined",
+  "no_cache": false,
+  "no_amp": false,
+  "output_dir": "model/four_channel",
+  "run_name": "unet_4ch",
+  "save_every": 10,
+  "seed": 42
+}
