@@ -1,0 +1,34 @@
+{
+  "granule": "NISAR_L0_PR_RRSD_016_012_A_148S_20260127T034309_20260127T034853_P05006_F_J_001.h5",
+  "model": "model/four_channel/best_model.pth",
+  "model_type": "4-channel UNet",
+  "labeled": false,
+  "pulse_window": [
+    363793,
+    439825
+  ],
+  "range_window": [
+    0,
+    26624
+  ],
+  "tile_height": 256,
+  "tile_width": 256,
+  "channels": {
+    "A-HH": {
+      "n_tiles": 30888,
+      "flagged": 5825,
+      "flagged_fraction": 0.18858456358456357,
+      "mean_contamination": 0.020360900089144707,
+      "median_contamination": 0.0001122289540944621,
+      "max_contamination": 0.9991194009780884
+    },
+    "A-HV": {
+      "n_tiles": 30888,
+      "flagged": 8251,
+      "flagged_fraction": 0.2671263921263921,
+      "mean_contamination": 0.027544619515538216,
+      "median_contamination": 0.0016423400957137346,
+      "max_contamination": 0.9760053753852844
+    }
+  }
+}
