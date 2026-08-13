@@ -341,9 +341,10 @@ def main(args):
 
     print(f"Batches per epoch: {len(train_loader)}\n")
 
-    # Model
-    print("Initializing U-Net...")
-    model = UNet(in_channels=2, out_channels=1, features=args.features).to(device)
+    # Model (fixed architecture for fair comparison with 4-channel)
+    UNET_FEATURES = [64, 128, 256, 512]
+    print(f"Initializing U-Net with features={UNET_FEATURES}...")
+    model = UNet(in_channels=2, out_channels=1, features=UNET_FEATURES).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters: {n_params:,}\n")
 
@@ -412,7 +413,6 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=1e-5)
     parser.add_argument('--loss', choices=['bce', 'dice', 'combined'], default='combined')
-    parser.add_argument('--features', type=int, nargs='+', default=[64, 128, 256, 512])
     parser.add_argument('--no-cache', action='store_true', help='Disable RAM caching')
     parser.add_argument('--no-amp', action='store_true', help='Disable mixed precision (AMP)')
     parser.add_argument('--output-dir', default='results/unet')

@@ -346,10 +346,6 @@ def parse_args():
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'])
     parser.add_argument('--output-dir', default='score/four_channel/unet_scene')
 
-    # UNet architecture parameters (must match training)
-    parser.add_argument('--features', type=int, nargs='+', default=[64, 128, 256, 512],
-                       help='UNet feature channels (must match training)')
-
     return parser.parse_args()
 
 
@@ -369,8 +365,9 @@ def main():
                  f"{args.pulse_end if args.pulse_end is not None else 'full'})")
     print(f"  pulses  : {pulse_str}")
 
-    # Load 4-channel UNet model (same architecture as 2-channel)
-    model = UNet(in_channels=4, out_channels=1, features=args.features)
+    # Load 4-channel UNet model (fixed architecture matching 2-channel)
+    UNET_FEATURES = [64, 128, 256, 512]
+    model = UNet(in_channels=4, out_channels=1, features=UNET_FEATURES)
     checkpoint = torch.load(args.model, map_location=device)
     if isinstance(checkpoint, dict):
         if 'model_state_dict' in checkpoint:
@@ -383,7 +380,7 @@ def main():
         model.load_state_dict(checkpoint)
     model.to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Model loaded: {n_params:,} parameters (4-channel UNet)")
+    print(f"  Model loaded: {n_params:,} parameters (4-ch, features={UNET_FEATURES})")
 
     # Open L0B
     raw = Raw(hdf5file=args.l0b_file)

@@ -740,8 +740,9 @@ def main():
                  f"{args.pulse_end if args.pulse_end is not None else 'full'})")
     print(f"  pulses  : {pulse_str}")
 
-    # Load model (matching training architecture)
-    model = UNet(in_channels=2, out_channels=1, features=[64, 128, 256, 512])
+    # Load model (fixed architecture matching training)
+    UNET_FEATURES = [64, 128, 256, 512]
+    model = UNet(in_channels=2, out_channels=1, features=UNET_FEATURES)
     checkpoint = torch.load(args.model, map_location=device)
     if isinstance(checkpoint, dict):
         if 'model_state_dict' in checkpoint:
@@ -753,7 +754,8 @@ def main():
     else:
         model.load_state_dict(checkpoint)
     model.to(device)
-    print(f"  Model loaded: {model.n_parameters():,} parameters")
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Model loaded: {n_params:,} parameters (features={UNET_FEATURES})")
 
     # Open L0B
     raw = Raw(hdf5file=args.l0b_file)
