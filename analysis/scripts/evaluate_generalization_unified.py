@@ -302,8 +302,8 @@ def main():
     parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint (.pth)')
     parser.add_argument('--n-channels', type=int, default=4, choices=[2, 4], help='Number of input channels')
     parser.add_argument('--output', type=str, required=True, help='Output path for visualization')
-    parser.add_argument('--height', type=int, default=128, help='Test tile height')
-    parser.add_argument('--width', type=int, default=200, help='Test tile width')
+    parser.add_argument('--height', type=int, default=256, help='Test tile height (should match training size)')
+    parser.add_argument('--width', type=int, default=256, help='Test tile width (should match training size)')
     args = parser.parse_args()
 
     # Load model

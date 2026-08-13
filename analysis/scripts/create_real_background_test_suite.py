@@ -273,8 +273,8 @@ def main():
     parser.add_argument('--test-indices', type=int, nargs='+', required=True,
                         help='Pulse indices to extract test tiles from')
     parser.add_argument('--output', type=str, required=True, help='Output .npz file')
-    parser.add_argument('--tile-size', type=int, nargs=2, default=[128, 200],
-                        help='Tile dimensions (height width)')
+    parser.add_argument('--tile-size', type=int, nargs=2, default=[256, 256],
+                        help='Tile dimensions (height width) - default 256x256 to match training data')
     parser.add_argument('--frequency', type=str, default='A', help='Frequency band')
     parser.add_argument('--polarization', type=str, default='HH', help='Polarization')
     parser.add_argument('--range-start', type=int, default=1000, help='Starting range sample')
@@ -297,7 +297,8 @@ def main():
     print(f"  Number of test cases: {len(TEST_CASES)}")
 
     # Open L0B file
-    raw = Raw(args.l0b_file)
+    raw = Raw(hdf5file=args.l0b_file)
+    raw.parsePolarizations()
 
     # Build tone remover if requested
     remover = None
