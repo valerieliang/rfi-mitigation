@@ -3,16 +3,16 @@
 score_unet_scene_4channel.py
 
 ============================================================================
-SCORING SCRIPT FOR 4-CHANNEL SEGUNET ON REAL L0B SCENES
+SCORING SCRIPT FOR 4-CHANNEL UNET ON REAL L0B SCENES
 ============================================================================
 
-Run 4-channel SegUNet semantic segmentation on a NISAR L0B granule.
+Run 4-channel UNet semantic segmentation on a NISAR L0B granule.
 This is the 4-channel equivalent of score_unet_scene.py.
 
 Key differences from 2-channel version:
-- Uses SegUNet instead of UNet
 - Uses build_input_channels() for 4-channel preprocessing
 - Input: [mag_db, cos_phase, sin_phase, valid]
+- SAME UNet architecture as 2-channel for fair comparison
 
 Usage:
     python score_unet_scene_4channel.py \
@@ -45,10 +45,10 @@ from matplotlib.gridspec import GridSpec
 from nisar.products.readers.Raw import Raw
 from isce3.focus import ToneRemover
 
-# Import SegUNet architecture and 4-channel preprocessing
+# Import UNet architecture and 4-channel preprocessing
 import torch.nn as nn
 import torch.nn.functional as F
-from unet import SegUNet
+from unet import UNet
 from input_transforms import build_input_channels
 
 # Constants
@@ -140,7 +140,7 @@ def build_tone_remover(raw: Raw, freq: str, pol: str, num_rng_samples: int):
 
 def score_channel_unet(raw, freq, pol, model, args, device='cuda'):
     """
-    Stream one channel, tile it, run 4-channel SegUNet, and return predictions.
+    Stream one channel, tile it, run 4-channel UNet, and return predictions.
 
     Key difference from 2-channel: uses build_input_channels() for preprocessing.
     """
@@ -306,7 +306,7 @@ from score_unet_scene_2channel import (
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Score a NISAR L0B scene with 4-channel SegUNet.',
+        description='Score a NISAR L0B scene with 4-channel UNet.',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('l0b_file', help='Input NISAR L0B HDF5 granule')
@@ -346,11 +346,9 @@ def parse_args():
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'])
     parser.add_argument('--output-dir', default='score/four_channel/unet_scene')
 
-    # SegUNet architecture parameters (must match training)
-    parser.add_argument('--base-channels', type=int, default=16,
-                       help='SegUNet base channels (must match training)')
-    parser.add_argument('--depth', type=int, default=3,
-                       help='SegUNet depth (must match training)')
+    # UNet architecture parameters (must match training)
+    parser.add_argument('--features', type=int, nargs='+', default=[64, 128, 256, 512],
+                       help='UNet feature channels (must match training)')
 
     return parser.parse_args()
 
@@ -361,7 +359,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     print(f"\n{'='*70}")
-    print('4-CHANNEL SegUNet scene scoring (UNLABELED)')
+    print('4-CHANNEL UNet scene scoring (UNLABELED)')
     print(f"{'='*70}")
     print(f"  granule : {args.l0b_file}")
     print(f"  model   : {args.model}")
@@ -371,9 +369,8 @@ def main():
                  f"{args.pulse_end if args.pulse_end is not None else 'full'})")
     print(f"  pulses  : {pulse_str}")
 
-    # Load 4-channel SegUNet model
-    model = SegUNet(in_channels=4, out_channels=1,
-                    base_channels=args.base_channels, depth=args.depth)
+    # Load 4-channel UNet model (same architecture as 2-channel)
+    model = UNet(in_channels=4, out_channels=1, features=args.features)
     checkpoint = torch.load(args.model, map_location=device)
     if isinstance(checkpoint, dict):
         if 'model_state_dict' in checkpoint:
@@ -386,7 +383,7 @@ def main():
         model.load_state_dict(checkpoint)
     model.to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Model loaded: {n_params:,} parameters (4-channel SegUNet)")
+    print(f"  Model loaded: {n_params:,} parameters (4-channel UNet)")
 
     # Open L0B
     raw = Raw(hdf5file=args.l0b_file)
@@ -415,7 +412,7 @@ def main():
     results = {
         'granule': os.path.basename(args.l0b_file),
         'model': args.model,
-        'model_type': '4-channel SegUNet',
+        'model_type': '4-channel UNet',
         'labeled': False,
         'pulse_window': recs[0]['pulse_window'],
         'range_window': recs[0]['range_window'],

@@ -10,7 +10,8 @@ Input representation: [magnitude_db, cos_phase_diff, sin_phase_diff, valid]
 - Channel 2: sin of adjacent-pulse phase difference
 - Channel 3: Validity mask (0 or 1)
 
-This uses the SegUNet architecture from unet.py with GroupNorm instead of BatchNorm.
+This uses the SAME UNet architecture as train_unet_2channel.py for fair comparison.
+The only difference is the input preprocessing (4 channels vs 2 channels).
 
 For 2-channel training (real, imag), see train_unet_2channel.py.
 
@@ -32,8 +33,8 @@ from torch.utils.data import Dataset, DataLoader, Subset
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# Import SegUNet architecture and preprocessing from centralized modules
-from unet import SegUNet
+# Import UNet architecture and preprocessing from centralized modules
+from unet import UNet
 from input_transforms import build_input_channels
 
 
@@ -340,9 +341,8 @@ def main(args):
     print(f"Batches per epoch: {len(train_loader)}\n")
 
     # Model
-    print("Initializing SegUNet (4-channel)...")
-    model = SegUNet(in_channels=4, out_channels=1,
-                    base_channels=args.base_channels, depth=args.depth).to(device)
+    print("Initializing UNet (4-channel)...")
+    model = UNet(in_channels=4, out_channels=1, features=args.features).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters: {n_params:,}\n")
 
@@ -411,8 +411,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=1e-5)
     parser.add_argument('--loss', choices=['bce', 'dice', 'combined'], default='combined')
-    parser.add_argument('--base-channels', type=int, default=16)
-    parser.add_argument('--depth', type=int, default=3)
+    parser.add_argument('--features', type=int, nargs='+', default=[64, 128, 256, 512])
     parser.add_argument('--no-cache', action='store_true', help='Disable RAM caching')
     parser.add_argument('--no-amp', action='store_true', help='Disable mixed precision (AMP)')
     parser.add_argument('--output-dir', default='results/unet')
