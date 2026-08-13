@@ -118,10 +118,7 @@ def build_input_channels(tile: np.ndarray,
                          valid: Optional[np.ndarray] = None,
                          n_channels: int = N_CHANNELS_DEFAULT) -> np.ndarray:
     """
-    Complex time-domain tile to 4-channel network input for SegUNet.
-
-    This is for FUTURE use with train_unet_4channel.py.
-    The current trained model uses prepare_tile_2channel() instead.
+    Complex time-domain tile to multi-channel network input for SegUNet.
 
     Parameters
     ----------
@@ -130,46 +127,50 @@ def build_input_channels(tile: np.ndarray,
     valid : (P, K) bool or None
         ADC gap / subswath validity. None = fully valid.
     n_channels : int, default=4
-        Number of channels: 1 (magnitude only), 3 (magnitude + phase), or 4 (full)
+        Number of channels:
+        - 2: real and imaginary parts (normalized)
+        - 4: magnitude + phase + validity
 
     Returns
     -------
     (n_channels, P, K) float32
-        Channel 0: Floor-relative log magnitude (dB, scaled)
-        Channel 1: cos of adjacent-pulse phase difference (if n_channels >= 3)
-        Channel 2: sin of adjacent-pulse phase difference (if n_channels >= 3)
-        Channel 3: Validity mask (if n_channels == 4)
+        For n_channels == 2:
+            Channel 0: Real part (normalized)
+            Channel 1: Imaginary part (normalized)
+        For n_channels == 4:
+            Channel 0: Floor-relative log magnitude (dB, scaled)
+            Channel 1: cos of adjacent-pulse phase difference
+            Channel 2: sin of adjacent-pulse phase difference
+            Channel 3: Validity mask
     """
     if tile.ndim != 2:
         raise ValueError(f"tile must be 2-D (P, K), got shape {tile.shape}")
-    if n_channels not in (1, 3, 4):
-        raise ValueError(f"n_channels must be 1, 3, or 4, got {n_channels}")
+    if n_channels not in (2, 4):
+        raise ValueError(f"n_channels must be 2 or 4, got {n_channels}")
 
+    # 2 channels: real/imag representation
+    if n_channels == 2:
+        return prepare_tile_2channel(tile, valid)
+
+    # 4 channels: magnitude + phase + validity
     if valid is not None:
         valid = np.asarray(valid, dtype=bool)
         if valid.shape != tile.shape:
             raise ValueError(
                 f"valid mask shape {valid.shape} != tile shape {tile.shape}")
 
-    chans = [_floor_relative_log_magnitude(tile, valid)]
+    mag = _floor_relative_log_magnitude(tile, valid)
+    cos_d, sin_d = _adjacent_pulse_phase_diff(tile)
 
-    if n_channels >= 3:
-        cos_d, sin_d = _adjacent_pulse_phase_diff(tile)
-        chans.extend([cos_d, sin_d])
+    if valid is None:
+        valid_channel = np.ones(tile.shape, dtype=np.float32)
+    else:
+        valid_channel = valid.astype(np.float32)
 
-    if n_channels >= 4:
-        if valid is None:
-            chans.append(np.ones(tile.shape, dtype=np.float32))
-        else:
-            chans.append(valid.astype(np.float32))
+    stacked = np.stack([mag, cos_d, sin_d, valid_channel], axis=0)
 
-    stacked = np.stack(chans, axis=0)
-
-    # Zero the data-derived channels outside the valid window so the network
-    # is not fed the gap's numerical noise. The validity channel itself stays
-    # intact, since that is what tells the network the gap is there.
+    # Zero the data-derived channels outside the valid window
     if valid is not None:
-        n_data = min(n_channels, 3)
-        stacked[:n_data] *= valid.astype(np.float32)[None]
+        stacked[:3] *= valid.astype(np.float32)[None]
 
     return np.ascontiguousarray(stacked)
