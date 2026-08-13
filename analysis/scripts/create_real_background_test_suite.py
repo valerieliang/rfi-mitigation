@@ -323,10 +323,9 @@ def main():
 
     print(f"\nExtracting {len(args.test_indices)} background tiles from range {args.range_start}-{args.range_end}...")
     for pulse_idx, range_start in zip(args.test_indices, range_positions):
-        tile = read_raw_tile(raw, freq, pol, pulse_idx, range_start,
-                            height, width, remover)
-        valid = get_subswath_mask(raw, freq, pol, pulse_idx, range_start,
-                                  height, width)
+        # Note: function signature is (p0, cpi_len, r0, cpi_width)
+        tile = read_raw_tile(raw, freq, pol, pulse_idx, height, range_start, width, remover)
+        valid = get_subswath_mask(raw, freq, pol, pulse_idx, height, range_start, width)
         valid = valid & amplitude_gap_mask(tile)
 
         background_tiles.append(tile)
