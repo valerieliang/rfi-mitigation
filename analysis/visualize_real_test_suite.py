@@ -56,8 +56,9 @@ def main():
     n_cols = 4
     n_rows = (n_cases + n_cols - 1) // n_cols
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4))
-    fig.suptitle('Real-Background Generalization Test Suite', fontsize=16, y=0.995)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 6, n_rows * 5))
+    fig.subplots_adjust(hspace=0.5, wspace=0.3, top=0.96, bottom=0.05)
+    fig.suptitle('Real-Background Generalization Test Suite', fontsize=18, y=0.995)
 
     # Flatten axes for easier indexing
     if n_rows == 1:
@@ -66,13 +67,21 @@ def main():
 
     # Color map
     colors = [
-        '#FFFFFF',  # 0: TN (Correct Background)
-        '#2ECC71',  # 1: TP (Correct Detection)
-        '#E74C3C',  # 2: FP (False Positive)
-        '#F39C12',  # 3: FN (False Negative / Miss)
-        '#95A5A6',  # 4: Invalid Region
+        '#fcfcfb',  # 0: TN (Correct Background)
+        '#0ca30c',  # 1: TP (Correct Detection)
+        '#d03b3b',  # 2: FP (False Positive)
+        '#ec835a',  # 3: FN (False Negative / Miss)
+        '#898781',  # 4: Invalid Region
     ]
     cmap = ListedColormap(colors)
+
+    # Load additional metrics for FP rate calculation
+    tp = data['tp']
+    fp = data['fp']
+    fn = data['fn']
+    tn = data['tn']
+    precision = data['precision']
+    recall = data['recall']
 
     # Plot each test case
     for i in range(n_cases):
@@ -85,17 +94,27 @@ def main():
         ax.imshow(error_map, cmap=cmap, vmin=0, vmax=4, aspect='auto', interpolation='nearest')
 
         # Title with metrics
-        category_marker = 'x' if categories[i] == 'IN-DIST' else '✗'
+        category_marker = '✓' if categories[i] == 'IN-DIST' else '✗'
+        title_color = '#0ca30c' if categories[i] == 'IN-DIST' else '#d03b3b'
         title = f"{category_marker} {categories[i]} | {names[i]}\n"
         if jsr_values is not None:
             title += f"JSR: {jsr_values[i]:.1f} dB | IoU: {iou_scores[i]:.3f} | F1: {f1_scores[i]:.3f}"
         else:
             title += f"IoU: {iou_scores[i]:.3f} | F1: {f1_scores[i]:.3f}"
-        ax.set_title(title, fontsize=9, pad=4)
+        ax.set_title(title, fontsize=10, pad=8, color=title_color, fontweight='bold', linespacing=1.3)
 
-        ax.set_xlabel('Range', fontsize=8)
-        ax.set_ylabel('Pulse', fontsize=8)
-        ax.tick_params(labelsize=7)
+        ax.set_xlabel('Range', fontsize=9)
+        ax.set_ylabel('Pulse', fontsize=9)
+        ax.tick_params(labelsize=8)
+
+        # Add FP rate info box
+        fp_rate = fp[i] / (fp[i] + tn[i]) if (fp[i] + tn[i]) > 0 else 0
+        perf_text = f"P:{precision[i]:.2f} R:{recall[i]:.2f}\nFP rate:{fp_rate*100:.1f}%"
+        bbox_color = '#f0f9f0' if categories[i] == 'IN-DIST' else '#fef0f0'
+        ax.text(0.02, 0.98, perf_text, transform=ax.transAxes, fontsize=8,
+               verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor=bbox_color, alpha=0.9,
+                        edgecolor=title_color, linewidth=1, pad=0.4))
 
     # Hide unused subplots
     for i in range(n_cases, len(axes)):
@@ -103,14 +122,14 @@ def main():
 
     # Create legend
     legend_elements = [
-        mpatches.Patch(facecolor=colors[1], label='Correct Detection (TP)'),
-        mpatches.Patch(facecolor=colors[2], label='False Positive'),
-        mpatches.Patch(facecolor=colors[3], label='False Negative (Miss)'),
-        mpatches.Patch(facecolor=colors[0], label='Correct Background (TN)'),
-        mpatches.Patch(facecolor=colors[4], label='Invalid Region'),
+        mpatches.Patch(color='#0ca30c', label='Correct Detection (TP)'),
+        mpatches.Patch(color='#d03b3b', label='False Positive (predicted RFI, actually clean)'),
+        mpatches.Patch(color='#ec835a', label='False Negative (missed RFI)'),
+        mpatches.Patch(facecolor='#fcfcfb', label='Correct Background (TN)', edgecolor='#898781', linewidth=1),
+        mpatches.Patch(color='#898781', label='Invalid Region'),
     ]
-    fig.legend(handles=legend_elements, loc='lower center',
-               ncol=5, fontsize=10, frameon=True, bbox_to_anchor=(0.5, -0.01))
+    fig.legend(handles=legend_elements, loc='lower center', ncol=3,
+               fontsize=11, frameon=True, bbox_to_anchor=(0.5, 0.00), fancybox=True, shadow=True)
 
     plt.tight_layout(rect=[0, 0.02, 1, 0.99])
 

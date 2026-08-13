@@ -351,8 +351,8 @@ def main():
     n_cols = 4
     n_rows = (n_cases + n_cols - 1) // n_cols
 
-    fig = plt.figure(figsize=(20, n_rows * 3.5))
-    gs = fig.add_gridspec(n_rows, n_cols, hspace=0.4, wspace=0.25)
+    fig = plt.figure(figsize=(24, n_rows * 4.5))
+    gs = fig.add_gridspec(n_rows, n_cols, hspace=0.5, wspace=0.3, top=0.96, bottom=0.05)
 
     colors = ['#fcfcfb', '#0ca30c', '#d03b3b', '#ec835a', '#898781']
     cmap = ListedColormap(colors)
@@ -370,35 +370,40 @@ def main():
         title_color = '#0ca30c' if case['category'] == 'IN-DIST' else '#d03b3b'
         category_label = '✓ IN-DIST' if case['category'] == 'IN-DIST' else '✗ OOD'
 
+        # Split into multiple lines to avoid overlap
         ax.set_title(f"{case['name']}\n{category_label} | {case['description']}\n"
                     f"IoU: {metrics['iou']:.3f} | F1: {metrics['f1']:.3f}",
-                    fontsize=9, fontweight='bold', pad=8, color=title_color)
+                    fontsize=10, fontweight='bold', pad=10, color=title_color,
+                    linespacing=1.3)
 
-        ax.set_xlabel('Range', fontsize=8)
-        ax.set_ylabel('Pulse', fontsize=8)
-        ax.tick_params(labelsize=7)
+        ax.set_xlabel('Range', fontsize=9)
+        ax.set_ylabel('Pulse', fontsize=9)
+        ax.tick_params(labelsize=8)
 
-        perf_text = f"P:{metrics['precision']:.2f} R:{metrics['recall']:.2f}"
+        # Add FP rate to help explain the red regions
+        fp_rate = metrics['fp'] / (metrics['fp'] + metrics['tn']) if (metrics['fp'] + metrics['tn']) > 0 else 0
+        perf_text = f"P:{metrics['precision']:.2f} R:{metrics['recall']:.2f}\nFP rate:{fp_rate*100:.1f}%"
         bbox_color = '#f0f9f0' if case['category'] == 'IN-DIST' else '#fef0f0'
-        ax.text(0.02, 0.98, perf_text, transform=ax.transAxes, fontsize=7,
+        ax.text(0.02, 0.98, perf_text, transform=ax.transAxes, fontsize=8,
                verticalalignment='top',
                bbox=dict(boxstyle='round', facecolor=bbox_color, alpha=0.9,
-                        edgecolor=title_color, linewidth=1, pad=0.3))
+                        edgecolor=title_color, linewidth=1, pad=0.4))
 
     # Legend
     legend_elements = [
         mpatches.Patch(color='#0ca30c', label='Correct Detection (TP)'),
-        mpatches.Patch(color='#d03b3b', label='False Positive'),
-        mpatches.Patch(color='#ec835a', label='False Negative'),
-        mpatches.Patch(facecolor='#fcfcfb', label='Correct Background', edgecolor='#898781', linewidth=1),
+        mpatches.Patch(color='#d03b3b', label='False Positive (predicted RFI, actually clean)'),
+        mpatches.Patch(color='#ec835a', label='False Negative (missed RFI)'),
+        mpatches.Patch(facecolor='#fcfcfb', label='Correct Background (TN)', edgecolor='#898781', linewidth=1),
         mpatches.Patch(color='#898781', label='Invalid Region'),
     ]
 
-    fig.legend(handles=legend_elements, loc='lower center', ncol=5,
-              frameon=False, fontsize=10, bbox_to_anchor=(0.5, -0.015))
+    fig.legend(handles=legend_elements, loc='lower center', ncol=3,
+              frameon=True, fontsize=11, bbox_to_anchor=(0.5, 0.00),
+              fancybox=True, shadow=True)
 
     fig.suptitle(f'{args.n_channels}-Channel UNet Generalization Test Suite: In-Distribution vs Out-of-Distribution Patterns',
-                fontsize=16, fontweight='bold', y=0.995)
+                fontsize=18, fontweight='bold', y=0.995)
 
     # Save
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
